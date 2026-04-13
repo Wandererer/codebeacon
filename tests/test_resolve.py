@@ -55,7 +55,7 @@ class TestSymbolTable:
         assert edge is not None
         assert edge.relation == "injects"
         assert edge.confidence == "EXTRACTED"
-        assert edge.target == "UserService"
+        assert edge.target == "src/Foo.java::UserService"
 
     def test_interface_impl_resolution(self):
         """Ref to an interface resolves to its impl with INFERRED confidence."""
@@ -66,7 +66,7 @@ class TestSymbolTable:
         ref = _make_ref("Caller", "UserService")
         edge = st.resolve_ref(ref)
         assert edge is not None
-        assert edge.target == "UserServiceImpl"
+        assert edge.target == "src/Foo.java::UserServiceImpl"
         assert edge.confidence == "INFERRED"
         assert edge.confidence_score < 1.0
 
@@ -81,7 +81,7 @@ class TestSymbolTable:
         ref = _make_ref("Caller", "AlertService")
         edge = st.resolve_ref(ref)
         assert edge is not None
-        assert edge.target == "AlertServiceImpl"
+        assert edge.target == "src/Foo.java::AlertServiceImpl"
 
     def test_unresolved_returns_none(self):
         """Ref to unknown class returns None."""
@@ -101,7 +101,7 @@ class TestSymbolTable:
         resolved, unresolved = st.resolve_all(refs)
         assert len(resolved) == 1
         assert len(unresolved) == 1
-        assert resolved[0].target == "RealService"
+        assert resolved[0].target == "src/Foo.java::RealService"
         assert unresolved[0].ref_name == "GhostService"
 
     def test_empty_build(self):
@@ -120,4 +120,4 @@ class TestSymbolTable:
         ref = _make_ref("Caller", "BaseService")
         edge = st.resolve_ref(ref)
         assert edge is not None
-        assert edge.target == "ChildService"
+        assert edge.target == "src/Foo.java::ChildService"

@@ -8,8 +8,35 @@ Two enrichment passes run AFTER the base graph is built by build.py:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import networkx as nx
+
+
+# Regexes to extract API URLs from frontend source files
+_API_URL_RES = [
+    re.compile(r'''(?:fetch|invoke|\$fetch)\s*\(\s*[`"']([^`"'$]+)[`"']'''),
+    re.compile(r'''axios\.\w+\s*\(\s*[`"']([^`"'$]+)[`"']'''),
+    re.compile(r'''(?:api|http|client)\.\w+\s*\(\s*[`"']([^`"'$]+)[`"']'''),
+    re.compile(r'''url\s*[:=]\s*[`"']([^`"'$]+)[`"']'''),
+    re.compile(r'''["'](/api/[^"'`\s]+)["'`]'''),
+]
+_URL_LIKE = re.compile(r'^/[a-zA-Z]')
+
+
+def _extract_api_urls(source_file: str) -> list[str]:
+    """Scan a source file for HTTP API URL patterns."""
+    try:
+        content = Path(source_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    urls: set[str] = set()
+    for pat in _API_URL_RES:
+        for m in pat.finditer(content):
+            url = m.group(1).split("?")[0].split("#")[0].strip()
+            if _URL_LIKE.match(url):
+                urls.add(url)
+    return list(urls)
 
 
 def enrich_http_api(G: nx.DiGraph) -> int:
@@ -17,7 +44,7 @@ def enrich_http_api(G: nx.DiGraph) -> int:
 
     Strategy:
     - Collect all 'route' nodes with their path attribute
-    - Collect all component/class nodes that declare api_calls in metadata
+    - For each frontend component, scan its source file for API URL patterns
     - Match URLs to routes: exact first, then parameterized
 
     Returns:
@@ -25,34 +52,43 @@ def enrich_http_api(G: nx.DiGraph) -> int:
     """
     added = 0
 
-    # Build route lookup: normalized_path → node_id
-    route_map: dict[str, str] = {}
+    # Build route lookup: normalized_path → (node_id, project)
+    route_map: dict[str, tuple[str, str]] = {}
     for node_id, data in G.nodes(data=True):
         if data.get("type") != "route":
             continue
         path = data.get("path", "")
         if path:
-            route_map[_normalize_path(path)] = node_id
+            proj = data.get("project", "")
+            route_map[_normalize_path(path)] = (node_id, proj)
 
     if not route_map:
         return 0
 
-    # Find frontend nodes that declare api_calls
+    # Find component/class nodes and scan their source for API calls
     for node_id, data in G.nodes(data=True):
         if data.get("type") not in ("component", "class"):
             continue
-        api_calls = data.get("api_calls", [])
-        if not api_calls:
-            continue
+        src_proj = data.get("project", "")
 
         src_file = data.get("source_file", "")
+        if not src_file:
+            continue
+
+        # Use metadata api_calls if set, otherwise scan file
+        api_calls = data.get("api_calls", [])
+        if not api_calls:
+            api_calls = _extract_api_urls(src_file)
 
         for url in api_calls:
             normalized = _normalize_path(url)
 
             # Exact match
             if normalized in route_map:
-                target_id = route_map[normalized]
+                target_id, target_proj = route_map[normalized]
+                # Only create cross-project edges (skip same-project)
+                if target_proj == src_proj:
+                    continue
                 if not G.has_edge(node_id, target_id):
                     G.add_edge(
                         node_id, target_id,
@@ -65,7 +101,9 @@ def enrich_http_api(G: nx.DiGraph) -> int:
                 continue
 
             # Parameterized match: /api/users/123 → /api/users/:id
-            for route_path, route_node_id in route_map.items():
+            for route_path, (route_node_id, route_proj) in route_map.items():
+                if route_proj == src_proj:
+                    continue
                 if _paths_match(normalized, route_path):
                     if not G.has_edge(node_id, route_node_id):
                         G.add_edge(

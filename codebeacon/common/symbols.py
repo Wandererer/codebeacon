@@ -39,8 +39,8 @@ class SymbolTable:
             label = node.label
             if label not in self._class_map:
                 self._class_map[label] = []
-            if node.source_file not in self._class_map[label]:
-                self._class_map[label].append(node.source_file)
+            if node.id not in self._class_map[label]:
+                self._class_map[label].append(node.id)
 
             # Register implements/extends relationships from metadata
             meta = node.metadata or {}
@@ -75,20 +75,23 @@ class SymbolTable:
         if target_name not in self._class_map:
             return None
 
-        source_file = (
-            ref.source_node_id.split("::")[1]
-            if "::" in ref.source_node_id
-            else ref.source_node_id
-        )
+        # _class_map now stores node IDs; pick same-project target when possible
+        target_node_ids = self._class_map[target_name]
+        target_id = target_node_ids[0]
+        source_project = ref.source_node_id.split("::")[0] if "::" in ref.source_node_id else ""
+        for nid in target_node_ids:
+            if nid.startswith(source_project + "::"):
+                target_id = nid
+                break
 
         is_interface_resolved = target_name != ref.ref_name
         return Edge(
             source=ref.source_node_id,
-            target=target_name,
+            target=target_id,
             relation="injects",
             confidence="INFERRED" if is_interface_resolved else "EXTRACTED",
             confidence_score=0.8 if is_interface_resolved else 1.0,
-            source_file=source_file,
+            source_file=ref.source_node_id,
         )
 
     def resolve_all(

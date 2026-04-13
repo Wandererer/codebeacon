@@ -37,6 +37,7 @@ import networkx as nx
 # ── Regexes ────────────────────────────────────────────────────────────────────
 
 _SOURCE_RE   = re.compile(r'^source_file:\s*["\']([^"\']*)["\']', re.MULTILINE)
+_PROJECT_RE  = re.compile(r'^community:\s*["\']([^"\']*)["\']', re.MULTILINE)
 _COMM_FRONT  = re.compile(r'^community:\s*["\'][^"\']*["\']', re.MULTILINE)
 _COMM_YAML   = re.compile(r'  - community/[^\n]+\n')
 _COMM_BODY   = re.compile(r'#community/\S+')
@@ -449,8 +450,8 @@ def _step4_fix_community_tags(vault: Path) -> None:
 
     for md in vault.glob("*.md"):
         content = md.read_text(errors="ignore")
-        m = _SOURCE_RE.search(content)
-        folder = m.group(1).split("/")[0] if m and m.group(1) else None
+        m = _PROJECT_RE.search(content)
+        folder = m.group(1) if m and m.group(1) else None
 
         new_c = content
         if folder:
@@ -473,8 +474,8 @@ def _step5_move_to_subfolders(vault: Path) -> None:
 
     for md in list(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
-        m = _SOURCE_RE.search(content)
-        folder = m.group(1).split("/")[0] if m and m.group(1) else "_unknown"
+        m = _PROJECT_RE.search(content)
+        folder = m.group(1) if m and m.group(1) else "_unknown"
 
         dest_dir = vault / folder
         dest_dir.mkdir(exist_ok=True)
@@ -601,9 +602,9 @@ def _step8_move_remaining(vault: Path) -> None:
 
     for md in list(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
-        m = _SOURCE_RE.search(content)
+        m = _PROJECT_RE.search(content)
         if m and m.group(1):
-            svc = m.group(1).split("/")[0]
+            svc = m.group(1)
             dest_dir = vault / svc
             dest_dir.mkdir(exist_ok=True)
             dest = dest_dir / md.name

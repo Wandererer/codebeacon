@@ -54,6 +54,9 @@ def build_graph(
         project_name = wave.project.name
         _ingest_wave(wave, project_name, all_nodes, all_edges, all_unresolved, service_roots)
 
+    # Remap import edges: file_path → raw_import  ➜  node_id → node_id
+    all_edges = _remap_import_edges(all_nodes, all_edges)
+
     # Pass 2: resolve DI references
     symbol_table = SymbolTable()
     symbol_table.build(all_nodes)
@@ -181,6 +184,84 @@ def _ingest_wave(
     all_edges.extend(wave.import_edges)
     # Remaining unresolved refs from Pass 1 (e.g. @Autowired)
     all_unresolved.extend(wave.unresolved)
+
+
+# ── Import edge remapping ────────────────────────────────────────────────────
+
+def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Edge]:
+    """Remap import edges from file_path → raw_import to node_id → node_id.
+
+    dependencies.py emits Edge(source=file_path, target=raw_import_string).
+    Graph nodes use IDs like "project::ClassName".  This function bridges the
+    two by building reverse maps and resolving both sides.
+    """
+    # source_file → [node_id, ...]
+    file_to_nodes: dict[str, list[str]] = {}
+    # label (class/component name) → [node_id, ...]
+    label_to_nodes: dict[str, list[str]] = {}
+
+    for node in all_nodes:
+        file_to_nodes.setdefault(node.source_file, []).append(node.id)
+        label_to_nodes.setdefault(node.label, []).append(node.id)
+
+    remapped: list[Edge] = []
+    non_import: list[Edge] = []
+
+    for edge in all_edges:
+        if edge.relation != "imports_from":
+            non_import.append(edge)
+            continue
+
+        # Resolve source: file_path → node_ids in that file
+        source_ids = file_to_nodes.get(edge.source, [])
+        if not source_ids:
+            continue
+
+        # Resolve target: raw import string → node_id via label matching
+        target_label = _import_to_label(edge.target)
+        target_ids = label_to_nodes.get(target_label, [])
+        if not target_ids:
+            continue
+
+        for src_id in source_ids:
+            src_project = src_id.split("::")[0] if "::" in src_id else ""
+            # Prefer same-project target
+            target_id = target_ids[0]
+            for tid in target_ids:
+                if tid.startswith(src_project + "::"):
+                    target_id = tid
+                    break
+            if src_id != target_id:
+                remapped.append(Edge(
+                    source=src_id,
+                    target=target_id,
+                    relation=edge.relation,
+                    confidence=edge.confidence,
+                    confidence_score=edge.confidence_score,
+                    source_file=edge.source_file,
+                ))
+
+    return non_import + remapped
+
+
+def _import_to_label(raw_import: str) -> str:
+    """Extract a class/component name from a raw import string.
+
+    Examples:
+        "@/components/Button"           → "Button"
+        "com.example.service.UserSvc"   → "UserSvc"
+        "../auth/AuthService"           → "AuthService"
+        "./UserPage"                    → "UserPage"
+    """
+    # Java-style package: no slashes, dots as separators
+    if "." in raw_import and "/" not in raw_import:
+        return raw_import.rsplit(".", 1)[-1]
+    # Path-style: take last segment
+    name = raw_import.rsplit("/", 1)[-1]
+    # Strip file extension
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name
 
 
 # ── NetworkX construction ─────────────────────────────────────────────────────
