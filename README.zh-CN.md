@@ -231,6 +231,14 @@ codebeacon 不是两个工具的替代品，而是两者的统合——在共享
 
 ---
 
+## 基准测试
+
+| 代码库 | 技术栈 | 文件数 | 节点 | 边 | 社区 | 扫描时间 |
+|-------|-------|-------|-----|---|-----|---------|
+| multi-service SaaS app | SvelteKit + Next.js + Spring Boot (3个项目) | 444 | 382 | 553 | 175 | ~12s |
+
+---
+
 ## 隐私与安全
 
 所有处理均在本地完成。源代码不会离开你的设备。
@@ -246,7 +254,7 @@ codebeacon 不是两个工具的替代品，而是两者的统合——在共享
 ```bash
 git clone https://github.com/codebeacon/codebeacon
 cd codebeacon
-pip install -e ".[dev,all,cluster]"
+pip install -e ".[dev,cluster]"
 pytest
 ```
 

@@ -232,11 +232,9 @@ codebeacon is not a replacement for either tool — it's the union of what both 
 
 ## Benchmarks
 
-Benchmarks will be published as the tool matures. Initial scans on medium-sized projects (50–200 source files) complete in under 30 seconds. Incremental rescans of unchanged codebases are near-instant due to SHA-256 caching.
-
-| Codebase | Files | Nodes | Edges | Communities | Scan time |
-|----------|-------|-------|-------|-------------|-----------|
-| *(coming soon)* | | | | | |
+| Codebase | Stack | Files | Nodes | Edges | Communities | Scan time |
+|----------|-------|-------|-------|-------|-------------|-----------|
+| multi-service SaaS app | SvelteKit + Next.js + Spring Boot (3 projects) | 444 | 382 | 553 | 175 | ~12s |
 
 ---
 

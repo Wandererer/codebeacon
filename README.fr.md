@@ -180,6 +180,14 @@ codebeacon install                        # installer le skill Claude Code
 
 ---
 
+## Benchmarks
+
+| Base de code | Stack | Fichiers | Nœuds | Arêtes | Communautés | Temps de scan |
+|-------------|-------|----------|-------|--------|-------------|---------------|
+| multi-service SaaS app | SvelteKit + Next.js + Spring Boot (3 projets) | 444 | 382 | 553 | 175 | ~12s |
+
+---
+
 ## Confidentialité et sécurité
 
 Tout le traitement est local. Le code source ne quitte jamais votre machine. Aucune télémétrie ni appel réseau pendant le fonctionnement normal.
@@ -191,7 +199,7 @@ Tout le traitement est local. Le code source ne quitte jamais votre machine. Auc
 ```bash
 git clone https://github.com/codebeacon/codebeacon
 cd codebeacon
-pip install -e ".[dev,all,cluster]"
+pip install -e ".[dev,cluster]"
 pytest
 ```
 
