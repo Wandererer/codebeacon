@@ -1,0 +1,26 @@
+version: 1
+
+projects:
+  - name: api-server
+    path: ./api-server
+    type: spring-boot                    # 자동감지 가능, 명시도 가능
+
+  - name: frontend
+    path: ./frontend
+    type: react
+
+output:
+  dir: .codebeacon
+  wiki: true
+  obsidian: true
+  graph_html: true
+  context_map:
+    targets: [CLAUDE.md, .cursorrules, AGENTS.md]
+
+wave:
+  auto: true
+  chunk_size: 300
+  max_parallel: 5
+
+semantic:
+  enabled: false                         # --semantic 플래그로 override
