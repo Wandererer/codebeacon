@@ -39,7 +39,7 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 
 - **Unified pipeline** — route/controller analysis + knowledge graph in one tool, no manual stitching
 - **17 frameworks, 9 languages** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor, and more
-- **Tree-sitter based** — structural AST parsing, not regex; optional language deps keep install lightweight
+- **Tree-sitter based** — structural AST parsing, not regex; all 17 language grammars included out of the box
 - **Two-pass DI resolution** — Pass 1 extracts local AST nodes; Pass 2 builds a global symbol table and resolves Interface → Implementation mappings that single-pass tools miss
 - **Wave merge architecture** — files processed in parallel chunks, results merged globally; handles large monorepos without memory blowouts
 - **Multiple output formats** — JSON knowledge graph, Markdown wiki, Obsidian vault, AI context maps, MCP server
@@ -53,7 +53,6 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # all language parsers
 
 codebeacon scan .
 ```
@@ -137,16 +136,13 @@ After a scan, everything lands in `.codebeacon/`:
 
 ## Installation Options
 
-Install only the language parsers you need:
-
 ```bash
-pip install codebeacon                      # core only (Python projects work out of the box)
-pip install codebeacon[java,python,js]      # specific language support
-pip install codebeacon[all]                 # all language parsers
-pip install codebeacon[all,cluster]         # + Leiden community detection (graspologic)
+pip install codebeacon              # all 17 language grammars included
+pip install codebeacon[cluster]     # + Leiden community detection (graspologic)
+pip install --upgrade codebeacon    # upgrade to latest version with all dependencies
 ```
 
-Available language extras: `java`, `kotlin`, `python`, `js`, `go`, `ruby`, `php`, `csharp`, `rust`, `swift`, `html`, `svelte`
+All language parsers (Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML, Svelte) are bundled by default — no extra flags needed.
 
 ---
 
@@ -259,7 +255,7 @@ All processing is local. Your source code never leaves your machine.
 ```bash
 git clone https://github.com/codebeacon/codebeacon
 cd codebeacon
-pip install -e ".[dev,all,cluster]"
+pip install -e ".[dev,cluster]"
 pytest
 ```
 

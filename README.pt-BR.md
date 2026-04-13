@@ -41,7 +41,7 @@ As ferramentas existentes resolvem isso apenas parcialmente. Analisadores de rot
 
 - **Pipeline unificado** — análise de rotas/controladores + knowledge graph em uma só ferramenta, sem junção manual
 - **17 frameworks, 9 linguagens** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor e mais
-- **Baseado em tree-sitter** — análise AST estrutural, não regex; dependências de linguagem opcionais para instalação leve
+- **Baseado em tree-sitter** — análise AST estrutural, não regex; 17 gramáticas de linguagem incluídas por padrão
 - **Resolução DI em 2 passos** — Pass 1 extrai nós AST locais; Pass 2 constrói uma tabela de símbolos global e resolve mapeamentos Interface → Implementation
 - **Arquitetura Wave merge** — arquivos processados em chunks paralelos e mesclados globalmente; lida com grandes monorepos sem problemas de memória
 - **Múltiplos formatos de saída** — knowledge graph JSON, wiki Markdown, Obsidian Vault, mapas de contexto para IA, servidor MCP
@@ -55,7 +55,6 @@ As ferramentas existentes resolvem isso apenas parcialmente. Analisadores de rot
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # todos os parsers de linguagem
 
 codebeacon scan .
 ```
@@ -133,11 +132,12 @@ Após o scan, tudo é gerado em `.codebeacon/`:
 ## Opções de instalação
 
 ```bash
-pip install codebeacon                      # apenas o núcleo
-pip install codebeacon[java,python,js]      # linguagens específicas
-pip install codebeacon[all]                 # todos os parsers
-pip install codebeacon[all,cluster]         # + detecção Leiden (graspologic)
+pip install codebeacon              # 17 gramáticas de linguagem incluídas
+pip install codebeacon[cluster]     # + detecção de comunidades Leiden (graspologic)
+pip install --upgrade codebeacon    # atualizar para a versão mais recente com todas as dependências
 ```
+
+Os parsers de Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML e Svelte são incluídos por padrão.
 
 ---
 

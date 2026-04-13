@@ -41,7 +41,7 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 
 - **통합 파이프라인** — 라우트/컨트롤러 분석 + 지식 그래프를 하나의 도구로, 수동 연결 불필요
 - **17개 프레임워크, 9개 언어** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor 등
-- **tree-sitter 기반** — 정규식이 아닌 구조적 AST 파싱; 언어별 선택 설치로 설치 용량 최소화
+- **tree-sitter 기반** — 정규식이 아닌 구조적 AST 파싱; 17개 언어 그래머 기본 포함
 - **2-패스 DI 해결** — Pass 1에서 로컬 AST 노드 추출, Pass 2에서 전역 심볼 테이블로 Interface → Implementation 매핑 해결
 - **Wave 병합 아키텍처** — 파일을 병렬 청크로 처리 후 전역 병합; 대형 모노레포도 메모리 폭발 없이 처리
 - **다양한 출력 형식** — JSON 지식 그래프, 마크다운 위키, Obsidian 볼트, AI 컨텍스트 맵, MCP 서버
@@ -55,7 +55,6 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # 모든 언어 파서
 
 codebeacon scan .
 ```
@@ -138,16 +137,13 @@ codebeacon은 2-패스 추출 파이프라인으로 동작합니다:
 
 ## 설치 옵션
 
-필요한 언어 파서만 선택적으로 설치합니다:
-
 ```bash
-pip install codebeacon                      # 코어만 (Python 프로젝트는 기본 동작)
-pip install codebeacon[java,python,js]      # 특정 언어 지원
-pip install codebeacon[all]                 # 모든 언어 파서
-pip install codebeacon[all,cluster]         # + Leiden 커뮤니티 감지 (graspologic)
+pip install codebeacon              # 17개 언어 그래머 기본 포함
+pip install codebeacon[cluster]     # + Leiden 커뮤니티 감지 (graspologic)
+pip install --upgrade codebeacon    # 최신 버전 + 의존성 함께 업데이트
 ```
 
-사용 가능한 언어 extras: `java`, `kotlin`, `python`, `js`, `go`, `ruby`, `php`, `csharp`, `rust`, `swift`, `html`, `svelte`
+Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML, Svelte 파서가 기본 설치됩니다 — 별도 플래그 불필요.
 
 ---
 

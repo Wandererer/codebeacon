@@ -41,7 +41,7 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 
 - **Pipeline unificado** — análisis de rutas/controladores + grafo de conocimiento en una sola herramienta
 - **17 frameworks, 9 lenguajes** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor y más
-- **Basado en tree-sitter** — análisis AST estructural, no expresiones regulares; dependencias de lenguaje opcionales para instalación ligera
+- **Basado en tree-sitter** — análisis AST estructural, no expresiones regulares; 17 gramáticas de lenguaje incluidas por defecto
 - **Resolución DI en 2 pasos** — Pass 1 extrae nodos AST locales; Pass 2 construye una tabla de símbolos global y resuelve los mapeos Interface → Implementation
 - **Arquitectura Wave merge** — archivos procesados en chunks paralelos y fusionados globalmente; maneja grandes monorepos sin problemas de memoria
 - **Múltiples formatos de salida** — grafo JSON, wiki Markdown, Obsidian Vault, mapas de contexto para IA, servidor MCP
@@ -55,7 +55,6 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # todos los parsers de lenguaje
 
 codebeacon scan .
 ```
@@ -133,11 +132,12 @@ Después del escaneo, todo se genera en `.codebeacon/`:
 ## Opciones de instalación
 
 ```bash
-pip install codebeacon                      # solo el núcleo
-pip install codebeacon[java,python,js]      # lenguajes específicos
-pip install codebeacon[all]                 # todos los parsers
-pip install codebeacon[all,cluster]         # + detección Leiden (graspologic)
+pip install codebeacon              # 17 gramáticas de lenguaje incluidas
+pip install codebeacon[cluster]     # + detección de comunidades Leiden (graspologic)
+pip install --upgrade codebeacon    # actualizar a la última versión con todas las dependencias
 ```
+
+Los parsers de Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML y Svelte se incluyen por defecto.
 
 ---
 

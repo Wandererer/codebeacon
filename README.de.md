@@ -41,7 +41,7 @@ Bestehende Tools lösen dieses Problem nur teilweise. Route-Analyzer erfassen Ih
 
 - **Einheitliche Pipeline** — Routes-/Controller-Analyse + Knowledge Graph in einem Tool, kein manuelles Zusammenführen
 - **17 Frameworks, 9 Sprachen** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor und mehr
-- **Auf tree-sitter basierend** — strukturelles AST-Parsing, keine Regex; optionale Sprachabhängigkeiten für schlanke Installation
+- **Auf tree-sitter basierend** — strukturelles AST-Parsing, keine Regex; 17 Sprachgrammatiken standardmäßig enthalten
 - **2-Pass DI-Auflösung** — Pass 1 extrahiert lokale AST-Knoten; Pass 2 baut eine globale Symboltabelle auf und löst Interface → Implementation-Mappings auf
 - **Wave-Merge-Architektur** — Dateien werden in parallelen Chunks verarbeitet und global zusammengeführt; auch große Monorepos ohne Speicherprobleme
 - **Mehrere Ausgabeformate** — JSON-Knowledge-Graph, Markdown-Wiki, Obsidian Vault, KI-Kontextkarten, MCP-Server
@@ -55,7 +55,6 @@ Bestehende Tools lösen dieses Problem nur teilweise. Route-Analyzer erfassen Ih
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # alle Sprachparser
 
 codebeacon scan .
 ```
@@ -134,11 +133,12 @@ Nach dem Scan landet alles in `.codebeacon/`:
 ## Installationsoptionen
 
 ```bash
-pip install codebeacon                      # nur Kern
-pip install codebeacon[java,python,js]      # bestimmte Sprachen
-pip install codebeacon[all]                 # alle Parser
-pip install codebeacon[all,cluster]         # + Leiden-Community-Erkennung (graspologic)
+pip install codebeacon              # 17 Sprachgrammatiken inklusive
+pip install codebeacon[cluster]     # + Leiden-Community-Erkennung (graspologic)
+pip install --upgrade codebeacon    # auf die neueste Version mit allen Abhängigkeiten aktualisieren
 ```
+
+Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML und Svelte sind standardmäßig enthalten.
 
 ---
 

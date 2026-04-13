@@ -41,7 +41,7 @@
 
 - **统一流水线** — 路由/控制器分析 + 知识图谱集于一体，无需手动拼接
 - **17 个框架，9 种语言** — Spring Boot、NestJS、Django、FastAPI、Rails、Express、React、Vue、Angular、Svelte、Gin、Laravel、Actix-Web、ASP.NET Core、Vapor、Ktor 等
-- **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；按语言可选安装，保持轻量
+- **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；17 种语言语法默认内置
 - **两阶段依赖注入解析** — Pass 1 提取本地 AST 节点；Pass 2 构建全局符号表，解析单阶段工具遗漏的接口→实现映射
 - **Wave 合并架构** — 文件以并行块处理后全局合并；大型单仓库也不会出现内存问题
 - **多种输出格式** — JSON 知识图谱、Markdown Wiki、Obsidian Vault、AI 上下文映射、MCP 服务器
@@ -55,7 +55,6 @@
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # 所有语言解析器
 
 codebeacon scan .
 ```
@@ -138,16 +137,13 @@ codebeacon 运行两阶段提取流水线：
 
 ## 安装选项
 
-只安装所需的语言解析器：
-
 ```bash
-pip install codebeacon                      # 仅核心（Python 项目开箱即用）
-pip install codebeacon[java,python,js]      # 特定语言支持
-pip install codebeacon[all]                 # 所有语言解析器
-pip install codebeacon[all,cluster]         # + Leiden 社区检测（graspologic）
+pip install codebeacon              # 默认内置 17 种语言语法
+pip install codebeacon[cluster]     # + Leiden 社区检测（graspologic）
+pip install --upgrade codebeacon    # 升级到最新版本并同步更新依赖
 ```
 
-可用语言 extras：`java`、`kotlin`、`python`、`js`、`go`、`ruby`、`php`、`csharp`、`rust`、`swift`、`html`、`svelte`
+Java、Kotlin、Python、JavaScript、TypeScript、Go、Ruby、PHP、C#、Rust、Swift、HTML、Svelte 解析器均默认安装，无需额外标志。
 
 ---
 

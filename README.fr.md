@@ -41,7 +41,7 @@ Les outils existants ne résolvent ce problème qu'en partie. Les analyseurs de 
 
 - **Pipeline unifié** — analyse routes/contrôleurs + knowledge graph en un seul outil
 - **17 frameworks, 9 langages** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor et plus
-- **Basé sur tree-sitter** — analyse AST structurelle, pas de regex ; dépendances de langage optionnelles pour rester léger
+- **Basé sur tree-sitter** — analyse AST structurelle, pas de regex ; 17 grammaires de langage incluses par défaut
 - **Résolution DI en 2 passes** — Pass 1 extrait les nœuds AST locaux ; Pass 2 construit une table de symboles globale et résout les mappings Interface → Implementation
 - **Architecture Wave merge** — fichiers traités en chunks parallèles puis fusionnés globalement ; gère les grands monorepos sans problème mémoire
 - **Formats de sortie multiples** — knowledge graph JSON, wiki Markdown, Obsidian Vault, cartes de contexte IA, serveur MCP
@@ -55,7 +55,6 @@ Les outils existants ne résolvent ce problème qu'en partie. Les analyseurs de 
 
 ```bash
 pip install codebeacon
-pip install codebeacon[all]   # tous les parsers de langage
 
 codebeacon scan .
 ```
@@ -133,11 +132,12 @@ Après le scan, tout est généré dans `.codebeacon/` :
 ## Options d'installation
 
 ```bash
-pip install codebeacon                      # noyau seul
-pip install codebeacon[java,python,js]      # langages spécifiques
-pip install codebeacon[all]                 # tous les parsers
-pip install codebeacon[all,cluster]         # + détection Leiden (graspologic)
+pip install codebeacon              # 17 grammaires de langage incluses
+pip install codebeacon[cluster]     # + détection de communautés Leiden (graspologic)
+pip install --upgrade codebeacon    # mettre à jour vers la dernière version avec toutes les dépendances
 ```
+
+Les parsers Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HTML et Svelte sont inclus par défaut.
 
 ---
 
