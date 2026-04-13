@@ -129,6 +129,12 @@ def extract_routes(
         return convention
     root, lang = parsed
 
+    # Skip queries where the file's grammar is incompatible with the query.
+    # e.g. Rust files in a sveltekit project, JS files for TypeScript-only queries.
+    from codebeacon.extract.base import is_grammar_allowed
+    if not is_grammar_allowed(query_name, lang):
+        return convention
+
     # 3. Run query once, then dispatch to per-framework interpreter
     try:
         matches = run_query(lang, query_src, root)

@@ -38,6 +38,34 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "svelte":     "tree_sitter_svelte",
 }
 
+# Query files that are only valid for specific grammar families.
+# Keys are query file stems (e.g. "nestjs"); values are sets of grammar names
+# that the query can compile against. If a file's grammar is not in this set,
+# the extractor skips running the query rather than emitting a warning.
+QUERY_GRAMMAR_ALLOWLIST: dict[str, frozenset[str]] = {
+    # TypeScript/JavaScript families
+    "react":       frozenset({"typescript", "tsx", "javascript"}),
+    "svelte":      frozenset({"typescript", "tsx", "javascript"}),
+    "nestjs":      frozenset({"typescript", "tsx"}),
+    "angular":     frozenset({"typescript", "tsx"}),
+    "express":     frozenset({"typescript", "tsx", "javascript"}),
+    "vue":         frozenset({"typescript", "tsx", "javascript"}),
+    # Python families
+    "fastapi":     frozenset({"python"}),
+    "django":      frozenset({"python"}),
+    "flask":       frozenset({"python"}),
+    # JVM families
+    "spring_boot": frozenset({"java", "kotlin"}),
+    "ktor":        frozenset({"kotlin"}),
+    # Other single-language families
+    "gin":         frozenset({"go"}),
+    "rails":       frozenset({"ruby"}),
+    "laravel":     frozenset({"php"}),
+    "aspnet":      frozenset({"csharp"}),
+    "actix":       frozenset({"rust"}),
+    "vapor":       frozenset({"swift"}),
+}
+
 # Extensions that map to a grammar name
 EXT_TO_GRAMMAR: dict[str, str] = {
     ".py":    "python",
@@ -61,6 +89,22 @@ EXT_TO_GRAMMAR: dict[str, str] = {
     # Vue: SFC section extraction → use typescript + html
     ".vue":   "_vue_sfc",
 }
+
+
+def is_grammar_allowed(query_name: str, lang: Language) -> bool:
+    """Return True if *lang* is compatible with the given query file.
+
+    Uses QUERY_GRAMMAR_ALLOWLIST; if the query is not listed, all grammars are
+    allowed (unknown queries fall through gracefully).
+    """
+    allowed = QUERY_GRAMMAR_ALLOWLIST.get(query_name)
+    if allowed is None:
+        return True  # no restriction defined — attempt the query
+    # Reverse-lookup the grammar name from the cached Language object
+    gram_name = next((k for k, v in _LANG_CACHE.items() if v is lang), None)
+    if gram_name is None:
+        return True  # can't determine — let it run
+    return gram_name in allowed
 
 
 def get_language(name: str) -> Optional[Language]:

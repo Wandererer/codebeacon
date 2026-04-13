@@ -86,6 +86,10 @@ def extract_services(
         return [], []
     root, lang = parsed
 
+    from codebeacon.extract.base import is_grammar_allowed
+    if not is_grammar_allowed(query_name, lang):
+        return [], []
+
     try:
         matches = run_query(lang, query_src, root)
     except Exception:

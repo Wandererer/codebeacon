@@ -95,18 +95,6 @@
   )
 ) @hook.react_call
 
-; ── Props destructuring ───────────────────────────────────────────────────────
-
-(function_declaration
-  parameters: (formal_parameters
-    (required_parameter
-      pattern: (object_pattern
-        (shorthand_property_identifier_pattern) @prop.name
-      )
-    )
-  )
-) @component.func_with_props
-
 ; ── "use client" / "use server" directive (Next.js App Router) ───────────────
 
 (expression_statement
