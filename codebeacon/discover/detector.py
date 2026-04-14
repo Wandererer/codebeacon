@@ -228,6 +228,7 @@ _SKIP_DIRS = {
 }
 
 
+
 def _iter_subdirs(directory: Path) -> list[Path]:
     """Return immediate subdirectories, skipping common non-project dirs."""
     try:
@@ -268,13 +269,22 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     # Level 2: if a subdir has no signature itself, scan its children
     #           (e.g. WaveLog/server, aptscore/frontend, murmur/landing)
     subprojects: list[ProjectInfo] = []
+    seen_paths: set[str] = set()
     for subdir in _iter_subdirs(single_path):
         if _has_project_signature(subdir):
             subprojects.append(_build_project_info(subdir, multi=True))
+            seen_paths.add(str(subdir))
+            # Scan children for embedded sub-projects with their own signature
+            # (e.g. Tauri: desktop/ has svelte.config.js + desktop/src-tauri/ has Cargo.toml)
+            for nested in _iter_subdirs(subdir):
+                if str(nested) not in seen_paths and _has_project_signature(nested):
+                    subprojects.append(_build_project_info(nested, multi=True))
+                    seen_paths.add(str(nested))
         else:
             for nested in _iter_subdirs(subdir):
-                if _has_project_signature(nested):
+                if str(nested) not in seen_paths and _has_project_signature(nested):
                     subprojects.append(_build_project_info(nested, multi=True))
+                    seen_paths.add(str(nested))
 
     if subprojects:
         return subprojects
