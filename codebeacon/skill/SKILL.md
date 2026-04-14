@@ -15,6 +15,7 @@ Scan source code with AST analysis → build a knowledge graph → generate a na
 /codebeacon <path>                  # scan specific path or workspace root
 /codebeacon <path> --update         # incremental: only reprocess changed files
 /codebeacon <path> --wiki-only      # regenerate wiki without re-extracting
+/codebeacon <path> --deep-dive      # per-project outputs + combined workspace
 /codebeacon sync                    # sync from codebeacon.yaml (multi-project)
 /codebeacon serve <path>            # start MCP server pointing at .codebeacon/
 ```

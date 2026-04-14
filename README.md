@@ -46,6 +46,7 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 - **Community detection** — Leiden/Louvain clustering reveals your actual architectural boundaries
 - **Incremental cache** — SHA-256 based; only re-extracts files that changed since the last scan
 - **Zero configuration** — auto-detects frameworks and languages; generates `codebeacon.yaml` for repeat runs
+- **Deep-dive mode** — `--deep-dive` generates per-project `.codebeacon/` + `CLAUDE.md` for every sub-project; running `codebeacon scan . --update` from any sub-project folder automatically syncs all projects in the workspace
 
 ---
 
@@ -131,6 +132,47 @@ project-root/
         entities/<Name>.md
         components/<Name>.md
     obsidian/            ← Obsidian vault (one note per graph node)
+```
+
+### Deep Dive Mode
+
+With `--deep-dive`, each sub-project also gets its own `.codebeacon/` directory and `CLAUDE.md`, so AI sessions opened inside a sub-project have full project-specific context:
+
+```
+workspace/
+  CLAUDE.md                   ← combined (all projects)
+  .cursorrules
+  AGENTS.md
+  codebeacon.yaml             ← deep_dive: true
+  .codebeacon/                ← combined knowledge graph
+    beacon.json
+    wiki/
+    obsidian/
+  api-server/
+    CLAUDE.md                 ← api-server only
+    .codebeacon/              ← api-server graph
+      beacon.json
+      wiki/
+      obsidian/
+  frontend/
+    CLAUDE.md                 ← frontend only
+    .codebeacon/              ← frontend graph
+      beacon.json
+      wiki/
+      obsidian/
+```
+
+Claude Code loads `CLAUDE.md` hierarchically, so opening a session in `api-server/` loads both the parent workspace overview **and** the project-specific details.
+
+To update from any sub-project directory after the initial scan:
+
+```bash
+# Initial deep-dive scan
+codebeacon scan /workspace --deep-dive
+
+# Later, from any sub-project — finds the parent config and updates ALL projects
+cd /workspace/api-server
+codebeacon scan . --update
 ```
 
 ---
@@ -227,6 +269,7 @@ codebeacon scan . --wiki-only             # skip re-extraction, regenerate wiki/
 codebeacon scan . --obsidian-dir <path>   # write Obsidian vault to custom location
 codebeacon scan . --semantic              # enable LLM semantic extraction
 codebeacon scan . --list-only             # detect frameworks only, don't extract
+codebeacon scan /workspace --deep-dive    # per-project + combined workspace outputs
 
 # Config-driven mode
 codebeacon init [path]                    # auto-generate codebeacon.yaml
@@ -274,6 +317,8 @@ wave:
 
 semantic:
   enabled: false               # override with --semantic flag
+
+deep_dive: false               # set to true to generate per-project outputs
 ```
 
 ### .codebeaconignore

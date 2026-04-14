@@ -80,6 +80,22 @@
   )
 ) @component.hoc
 
+; Non-exported: const Foo = React.forwardRef(...) / React.memo(...)
+; Covers shadcn/ui style: const Card = React.forwardRef<HTMLDivElement, ...>(...)
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @component.memo_name
+    (#match? @component.memo_name "^[A-Z]")
+    value: (call_expression
+      function: (member_expression
+        object: (identifier) @_react_l (#eq? @_react_l "React")
+        property: (property_identifier) @_hoc_l
+        (#match? @_hoc_l "^(memo|forwardRef|lazy)$")
+      )
+    )
+  )
+) @component.hoc_local
+
 ; ── Hook usage ────────────────────────────────────────────────────────────────
 
 (call_expression

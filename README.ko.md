@@ -48,6 +48,7 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 - **커뮤니티 감지** — Leiden/Louvain 클러스터링으로 실제 아키텍처 경계 도출
 - **증분 캐시** — SHA-256 기반; 마지막 스캔 이후 변경된 파일만 재추출
 - **제로 설정** — 프레임워크와 언어 자동 감지; 반복 실행을 위한 `codebeacon.yaml` 자동 생성
+- **딥다이브 모드** — `--deep-dive`는 각 서브 프로젝트에 개별 `.codebeacon/` + `CLAUDE.md`를 생성; 어느 서브 프로젝트 폴더에서든 `codebeacon scan . --update`를 실행하면 워크스페이스의 모든 프로젝트가 자동으로 업데이트됨
 
 ---
 
@@ -132,6 +133,47 @@ project-root/
         entities/<Name>.md
         components/<Name>.md
     obsidian/            ← Obsidian 볼트 (그래프 노드당 노트 1개)
+```
+
+### 딥다이브 모드
+
+`--deep-dive`를 사용하면 각 서브 프로젝트에도 자체 `.codebeacon/` 디렉토리와 `CLAUDE.md`가 생성되어, 서브 프로젝트 내에서 열린 AI 세션이 프로젝트별 전체 컨텍스트를 갖게 됩니다:
+
+```
+workspace/
+  CLAUDE.md                   ← 통합 (모든 프로젝트)
+  .cursorrules
+  AGENTS.md
+  codebeacon.yaml             ← deep_dive: true
+  .codebeacon/                ← 통합 지식 그래프
+    beacon.json
+    wiki/
+    obsidian/
+  api-server/
+    CLAUDE.md                 ← api-server 전용
+    .codebeacon/              ← api-server 그래프
+      beacon.json
+      wiki/
+      obsidian/
+  frontend/
+    CLAUDE.md                 ← frontend 전용
+    .codebeacon/              ← frontend 그래프
+      beacon.json
+      wiki/
+      obsidian/
+```
+
+Claude Code는 `CLAUDE.md`를 계층적으로 로드하므로, `api-server/`에서 세션을 열면 상위 워크스페이스 개요와 프로젝트별 세부 정보가 모두 로드됩니다.
+
+초기 스캔 이후 어느 서브 프로젝트에서든 업데이트:
+
+```bash
+# 초기 딥다이브 스캔
+codebeacon scan /workspace --deep-dive
+
+# 이후 어느 서브 프로젝트에서든 — 부모 설정을 찾아 모든 프로젝트 업데이트
+cd /workspace/api-server
+codebeacon scan . --update
 ```
 
 ---
@@ -228,6 +270,7 @@ codebeacon scan . --wiki-only             # 재추출 건너뛰고 기존 beacon
 codebeacon scan . --obsidian-dir <path>   # Obsidian 볼트를 커스텀 위치에 저장
 codebeacon scan . --semantic              # LLM 시맨틱 추출 활성화
 codebeacon scan . --list-only             # 프레임워크 감지만, 추출 제외
+codebeacon scan /workspace --deep-dive    # 프로젝트별 + 통합 워크스페이스 출력
 
 # 설정 기반 모드
 codebeacon init [path]                    # codebeacon.yaml 자동 생성
@@ -275,6 +318,8 @@ wave:
 
 semantic:
   enabled: false               # --semantic 플래그로 오버라이드
+
+deep_dive: false               # true로 설정하면 프로젝트별 출력 생성
 ```
 
 ### .codebeaconignore

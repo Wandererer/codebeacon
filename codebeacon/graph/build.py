@@ -199,10 +199,14 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
     file_to_nodes: dict[str, list[str]] = {}
     # label (class/component name) → [node_id, ...]
     label_to_nodes: dict[str, list[str]] = {}
+    # lower(label) → [node_id, ...] for case-insensitive fallback
+    # Handles @/components/ui/card → "card" matching node label "Card"
+    label_lower_to_nodes: dict[str, list[str]] = {}
 
     for node in all_nodes:
         file_to_nodes.setdefault(node.source_file, []).append(node.id)
         label_to_nodes.setdefault(node.label, []).append(node.id)
+        label_lower_to_nodes.setdefault(node.label.lower(), []).append(node.id)
 
     remapped: list[Edge] = []
     non_import: list[Edge] = []
@@ -217,9 +221,11 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
         if not source_ids:
             continue
 
-        # Resolve target: raw import string → node_id via label matching
+        # Resolve target: raw import string → node_id via label matching.
+        # Try exact match first, then case-insensitive fallback so that
+        # path aliases like @/components/ui/card → "card" resolve to "Card".
         target_label = _import_to_label(edge.target)
-        target_ids = label_to_nodes.get(target_label, [])
+        target_ids = label_to_nodes.get(target_label) or label_lower_to_nodes.get(target_label.lower(), [])
         if not target_ids:
             continue
 

@@ -16,8 +16,9 @@ import networkx as nx
 # Regexes to extract API URLs from frontend source files
 _API_URL_RES = [
     re.compile(r'''(?:fetch|invoke|\$fetch)\s*\(\s*[`"']([^`"'$]+)[`"']'''),
-    re.compile(r'''axios\.\w+\s*\(\s*[`"']([^`"'$]+)[`"']'''),
-    re.compile(r'''(?:api|http|client)\.\w+\s*\(\s*[`"']([^`"'$]+)[`"']'''),
+    # Support TypeScript generics: axios.get<T>('/url'), api.get<PageResponse<T>>('/url')
+    re.compile(r'''axios\.\w+\b[^`"']*[`"']([^`"'$]+)[`"']'''),
+    re.compile(r'''(?:api|http|client|instance|request)\.\w+\b[^`"']*[`"']([^`"'$]+)[`"']'''),
     re.compile(r'''url\s*[:=]\s*[`"']([^`"'$]+)[`"']'''),
     re.compile(r'''["'](/api/[^"'`\s]+)["'`]'''),
 ]
@@ -167,7 +168,15 @@ def enrich_shared_db(G: nx.DiGraph) -> int:
             for j in range(i + 1, len(projects)):
                 src_rep = project_reps[projects[i]]
                 tgt_rep = project_reps[projects[j]]
-                if not G.has_edge(src_rep, tgt_rep):
+                if G.has_edge(src_rep, tgt_rep):
+                    # Edge already exists (e.g. imports relation) — annotate it
+                    # rather than silently dropping the shared-entity relationship.
+                    existing = G[src_rep][tgt_rep]
+                    if "shared_entities" not in existing:
+                        existing["shared_entities"] = []
+                    if entity_id not in existing["shared_entities"]:
+                        existing["shared_entities"].append(entity_id)
+                else:
                     G.add_edge(
                         src_rep, tgt_rep,
                         relation="shares_db_entity",
@@ -175,6 +184,7 @@ def enrich_shared_db(G: nx.DiGraph) -> int:
                         confidence_score=0.9,
                         source_file=entity_src,
                         shared_entity=entity_id,
+                        shared_entities=[entity_id],
                     )
                     added += 1
 

@@ -44,6 +44,7 @@ class CodebeaconConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     wave: WaveConfig = field(default_factory=WaveConfig)
     semantic: SemanticConfig = field(default_factory=SemanticConfig)
+    deep_dive: bool = False  # generate per-project outputs + combined workspace
     config_file: str = ""  # path to the loaded yaml file
 
 
@@ -108,24 +109,39 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         output=output,
         wave=wave,
         semantic=semantic,
+        deep_dive=bool(raw.get("deep_dive", False)),
         config_file=str(path),
     )
 
 
-def find_config(start_dir: str | Path) -> Optional[Path]:
-    """Search for codebeacon.yaml starting from start_dir."""
-    start_dir = Path(start_dir)
-    candidates = [
-        start_dir / "codebeacon.yaml",
-        start_dir / "codebeacon.yml",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
+def find_config(start_dir: str | Path, walk_up: bool = False) -> Optional[Path]:
+    """Search for codebeacon.yaml starting from start_dir.
+
+    Args:
+        start_dir: directory to begin the search
+        walk_up:   when True, walk parent directories until a config is found
+                   or the filesystem root is reached
+    """
+    current = Path(start_dir).resolve()
+    while True:
+        for name in ("codebeacon.yaml", "codebeacon.yml"):
+            candidate = current / name
+            if candidate.exists():
+                return candidate
+        if not walk_up:
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
 
 
-def generate_config(projects: list, output_dir: str, config_path: str | Path) -> None:
+def generate_config(
+    projects: list,
+    output_dir: str,
+    config_path: str | Path,
+    deep_dive: bool = False,
+) -> None:
     """Write an auto-generated codebeacon.yaml for multi-project scans."""
     config_path = Path(config_path)
     data = {
@@ -138,5 +154,7 @@ def generate_config(projects: list, output_dir: str, config_path: str | Path) ->
         "wave": {"auto": True, "chunk_size": 300, "max_parallel": 5},
         "semantic": {"enabled": False},
     }
+    if deep_dive:
+        data["deep_dive"] = True
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)

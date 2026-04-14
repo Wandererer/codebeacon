@@ -48,6 +48,7 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 - **Detección de comunidades** — clustering Leiden/Louvain revela los límites arquitectónicos reales
 - **Caché incremental** — basado en SHA-256; solo re-extrae archivos modificados desde el último escaneo
 - **Cero configuración** — detecta frameworks y lenguajes automáticamente; genera `codebeacon.yaml` para ejecuciones posteriores
+- **Modo Deep Dive** — `--deep-dive` genera `.codebeacon/` + `CLAUDE.md` propios para cada sub-proyecto; ejecutar el comando de actualización desde **cualquier** sub-proyecto sincroniza automáticamente todos los proyectos del workspace
 
 ---
 
@@ -126,6 +127,69 @@ project-root/
         entities/<Name>.md
         components/<Name>.md
     obsidian/            ← Obsidian Vault (una nota por nodo del grafo)
+```
+
+### Modo Deep Dive
+
+Con `--deep-dive`, cada sub-proyecto recibe su propio `.codebeacon/` + `CLAUDE.md`. Claude Code carga los archivos `CLAUDE.md` de forma jerárquica, por lo que una sesión en `api-server/` carga tanto la visión general del workspace como los detalles específicos del proyecto.
+
+La clave: un comando de actualización desde **cualquier sub-proyecto** sincroniza todo el workspace automáticamente:
+
+```bash
+# Primer escaneo deep dive
+codebeacon scan /workspace --deep-dive
+
+# Más tarde, desde cualquier sub-proyecto — encuentra la config padre y actualiza TODOS los proyectos
+cd /workspace/api-server
+codebeacon scan . --update
+```
+
+Estructura de salida:
+```
+workspace/
+  CLAUDE.md                   ← combinado (todos los proyectos)
+  codebeacon.yaml             ← deep_dive: true
+  .codebeacon/                ← grafo combinado
+  api-server/
+    CLAUDE.md                 ← solo api-server
+    .codebeacon/
+  frontend/
+    CLAUDE.md                 ← solo frontend
+    .codebeacon/
+```
+
+## Configuración
+
+Ejecuta `codebeacon init` para generar `codebeacon.yaml`, o escríbelo manualmente:
+
+```yaml
+version: 1
+
+projects:
+  - name: api-server
+    path: ./api-server
+    type: spring-boot          # opcional: se detecta automáticamente
+
+  - name: frontend
+    path: ./frontend
+    type: react
+
+output:
+  dir: .codebeacon
+  wiki: true
+  obsidian: true
+  context_map:
+    targets: [CLAUDE.md, .cursorrules, AGENTS.md]
+
+wave:
+  auto: true
+  chunk_size: 300              # archivos por chunk
+  max_parallel: 5              # hilos paralelos
+
+semantic:
+  enabled: false               # sobrescribir con --semantic
+
+deep_dive: false               # establecer true para salida por proyecto
 ```
 
 ### .codebeaconignore
@@ -230,6 +294,7 @@ codebeacon scan . --update                # incremental: solo archivos modificad
 codebeacon scan . --wiki-only             # saltar extracción, regenerar wiki/obsidian/contexto desde beacon.json existente
 codebeacon scan . --semantic              # extracción semántica con LLM
 codebeacon scan . --list-only             # solo detectar frameworks
+codebeacon scan /workspace --deep-dive    # salida por proyecto + workspace combinado
 
 codebeacon init [ruta]                    # generar codebeacon.yaml
 codebeacon sync                           # ejecutar desde codebeacon.yaml

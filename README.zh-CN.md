@@ -48,6 +48,7 @@
 - **社区检测** — Leiden/Louvain 聚类揭示真实的架构边界
 - **增量缓存** — 基于 SHA-256；仅重新提取自上次扫描以来发生变更的文件
 - **零配置** — 自动检测框架和语言；自动生成 `codebeacon.yaml` 供后续运行
+- **深度扫描模式** — `--deep-dive` 为每个子项目生成专属 `.codebeacon/` + `CLAUDE.md`；从**任意**子项目目录执行更新命令，即可自动同步整个工作区的所有项目
 
 ---
 
@@ -132,6 +133,35 @@ project-root/
         entities/<Name>.md
         components/<Name>.md
     obsidian/            ← Obsidian Vault（每个图节点一篇笔记）
+```
+
+### 深度扫描模式
+
+使用 `--deep-dive` 时，每个子项目都会获得独立的 `.codebeacon/` + `CLAUDE.md`。Claude Code 按层级加载 `CLAUDE.md`——在 `api-server/` 中打开会话时，同时加载工作区全局概览和项目专属详情。
+
+核心亮点：从**任意子项目**运行更新命令，自动找到父级配置文件并同步整个工作区：
+
+```bash
+# 首次深度扫描
+codebeacon scan /workspace --deep-dive
+
+# 之后，从任意子项目 — 自动找到父级配置，更新所有项目
+cd /workspace/api-server
+codebeacon scan . --update
+```
+
+输出结构：
+```
+workspace/
+  CLAUDE.md                   ← 合并（所有项目）
+  codebeacon.yaml             ← deep_dive: true
+  .codebeacon/                ← 合并知识图谱
+  api-server/
+    CLAUDE.md                 ← 仅 api-server
+    .codebeacon/
+  frontend/
+    CLAUDE.md                 ← 仅 frontend
+    .codebeacon/
 ```
 
 ---
@@ -228,6 +258,7 @@ codebeacon scan . --wiki-only             # 跳过重新提取，从现有 beaco
 codebeacon scan . --obsidian-dir <path>   # 将 Obsidian Vault 写入自定义位置
 codebeacon scan . --semantic              # 启用 LLM 语义提取
 codebeacon scan . --list-only             # 仅检测框架，不提取
+codebeacon scan /workspace --deep-dive    # 各项目独立输出 + 工作区合并输出
 
 # 配置驱动模式
 codebeacon init [path]                    # 自动生成 codebeacon.yaml
@@ -275,6 +306,8 @@ wave:
 
 semantic:
   enabled: false               # 通过 --semantic 标志覆盖
+
+deep_dive: false               # 设为 true 可生成各项目独立输出
 ```
 
 ### .codebeaconignore
