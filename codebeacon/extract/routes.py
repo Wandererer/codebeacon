@@ -1,4 +1,4 @@
-"""Route extraction for all 17 supported frameworks.
+"""Route extraction for all 24 supported frameworks.
 
 Public API:
     extract_routes(file_path, framework, project_path="") -> list[RouteInfo]

@@ -40,8 +40,8 @@ As ferramentas existentes resolvem isso apenas parcialmente. Analisadores de rot
 ## Principais funcionalidades
 
 - **Pipeline unificado** — análise de rotas/controladores + knowledge graph em uma só ferramenta, sem junção manual
-- **17 frameworks, 9 linguagens** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor e mais
-- **Baseado em tree-sitter** — análise AST estrutural, não regex; 17 gramáticas de linguagem incluídas por padrão
+- **24 frameworks, 9 linguagens** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor
+- **Baseado em tree-sitter** — análise AST estrutural, não regex; gramáticas de linguagem incluídas por padrão
 - **Resolução DI em 2 passos** — Pass 1 extrai nós AST locais; Pass 2 constrói uma tabela de símbolos global e resolve mapeamentos Interface → Implementation
 - **Arquitetura Wave merge** — arquivos processados em chunks paralelos e mesclados globalmente; lida com grandes monorepos sem problemas de memória
 - **Múltiplos formatos de saída** — knowledge graph JSON, wiki Markdown, Obsidian Vault, mapas de contexto para IA, servidor MCP
@@ -76,11 +76,11 @@ codebeacon sync                      # execuções seguintes via configuração
 |-----------|-----------|
 | Java / Kotlin | Spring Boot, Ktor |
 | Python | Django, FastAPI, Flask |
-| JavaScript / TypeScript | Express, NestJS, React, Vue, Angular, Svelte |
-| Go | Gin |
+| JavaScript / TypeScript | Express, Fastify, Koa, NestJS, React, Next.js, Vue, Nuxt, Angular, SvelteKit |
+| Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web |
+| Rust | Actix-Web, Axum |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 
@@ -106,25 +106,38 @@ O codebeacon executa um pipeline de extração em 2 passos:
 
 ## Estrutura de saída
 
-Após o scan, tudo é gerado em `.codebeacon/`:
+Após o scan, os arquivos de mapa de contexto são atualizados na raiz do projeto (conteúdo do usuário é preservado) e o knowledge graph em `.codebeacon/`:
 
 ```
-.codebeacon/
-  beacon.json          ← knowledge graph completo (JSON node-link, consultável)
-  REPORT.md            ← nós deus, conexões surpreendentes, arquivos hub
-  CLAUDE.md            ← mapa de contexto IA (também na raiz do projeto)
-  .cursorrules         ← contexto do Cursor IDE
-  AGENTS.md            ← contexto OpenAI Agents / Codex
-  wiki/
-    index.md
-    overview.md
-    routes.md
-    <project>/
-      controllers/<Name>.md
-      services/<Name>.md
-      entities/<Name>.md
-      components/<Name>.md
-  obsidian/            ← Obsidian Vault (uma nota por nó do grafo)
+project-root/
+  CLAUDE.md              ← mapa de contexto IA (bloco codebeacon mesclado; conteúdo do usuário mantido)
+  .cursorrules           ← contexto do Cursor IDE (mesma estratégia de mesclagem)
+  AGENTS.md              ← contexto OpenAI Agents / Codex (mesma estratégia de mesclagem)
+  .codebeacon/
+    beacon.json          ← knowledge graph completo (JSON node-link, consultável)
+    REPORT.md            ← nós deus, conexões surpreendentes, arquivos hub
+    wiki/
+      index.md
+      overview.md
+      routes.md
+      <project>/
+        controllers/<Name>.md
+        services/<Name>.md
+        entities/<Name>.md
+        components/<Name>.md
+    obsidian/            ← Obsidian Vault (uma nota por nó do grafo)
+```
+
+### .codebeaconignore
+
+Coloque um arquivo `.codebeaconignore` na raiz do projeto para excluir diretórios ou arquivos do scan. Mesma sintaxe do `.gitignore` — um padrão por linha, `#` para comentários.
+
+```
+# .codebeaconignore
+generated/
+build/
+*.generated.ts
+fixtures/
 ```
 
 ---
@@ -200,7 +213,7 @@ codebeacon scan .
 ## Opções de instalação
 
 ```bash
-pip install codebeacon              # 17 gramáticas de linguagem incluídas
+pip install codebeacon              # gramáticas de linguagem incluídas
 pip install codebeacon[cluster]     # + detecção de comunidades Leiden (graspologic)
 pip install --upgrade codebeacon    # atualizar para a versão mais recente com todas as dependências
 ```
@@ -214,7 +227,7 @@ Os parsers de Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, R
 ```bash
 codebeacon scan .                         # diretório atual
 codebeacon scan . --update                # incremental: apenas arquivos alterados
-codebeacon scan . --wiki-only             # regenerar wiki sem re-extrair
+codebeacon scan . --wiki-only             # pular re-extração, regenerar wiki/obsidian/contexto a partir do beacon.json existente
 codebeacon scan . --semantic              # extração semântica com LLM
 codebeacon scan . --list-only             # apenas detectar frameworks
 
@@ -259,6 +272,10 @@ codebeacon install                        # instalar skill do Claude Code
 ## Privacidade e segurança
 
 Todo o processamento é local. O código-fonte nunca sai da sua máquina. Sem telemetria nem chamadas de rede durante o uso normal.
+
+- A flag `--semantic` (desabilitada por padrão) ativa dois modos de extração:
+  1. **Análise de comentários estruturados** (sem LLM) — infere referências cruzadas de Javadoc (`@see`, `{@link}`), docstrings Python (`:class:`, `:func:`) e JSDoc (`@see`, tipos de `@param`)
+  2. **Inferência LLM** (opcional) — com `ANTHROPIC_API_KEY` configurado, envia trechos de código para a API Claude para inferência de relações mais profunda; use apenas se habilitado explicitamente
 
 ---
 

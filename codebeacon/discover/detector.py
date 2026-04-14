@@ -219,15 +219,32 @@ def _detect_language_from_files(directory: Path) -> str:
     return max(counts, key=lambda k: counts[k])
 
 
+_SKIP_DIRS = {
+    "node_modules", "__pycache__", ".git", "dist", "build", "target",
+    ".next", ".nuxt", "coverage", ".venv", "venv", "env", ".tox",
+}
+
+
+def _iter_subdirs(directory: Path) -> list[Path]:
+    """Return immediate subdirectories, skipping common non-project dirs."""
+    try:
+        return [
+            d for d in sorted(directory.iterdir())
+            if d.is_dir() and not d.name.startswith(".") and d.name not in _SKIP_DIRS
+        ]
+    except (PermissionError, OSError):
+        return []
+
+
 def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     """Main entry point: given a list of input paths, return discovered projects.
 
     Logic:
     - 2+ paths → treat each as a separate project (multi mode)
     - 1 path with signature → single project mode
-    - 1 path without signature → scan 1-depth subdirs for projects (multi mode)
-      - if subdirs have 2+ projects → multi mode
-      - if 0-1 projects but code files exist → generic single mode
+    - 1 path without signature → scan up to 2-depth subdirs for projects (multi mode)
+      Handles monorepos where projects live in subdirectories (e.g. WaveLog/server,
+      aptscore/frontend, murmur/landing).
     """
     if len(paths) > 1:
         return _multi_from_paths(paths)
@@ -243,23 +260,20 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     if _has_project_signature(single_path):
         return [_build_project_info(single_path, multi=False)]
 
-    # No signature: scan 1-depth subdirs
-    subdirs = [
-        d for d in sorted(single_path.iterdir())
-        if d.is_dir() and not d.name.startswith(".") and d.name not in {
-            "node_modules", "__pycache__", ".git", "dist", "build", "target",
-        }
-    ]
-
+    # No signature at root: scan up to 2 levels deep.
+    # Level 1: direct subdirs (e.g. DiveAI/, WaveLog/, aptscore/)
+    # Level 2: if a subdir has no signature itself, scan its children
+    #           (e.g. WaveLog/server, aptscore/frontend, murmur/landing)
     subprojects: list[ProjectInfo] = []
-    for subdir in subdirs:
+    for subdir in _iter_subdirs(single_path):
         if _has_project_signature(subdir):
             subprojects.append(_build_project_info(subdir, multi=True))
+        else:
+            for nested in _iter_subdirs(subdir):
+                if _has_project_signature(nested):
+                    subprojects.append(_build_project_info(nested, multi=True))
 
-    if len(subprojects) >= 2:
-        return subprojects
-
-    if len(subprojects) == 1:
+    if subprojects:
         return subprojects
 
     # No project signatures found anywhere: try generic mode

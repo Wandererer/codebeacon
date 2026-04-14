@@ -38,8 +38,8 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 ## Key Features
 
 - **Unified pipeline** — route/controller analysis + knowledge graph in one tool, no manual stitching
-- **17 frameworks, 9 languages** — Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, Svelte, Gin, Laravel, Actix-Web, ASP.NET Core, Vapor, Ktor, and more
-- **Tree-sitter based** — structural AST parsing, not regex; all 17 language grammars included out of the box
+- **24 frameworks, 9 languages** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor
+- **Tree-sitter based** — structural AST parsing, not regex; all language grammars included out of the box
 - **Two-pass DI resolution** — Pass 1 extracts local AST nodes; Pass 2 builds a global symbol table and resolves Interface → Implementation mappings that single-pass tools miss
 - **Wave merge architecture** — files processed in parallel chunks, results merged globally; handles large monorepos without memory blowouts
 - **Multiple output formats** — JSON knowledge graph, Markdown wiki, Obsidian vault, AI context maps, MCP server
@@ -74,11 +74,11 @@ codebeacon sync                      # subsequent runs via config
 |----------|-----------|
 | Java / Kotlin | Spring Boot, Ktor |
 | Python | Django, FastAPI, Flask |
-| JavaScript / TypeScript | Express, NestJS, React, Vue, Angular, Svelte |
-| Go | Gin |
+| JavaScript / TypeScript | Express, Fastify, Koa, NestJS, React, Next.js, Vue, Nuxt, Angular, SvelteKit |
+| Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web |
+| Rust | Actix-Web, Axum |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 
@@ -107,29 +107,30 @@ codebeacon runs a two-pass extraction pipeline:
 
 ## Output Structure
 
-After a scan, everything lands in `.codebeacon/`:
+After a scan, context map files are updated at the project root (existing user content is preserved) and the knowledge graph lands in `.codebeacon/`:
 
 ```
-.codebeacon/
-  beacon.json          ← full knowledge graph (node-link JSON, queryable)
-  REPORT.md            ← god nodes, surprising connections, hub files
-  CLAUDE.md            ← AI context map (also written to project root)
-  .cursorrules         ← Cursor IDE context
-  AGENTS.md            ← OpenAI Agents / Codex context
-  wiki/
-    index.md           ← global index (~200 tokens)
-    overview.md        ← platform stats + cross-project connections
-    routes.md          ← all routes table
-    cross-project/
-      connections.md   ← cross-service edges
-    <project>/
-      index.md
-      routes.md
-      controllers/<Name>.md
-      services/<Name>.md
-      entities/<Name>.md
-      components/<Name>.md
-  obsidian/            ← Obsidian vault (one note per graph node)
+project-root/
+  CLAUDE.md              ← AI context map (codebeacon block merged; user content kept)
+  .cursorrules           ← Cursor IDE context (same merge strategy)
+  AGENTS.md              ← OpenAI Agents / Codex context (same merge strategy)
+  .codebeacon/
+    beacon.json          ← full knowledge graph (node-link JSON, queryable)
+    REPORT.md            ← god nodes, surprising connections, hub files
+    wiki/
+      index.md           ← global index (~200 tokens)
+      overview.md        ← platform stats + cross-project connections
+      routes.md          ← all routes table
+      cross-project/
+        connections.md   ← cross-service edges
+      <project>/
+        index.md
+        routes.md
+        controllers/<Name>.md
+        services/<Name>.md
+        entities/<Name>.md
+        components/<Name>.md
+    obsidian/            ← Obsidian vault (one note per graph node)
 ```
 
 ---
@@ -205,7 +206,7 @@ codebeacon scan .
 ## Installation Options
 
 ```bash
-pip install codebeacon              # all 17 language grammars included
+pip install codebeacon              # all language grammars included
 pip install codebeacon[cluster]     # + Leiden community detection (graspologic)
 pip install --upgrade codebeacon    # upgrade to latest version with all dependencies
 ```
@@ -222,7 +223,7 @@ codebeacon scan <path> [options]
 codebeacon scan .                         # current directory
 codebeacon scan /workspace                # workspace root (multi-project)
 codebeacon scan . --update                # incremental: only re-extract changed files
-codebeacon scan . --wiki-only             # regenerate wiki without re-extracting
+codebeacon scan . --wiki-only             # skip re-extraction, regenerate wiki/obsidian/context map from existing beacon.json
 codebeacon scan . --obsidian-dir <path>   # write Obsidian vault to custom location
 codebeacon scan . --semantic              # enable LLM semantic extraction
 codebeacon scan . --list-only             # detect frameworks only, don't extract
@@ -263,7 +264,6 @@ output:
   dir: .codebeacon
   wiki: true
   obsidian: true
-  graph_html: true
   context_map:
     targets: [CLAUDE.md, .cursorrules, AGENTS.md]
 
@@ -274,6 +274,18 @@ wave:
 
 semantic:
   enabled: false               # override with --semantic flag
+```
+
+### .codebeaconignore
+
+Place a `.codebeaconignore` file at your project root to exclude directories or files from scanning. Syntax is the same as `.gitignore` — one pattern per line, `#` for comments.
+
+```
+# .codebeaconignore
+generated/
+build/
+*.generated.ts
+fixtures/
 ```
 
 ---
@@ -312,7 +324,9 @@ All processing is local. Your source code never leaves your machine.
 
 - Tree-sitter AST parsing runs entirely in-process
 - No telemetry, no analytics, no network calls during normal operation
-- The `--semantic` flag (disabled by default) sends code excerpts to your configured LLM API — only enable it explicitly
+- The `--semantic` flag (disabled by default) activates two extraction modes:
+  1. **Structured comment parsing** (no LLM required) — infers cross-references from Javadoc (`@see`, `{@link}`), Python docstrings (`:class:`, `:func:`), and JSDoc (`@see`, `@param` types)
+  2. **LLM inference** (optional) — when `ANTHROPIC_API_KEY` is set, sends code excerpts to the Claude API for deeper relationship inference; only enable it explicitly
 
 ---
 

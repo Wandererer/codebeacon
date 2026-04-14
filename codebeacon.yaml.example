@@ -13,7 +13,6 @@ output:
   dir: .codebeacon
   wiki: true
   obsidian: true
-  graph_html: true
   context_map:
     targets: [CLAUDE.md, .cursorrules, AGENTS.md]
 

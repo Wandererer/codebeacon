@@ -16,6 +16,9 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     paths = [str(Path(p).resolve()) for p in args.paths]
 
+    if getattr(args, "watch", False):
+        print("Warning: --watch is not yet implemented. Ignoring.", file=sys.stderr)
+
     # If single path and codebeacon.yaml exists there → sync mode
     if len(paths) == 1:
         config_path = find_config(paths[0])
@@ -78,12 +81,6 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _run_pipeline(projects, output_dir: str, args) -> int:
     """Run the full extraction pipeline for a list of projects."""
-    from codebeacon.discover.scanner import collect_files
-    from codebeacon.cache import Cache
-    from codebeacon.wave import auto_wave
-    from codebeacon.graph.build import build_graph
-    from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db
-    from codebeacon.graph.cluster import cluster, apply_communities, score_all
     from codebeacon.graph.analyze import analyze, report_to_markdown
     import json
     from pathlib import Path
@@ -91,73 +88,116 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    cache = Cache(output_dir)
-    if getattr(args, "update", False):
-        cache.load()
-    else:
-        cache = None  # fresh scan, no cache
-
-    wave_results = []
-    for project in projects:
-        print(f"\n  Extracting {project.name} ({project.framework}) ...")
-        files = collect_files(project.path)
-        print(f"    {len(files)} source files found")
-
-        def progress(done, total, _name=project.name):
-            pct = int(done / total * 100) if total else 100
-            print(f"    [{pct:3d}%] {done}/{total} files processed", end="\r")
-
-        wave = auto_wave(
-            project=project,
-            files=files,
-            chunk_size=300,
-            max_parallel=5,
-            cache=cache,
-            progress_callback=progress,
-            semantic=getattr(args, "semantic", False),
-        )
-        print()  # newline after progress
-
-        stats = (
-            f"    Routes: {len(wave.routes)}, Services: {len(wave.services)}, "
-            f"Entities: {len(wave.entities)}, Components: {len(wave.components)}"
-        )
-        if wave.skipped_count:
-            stats += f" (cache hits: {wave.skipped_count})"
-        print(stats)
-        wave_results.append(wave)
-
-    if cache is not None:
-        cache.save()
-
-    print("\n  Building knowledge graph ...")
-    G = build_graph(wave_results)
-    print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
-
-    # Enrichment
-    api_edges = enrich_http_api(G)
-    db_edges = enrich_shared_db(G)
-    if api_edges or db_edges:
-        print(f"    Enriched: +{api_edges} calls_api, +{db_edges} shares_db_entity edges")
-
-    # Community detection
-    print("  Detecting communities ...")
-    communities = cluster(G)
-    apply_communities(G, communities)
-    cohesion = score_all(G, communities)
-    n_communities = len(set(communities.values())) if communities else 0
-    print(f"    {n_communities} communities detected")
-
-    # Analysis
-    report = analyze(G, communities, cohesion)
-
-    # Wiki generation
     wiki_only = getattr(args, "wiki_only", False)
-    if not wiki_only:
-        print("  Generating wiki ...")
-        from codebeacon.wiki.generator import generate_wiki
-        generate_wiki(G, communities, output_dir)
-        print(f"    Wiki written to {output_dir}/wiki/")
+
+    if wiki_only:
+        # --wiki-only: skip extraction, load existing graph and regenerate outputs
+        beacon_path = output_path / "beacon.json"
+        if not beacon_path.exists():
+            print(
+                f"Error: {beacon_path} not found. Run a full scan first before using --wiki-only.",
+                file=sys.stderr,
+            )
+            return 1
+
+        import networkx.readwrite.json_graph as nxjson
+        data = json.loads(beacon_path.read_text(encoding="utf-8"))
+        G = nxjson.node_link_graph(data, directed=True, multigraph=False)
+        print(f"  Loaded graph from {beacon_path}")
+        print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
+
+        # Reconstruct communities from node attributes set by a prior scan
+        communities: dict = {}
+        for node_id, node_data in G.nodes(data=True):
+            if "community" in node_data:
+                communities[node_id] = node_data["community"]
+        n_communities = len(set(communities.values())) if communities else 0
+
+        report = analyze(G, communities, {})
+    else:
+        from codebeacon.discover.scanner import collect_files
+        from codebeacon.cache import Cache
+        from codebeacon.wave import auto_wave
+        from codebeacon.graph.build import build_graph
+        from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db
+        from codebeacon.graph.cluster import cluster, apply_communities, score_all
+
+        cache = Cache(output_dir)
+        if getattr(args, "update", False):
+            cache.load()
+        else:
+            cache = None  # fresh scan, no cache
+
+        wave_results = []
+        for project in projects:
+            print(f"\n  Extracting {project.name} ({project.framework}) ...")
+            files = collect_files(project.path)
+            print(f"    {len(files)} source files found")
+
+            def progress(done, total, _name=project.name):
+                pct = int(done / total * 100) if total else 100
+                print(f"    [{pct:3d}%] {done}/{total} files processed", end="\r")
+
+            wave = auto_wave(
+                project=project,
+                files=files,
+                chunk_size=300,
+                max_parallel=5,
+                cache=cache,
+                progress_callback=progress,
+                semantic=getattr(args, "semantic", False),
+            )
+            print()  # newline after progress
+
+            stats = (
+                f"    Routes: {len(wave.routes)}, Services: {len(wave.services)}, "
+                f"Entities: {len(wave.entities)}, Components: {len(wave.components)}"
+            )
+            if wave.skipped_count:
+                stats += f" (cache hits: {wave.skipped_count})"
+            print(stats)
+            wave_results.append(wave)
+
+        if cache is not None:
+            cache.save()
+
+        print("\n  Building knowledge graph ...")
+        G = build_graph(wave_results)
+        print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
+
+        # Enrichment
+        api_edges = enrich_http_api(G)
+        db_edges = enrich_shared_db(G)
+        if api_edges or db_edges:
+            print(f"    Enriched: +{api_edges} calls_api, +{db_edges} shares_db_entity edges")
+
+        # Community detection
+        print("  Detecting communities ...")
+        communities = cluster(G)
+        apply_communities(G, communities)
+        cohesion = score_all(G, communities)
+        n_communities = len(set(communities.values())) if communities else 0
+        print(f"    {n_communities} communities detected")
+
+        # Analysis
+        report = analyze(G, communities, cohesion)
+
+        # Save outputs
+        import networkx.readwrite.json_graph as nxjson
+        beacon_path = output_path / "beacon.json"
+        beacon_path.write_text(
+            json.dumps(nxjson.node_link_data(G), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        report_path = output_path / "REPORT.md"
+        report_path.write_text(report_to_markdown(report), encoding="utf-8")
+
+    # Wiki generation (always runs — whether full scan or --wiki-only)
+    print("  Generating wiki ...")
+    from codebeacon.wiki.generator import generate_wiki
+    generate_wiki(G, communities, output_dir)
+    print(f"    Wiki written to {output_dir}/wiki/")
 
     # Obsidian vault generation
     obsidian_dir = getattr(args, "obsidian_dir", None)
@@ -178,21 +218,11 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
     for path in written:
         print(f"    {path}")
 
-    # Save outputs
-    # beacon.json (node-link format)
-    import networkx.readwrite.json_graph as nxjson
-    beacon_path = output_path / "beacon.json"
-    beacon_path.write_text(
-        json.dumps(nxjson.node_link_data(G), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    # REPORT.md
-    report_path = output_path / "REPORT.md"
-    report_path.write_text(report_to_markdown(report), encoding="utf-8")
-
     print(f"\n  Output: {output_dir}")
-    print(f"    beacon.json, REPORT.md, wiki/, obsidian/, CLAUDE.md written")
+    if wiki_only:
+        print(f"    wiki/, obsidian/, CLAUDE.md regenerated from existing graph")
+    else:
+        print(f"    beacon.json, REPORT.md, wiki/, obsidian/, CLAUDE.md written")
     print(f"  Done. {report.node_count} nodes, {report.edge_count} edges, {n_communities} communities.")
     return 0
 
@@ -339,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("paths", nargs="+", metavar="PATH", help="Project or workspace path(s)")
     scan_p.add_argument("--semantic", action="store_true", help="Enable LLM semantic extraction")
     scan_p.add_argument("--update", action="store_true", help="Only reprocess changed files")
-    scan_p.add_argument("--watch", action="store_true", help="Watch for file changes")
+    scan_p.add_argument("--watch", action="store_true", help="Watch for file changes (coming soon)")
     scan_p.add_argument("--wiki-only", action="store_true", help="Only generate wiki")
     scan_p.add_argument("--obsidian-dir", metavar="PATH", help="Custom Obsidian vault path")
     scan_p.add_argument("--list-only", action="store_true", help="Only list detected projects, don't extract")

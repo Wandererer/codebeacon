@@ -22,7 +22,6 @@ class OutputConfig:
     dir: str = ".codebeacon"
     wiki: bool = True
     obsidian: bool = True
-    graph_html: bool = True
     context_map_targets: list = field(default_factory=lambda: ["CLAUDE.md", ".cursorrules", "AGENTS.md"])
 
 
@@ -88,7 +87,6 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         dir=output_raw.get("dir", ".codebeacon"),
         wiki=output_raw.get("wiki", True),
         obsidian=output_raw.get("obsidian", True),
-        graph_html=output_raw.get("graph_html", True),
         context_map_targets=context_map.get("targets", ["CLAUDE.md", ".cursorrules", "AGENTS.md"]),
     )
 

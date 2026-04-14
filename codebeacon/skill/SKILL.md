@@ -1,6 +1,6 @@
 ---
 name: codebeacon
-description: Scan a codebase → AST extraction → knowledge graph → wiki + CLAUDE.md context map. Supports 17 frameworks (Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, and more).
+description: Scan a codebase → AST extraction → knowledge graph → wiki + CLAUDE.md context map. Supports 24 frameworks (Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor).
 trigger: /codebeacon
 ---
 
@@ -73,7 +73,7 @@ OUTPUT_DIR="$TARGET/.codebeacon"
 Then summarise for the user:
 - Which projects/frameworks were detected
 - Total nodes, edges, communities
-- Output location (`.codebeacon/wiki/`, `.codebeacon/CLAUDE.md`, etc.)
+- Output location (`CLAUDE.md` at project root, `.codebeacon/wiki/`, `.codebeacon/beacon.json`, etc.)
 - Any god nodes or surprising connections worth mentioning
 
 ### Step 4 — (Optional) MCP serve
@@ -90,26 +90,27 @@ This blocks — run it only when the user explicitly wants an MCP server.
 ## Output structure
 
 ```
-.codebeacon/
-  beacon.json          ← full knowledge graph (node-link JSON)
-  REPORT.md            ← god nodes, surprising connections, hub files
-  CLAUDE.md            ← AI context map (also written to project root)
-  .cursorrules         ← Cursor IDE context
-  AGENTS.md            ← OpenAI Agents context
-  wiki/
-    index.md           ← global index (~200 tokens)
-    overview.md        ← platform stats + cross-project connections
-    routes.md          ← all routes table
-    cross-project/
-      connections.md   ← cross-service edges
-    <project>/
-      index.md
-      routes.md
-      controllers/<Name>.md
-      services/<Name>.md
-      entities/<Name>.md
-      components/<Name>.md
-  obsidian/            ← Obsidian vault (one note per node)
+project-root/
+  CLAUDE.md              ← AI context map (codebeacon block merged; user content preserved)
+  .cursorrules           ← Cursor IDE context (same merge strategy)
+  AGENTS.md              ← OpenAI Agents context (same merge strategy)
+  .codebeacon/
+    beacon.json          ← full knowledge graph (node-link JSON)
+    REPORT.md            ← god nodes, surprising connections, hub files
+    wiki/
+      index.md           ← global index (~200 tokens)
+      overview.md        ← platform stats + cross-project connections
+      routes.md          ← all routes table
+      cross-project/
+        connections.md   ← cross-service edges
+      <project>/
+        index.md
+        routes.md
+        controllers/<Name>.md
+        services/<Name>.md
+        entities/<Name>.md
+        components/<Name>.md
+    obsidian/            ← Obsidian vault (one note per node)
 ```
 
 ## Supported frameworks
@@ -118,10 +119,10 @@ This blocks — run it only when the user explicitly wants an MCP server.
 |----------|-----------|
 | Java/Kotlin | Spring Boot, Ktor |
 | Python | Django, FastAPI, Flask |
-| JavaScript/TypeScript | Express, NestJS, React, Vue, Angular, Svelte |
-| Go | Gin |
+| JavaScript/TypeScript | Express, Fastify, Koa, NestJS, React, Next.js, Vue, Nuxt, Angular, SvelteKit |
+| Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web |
+| Rust | Actix-Web, Axum |
 | C# | ASP.NET Core |
 | Swift | Vapor |

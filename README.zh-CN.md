@@ -40,8 +40,8 @@
 ## 核心功能
 
 - **统一流水线** — 路由/控制器分析 + 知识图谱集于一体，无需手动拼接
-- **17 个框架，9 种语言** — Spring Boot、NestJS、Django、FastAPI、Rails、Express、React、Vue、Angular、Svelte、Gin、Laravel、Actix-Web、ASP.NET Core、Vapor、Ktor 等
-- **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；17 种语言语法默认内置
+- **24 个框架，9 种语言** — Spring Boot、NestJS、Django、FastAPI、Flask、Rails、Express、Fastify、Koa、React、Next.js、Vue、Nuxt、Angular、SvelteKit、Gin、Echo、Fiber、Laravel、Actix-Web、Axum、ASP.NET Core、Vapor、Ktor
+- **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；语言语法默认内置
 - **两阶段依赖注入解析** — Pass 1 提取本地 AST 节点；Pass 2 构建全局符号表，解析单阶段工具遗漏的接口→实现映射
 - **Wave 合并架构** — 文件以并行块处理后全局合并；大型单仓库也不会出现内存问题
 - **多种输出格式** — JSON 知识图谱、Markdown Wiki、Obsidian Vault、AI 上下文映射、MCP 服务器
@@ -76,11 +76,11 @@ codebeacon sync                      # 后续运行通过配置文件驱动
 |------|------|
 | Java / Kotlin | Spring Boot、Ktor |
 | Python | Django、FastAPI、Flask |
-| JavaScript / TypeScript | Express、NestJS、React、Vue、Angular、Svelte |
-| Go | Gin |
+| JavaScript / TypeScript | Express、Fastify、Koa、NestJS、React、Next.js、Vue、Nuxt、Angular、SvelteKit |
+| Go | Gin、Echo、Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web |
+| Rust | Actix-Web、Axum |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 
@@ -108,29 +108,30 @@ codebeacon 运行两阶段提取流水线：
 
 ## 输出结构
 
-扫描后，所有内容写入 `.codebeacon/`：
+扫描后，上下文映射文件在项目根目录就地更新（保留现有用户内容），知识图谱写入 `.codebeacon/`：
 
 ```
-.codebeacon/
-  beacon.json          ← 完整知识图谱（节点-链接 JSON，可查询）
-  REPORT.md            ← 上帝节点、意外连接、枢纽文件
-  CLAUDE.md            ← AI 上下文映射（同时写入项目根目录）
-  .cursorrules         ← Cursor IDE 上下文
-  AGENTS.md            ← OpenAI Agents / Codex 上下文
-  wiki/
-    index.md           ← 全局索引（约 200 tokens）
-    overview.md        ← 平台统计 + 跨项目连接
-    routes.md          ← 所有路由表
-    cross-project/
-      connections.md   ← 跨服务边
-    <project>/
-      index.md
-      routes.md
-      controllers/<Name>.md
-      services/<Name>.md
-      entities/<Name>.md
-      components/<Name>.md
-  obsidian/            ← Obsidian Vault（每个图节点一篇笔记）
+project-root/
+  CLAUDE.md              ← AI 上下文映射（合并 codebeacon 块；保留用户内容）
+  .cursorrules           ← Cursor IDE 上下文（相同合并策略）
+  AGENTS.md              ← OpenAI Agents / Codex 上下文（相同合并策略）
+  .codebeacon/
+    beacon.json          ← 完整知识图谱（节点-链接 JSON，可查询）
+    REPORT.md            ← 上帝节点、意外连接、枢纽文件
+    wiki/
+      index.md           ← 全局索引（约 200 tokens）
+      overview.md        ← 平台统计 + 跨项目连接
+      routes.md          ← 所有路由表
+      cross-project/
+        connections.md   ← 跨服务边
+      <project>/
+        index.md
+        routes.md
+        controllers/<Name>.md
+        services/<Name>.md
+        entities/<Name>.md
+        components/<Name>.md
+    obsidian/            ← Obsidian Vault（每个图节点一篇笔记）
 ```
 
 ---
@@ -206,7 +207,7 @@ codebeacon scan .
 ## 安装选项
 
 ```bash
-pip install codebeacon              # 默认内置 17 种语言语法
+pip install codebeacon              # 默认内置所有语言语法
 pip install codebeacon[cluster]     # + Leiden 社区检测（graspologic）
 pip install --upgrade codebeacon    # 升级到最新版本并同步更新依赖
 ```
@@ -223,7 +224,7 @@ codebeacon scan <path> [选项]
 codebeacon scan .                         # 当前目录
 codebeacon scan /workspace                # 工作区根目录（多项目）
 codebeacon scan . --update                # 增量：仅重新提取变更文件
-codebeacon scan . --wiki-only             # 不重新提取，仅重新生成 Wiki
+codebeacon scan . --wiki-only             # 跳过重新提取，从现有 beacon.json 重新生成 Wiki/obsidian/上下文映射
 codebeacon scan . --obsidian-dir <path>   # 将 Obsidian Vault 写入自定义位置
 codebeacon scan . --semantic              # 启用 LLM 语义提取
 codebeacon scan . --list-only             # 仅检测框架，不提取
@@ -264,7 +265,6 @@ output:
   dir: .codebeacon
   wiki: true
   obsidian: true
-  graph_html: true
   context_map:
     targets: [CLAUDE.md, .cursorrules, AGENTS.md]
 
@@ -275,6 +275,18 @@ wave:
 
 semantic:
   enabled: false               # 通过 --semantic 标志覆盖
+```
+
+### .codebeaconignore
+
+在项目根目录放置 `.codebeaconignore` 文件可将特定目录或文件排除在扫描之外。语法与 `.gitignore` 相同 — 每行一个模式，`#` 为注释。
+
+```
+# .codebeaconignore
+generated/
+build/
+*.generated.ts
+fixtures/
 ```
 
 ---
@@ -313,7 +325,9 @@ codebeacon 不是两个工具的替代品，而是两者的统合——在共享
 
 - tree-sitter AST 解析完全在进程内运行
 - 正常操作期间无遥测、无分析、无网络调用
-- `--semantic` 标志（默认禁用）会将代码片段发送到已配置的 LLM API——仅在明确启用时使用
+- `--semantic` 标志（默认禁用）激活两种提取模式：
+  1. **结构化注释解析**（无需 LLM） — 从 Javadoc（`@see`、`{@link}`）、Python 文档字符串（`:class:`、`:func:`）和 JSDoc（`@see`、`@param` 类型）中推断交叉引用
+  2. **LLM 推断**（可选） — 设置 `ANTHROPIC_API_KEY` 后，向 Claude API 发送代码片段进行深度关系推断；仅在明确启用时使用
 
 ---
 
