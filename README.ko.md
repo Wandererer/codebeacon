@@ -135,6 +135,74 @@ codebeacon은 2-패스 추출 파이프라인으로 동작합니다:
 
 ---
 
+## AI 통합
+
+### Claude Code 스킬 (`/codebeacon`)
+
+codebeacon을 Claude Code 슬래시 명령어로 설치합니다:
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+`SKILL.md`를 `~/.claude/skills/codebeacon/`에 복사하고 `/codebeacon` 트리거를 `~/.claude/CLAUDE.md`에 등록합니다. Claude Code 세션을 재시작한 후 `/codebeacon`을 입력하면 현재 디렉토리를 스캔합니다.
+
+```
+/codebeacon                  # 현재 디렉토리 스캔
+/codebeacon /path/to/project # 특정 경로 스캔
+/codebeacon sync             # codebeacon.yaml 기반 재스캔
+```
+
+### MCP 서버
+
+codebeacon을 MCP 서버로 실행하면 MCP 호환 클라이언트에서 지식 그래프를 직접 조회할 수 있습니다.
+
+**1단계 — 프로젝트 스캔:**
+```bash
+codebeacon scan .
+```
+
+**2단계 — MCP 클라이언트 설정에 추가:**
+
+**Claude Code** (프로젝트 루트의 `.claude.json` 또는 전역 `~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**연결 후 사용 가능한 MCP 도구:**
+
+| 도구 | 설명 |
+|------|------|
+| `beacon_wiki_index` | 전체 프로젝트 개요 (라우트, 서비스, 엔티티 수) |
+| `beacon_wiki_article` | 경로로 특정 위키 문서 읽기 |
+| `beacon_query` | 레이블 부분 문자열로 노드 검색 |
+| `beacon_path` | 두 노드 간 최단 의존성 경로 |
+| `beacon_blast_radius` | 업스트림 호출자 + 다운스트림 영향 노드 |
+| `beacon_routes` | 전체 HTTP 라우트 목록 (프로젝트 필터 가능) |
+| `beacon_services` | 전체 서비스/클래스 목록 (프로젝트 필터 가능) |
+
+---
+
 ## 설치 옵션
 
 ```bash

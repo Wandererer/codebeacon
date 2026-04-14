@@ -129,6 +129,74 @@ Após o scan, tudo é gerado em `.codebeacon/`:
 
 ---
 
+## Integração com IA
+
+### Skill do Claude Code (`/codebeacon`)
+
+Instale o codebeacon como um comando slash do Claude Code:
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+Isso copia o `SKILL.md` para `~/.claude/skills/codebeacon/` e registra o trigger `/codebeacon` em `~/.claude/CLAUDE.md`. Reinicie sua sessão do Claude Code e digite `/codebeacon` para escanear o diretório atual.
+
+```
+/codebeacon                  # escanear diretório atual
+/codebeacon /path/to/project # escanear um caminho específico
+/codebeacon sync             # re-escanear a partir do codebeacon.yaml
+```
+
+### Servidor MCP
+
+Execute o codebeacon como um servidor MCP persistente para que qualquer cliente compatível com MCP possa consultar o grafo de conhecimento diretamente.
+
+**Passo 1 — escanear o projeto:**
+```bash
+codebeacon scan .
+```
+
+**Passo 2 — adicionar à configuração do cliente MCP:**
+
+**Claude Code** (`.claude.json` na raiz do projeto ou `~/.claude.json` globalmente):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**Ferramentas MCP disponíveis após a conexão:**
+
+| Ferramenta | Descrição |
+|------------|-----------|
+| `beacon_wiki_index` | Visão geral global do projeto (rotas, serviços, entidades) |
+| `beacon_wiki_article` | Ler um artigo do wiki por caminho |
+| `beacon_query` | Buscar nós por substring de rótulo |
+| `beacon_path` | Caminho de dependência mais curto entre dois nós |
+| `beacon_blast_radius` | Chamadores upstream e nós afetados downstream |
+| `beacon_routes` | Listar todas as rotas HTTP (filtrável por projeto) |
+| `beacon_services` | Listar todos os serviços/classes (filtrável por projeto) |
+
+---
+
 ## Opções de instalação
 
 ```bash

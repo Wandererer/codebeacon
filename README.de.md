@@ -130,6 +130,74 @@ Nach dem Scan landet alles in `.codebeacon/`:
 
 ---
 
+## KI-Integration
+
+### Claude Code Skill (`/codebeacon`)
+
+Installiere codebeacon als Claude Code Slash-Befehl:
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+Dies kopiert `SKILL.md` nach `~/.claude/skills/codebeacon/` und registriert den `/codebeacon`-Trigger in `~/.claude/CLAUDE.md`. Starte deine Claude Code-Sitzung neu und tippe `/codebeacon`, um das aktuelle Verzeichnis zu scannen.
+
+```
+/codebeacon                  # aktuelles Verzeichnis scannen
+/codebeacon /path/to/project # bestimmten Pfad scannen
+/codebeacon sync             # erneut aus codebeacon.yaml scannen
+```
+
+### MCP-Server
+
+Führe codebeacon als persistenten MCP-Server aus, damit jeder MCP-kompatible Client den Wissensgraphen direkt abfragen kann.
+
+**Schritt 1 — Projekt scannen:**
+```bash
+codebeacon scan .
+```
+
+**Schritt 2 — zur MCP-Client-Konfiguration hinzufügen:**
+
+**Claude Code** (`.claude.json` im Projektstamm oder global `~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**Verfügbare MCP-Tools nach Verbindung:**
+
+| Tool | Beschreibung |
+|------|--------------|
+| `beacon_wiki_index` | Globale Projektübersicht (Routen, Services, Entitäten) |
+| `beacon_wiki_article` | Wiki-Artikel anhand eines Pfads lesen |
+| `beacon_query` | Knoten per Teilstring-Suche finden |
+| `beacon_path` | Kürzester Abhängigkeitspfad zwischen zwei Knoten |
+| `beacon_blast_radius` | Upstream-Aufrufer und downstream betroffene Knoten |
+| `beacon_routes` | Alle HTTP-Routen auflisten (nach Projekt filterbar) |
+| `beacon_services` | Alle Services/Klassen auflisten (nach Projekt filterbar) |
+
+---
+
 ## Installationsoptionen
 
 ```bash

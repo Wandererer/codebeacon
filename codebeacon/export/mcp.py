@@ -446,7 +446,7 @@ def _dispatch(idx: BeaconIndex, message: dict) -> dict | None:
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "codebeacon", "version": "0.1.0"},
+                "serverInfo": {"name": "codebeacon", "version": "0.1.2"},
             },
         }
 

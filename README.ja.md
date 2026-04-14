@@ -136,6 +136,74 @@ codebeacon は 2 パス抽出パイプラインで動作します：
 
 ---
 
+## AI 連携
+
+### Claude Code スキル (`/codebeacon`)
+
+codebeacon を Claude Code スラッシュコマンドとしてインストール:
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+`SKILL.md` を `~/.claude/skills/codebeacon/` にコピーし、`/codebeacon` トリガーを `~/.claude/CLAUDE.md` に登録します。Claude Code セッションを再起動後、`/codebeacon` と入力するとカレントディレクトリをスキャンします。
+
+```
+/codebeacon                  # カレントディレクトリをスキャン
+/codebeacon /path/to/project # 特定のパスをスキャン
+/codebeacon sync             # codebeacon.yaml から再スキャン
+```
+
+### MCP サーバー
+
+codebeacon を MCP サーバーとして起動すると、MCP 対応クライアントから知識グラフを直接クエリできます。
+
+**ステップ 1 — プロジェクトをスキャン:**
+```bash
+codebeacon scan .
+```
+
+**ステップ 2 — MCP クライアント設定に追加:**
+
+**Claude Code** (プロジェクトルートの `.claude.json` またはグローバルの `~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**接続後に利用可能な MCP ツール:**
+
+| ツール | 説明 |
+|--------|------|
+| `beacon_wiki_index` | プロジェクト全体の概要（ルート・サービス・エンティティ数） |
+| `beacon_wiki_article` | パスで指定した Wiki 記事を読む |
+| `beacon_query` | ラベルの部分文字列でノードを検索 |
+| `beacon_path` | 2 ノード間の最短依存パス |
+| `beacon_blast_radius` | 上流の呼び出し元と下流の影響ノード |
+| `beacon_routes` | 全 HTTP ルート一覧（プロジェクトでフィルター可） |
+| `beacon_services` | 全サービス/クラス一覧（プロジェクトでフィルター可） |
+
+---
+
 ## インストールオプション
 
 ```bash

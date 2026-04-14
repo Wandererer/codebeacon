@@ -129,6 +129,74 @@ Après le scan, tout est généré dans `.codebeacon/` :
 
 ---
 
+## Intégration IA
+
+### Skill Claude Code (`/codebeacon`)
+
+Installez codebeacon comme commande slash dans Claude Code :
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+Cette commande copie `SKILL.md` dans `~/.claude/skills/codebeacon/` et enregistre le déclencheur `/codebeacon` dans `~/.claude/CLAUDE.md`. Redémarrez votre session Claude Code puis tapez `/codebeacon` pour analyser le répertoire courant.
+
+```
+/codebeacon                  # analyser le répertoire courant
+/codebeacon /path/to/project # analyser un chemin spécifique
+/codebeacon sync             # re-analyser depuis codebeacon.yaml
+```
+
+### Serveur MCP
+
+Exécutez codebeacon comme serveur MCP persistant pour permettre à tout client compatible MCP d'interroger directement le graphe de connaissances.
+
+**Étape 1 — analyser le projet :**
+```bash
+codebeacon scan .
+```
+
+**Étape 2 — ajouter à la configuration du client MCP :**
+
+**Claude Code** (`.claude.json` à la racine du projet ou `~/.claude.json` global) :
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`) :
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**Outils MCP disponibles après connexion :**
+
+| Outil | Description |
+|-------|-------------|
+| `beacon_wiki_index` | Vue d'ensemble globale (routes, services, entités) |
+| `beacon_wiki_article` | Lire un article wiki par son chemin |
+| `beacon_query` | Rechercher des nœuds par sous-chaîne d'étiquette |
+| `beacon_path` | Chemin de dépendance le plus court entre deux nœuds |
+| `beacon_blast_radius` | Appelants en amont et nœuds affectés en aval |
+| `beacon_routes` | Liste de toutes les routes HTTP (filtrable par projet) |
+| `beacon_services` | Liste de tous les services/classes (filtrable par projet) |
+
+---
+
 ## Options d'installation
 
 ```bash

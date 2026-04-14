@@ -287,20 +287,40 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
-    import importlib.util
+    import shutil
+    import sys
     from pathlib import Path
 
-    # Locate skill/install.py relative to this package
-    skill_install = Path(__file__).parent.parent / "skill" / "install.py"
-    if not skill_install.exists():
-        # Installed as a package — SKILL.md shipped inside the wheel
-        print("Error: skill/install.py not found. Install from source or run: pip install codebeacon", file=__import__("sys").stderr)
+    # SKILL.md is shipped inside the package at codebeacon/skill/SKILL.md
+    skill_src = Path(__file__).parent / "skill" / "SKILL.md"
+    if not skill_src.exists():
+        print(f"Error: SKILL.md not found at {skill_src}", file=sys.stderr)
         return 1
 
-    spec = importlib.util.spec_from_file_location("_codebeacon_install", skill_install)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.install(verbose=True)
+    claude_dir = Path.home() / ".claude"
+    skills_dir = claude_dir / "skills" / "codebeacon"
+    skill_dest = skills_dir / "SKILL.md"
+    claude_md = claude_dir / "CLAUDE.md"
+
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(skill_src, skill_dest)
+    print(f"  Copied SKILL.md → {skill_dest}")
+
+    trigger_block = (
+        "\n# codebeacon\n"
+        "- **codebeacon** (`~/.claude/skills/codebeacon/SKILL.md`) - scan source code → knowledge graph + wiki. Trigger: `/codebeacon`\n"
+        "When the user types `/codebeacon`, invoke the Skill tool with `skill: \"codebeacon\"` before doing anything else.\n"
+    )
+    existing = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
+    if "# codebeacon" in existing:
+        print(f"  Trigger already present in {claude_md} — skipping.")
+    else:
+        separator = "\n" if existing and not existing.endswith("\n\n") else ""
+        claude_md.write_text(existing + separator + trigger_block, encoding="utf-8")
+        print(f"  Added codebeacon trigger to {claude_md}")
+
+    print("\ncodebeacon skill installed.")
+    print("Start a new Claude Code session and type /codebeacon to use it.")
     return 0
 
 

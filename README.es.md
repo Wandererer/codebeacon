@@ -129,6 +129,74 @@ Después del escaneo, todo se genera en `.codebeacon/`:
 
 ---
 
+## Integración con IA
+
+### Skill de Claude Code (`/codebeacon`)
+
+Instala codebeacon como comando slash de Claude Code:
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+Copia `SKILL.md` en `~/.claude/skills/codebeacon/` y registra el trigger `/codebeacon` en `~/.claude/CLAUDE.md`. Reinicia tu sesión de Claude Code y escribe `/codebeacon` para escanear el directorio actual.
+
+```
+/codebeacon                  # escanear directorio actual
+/codebeacon /path/to/project # escanear una ruta específica
+/codebeacon sync             # re-escanear desde codebeacon.yaml
+```
+
+### Servidor MCP
+
+Ejecuta codebeacon como servidor MCP persistente para que cualquier cliente compatible pueda consultar el grafo de conocimiento directamente.
+
+**Paso 1 — escanear el proyecto:**
+```bash
+codebeacon scan .
+```
+
+**Paso 2 — agregar a la configuración del cliente MCP:**
+
+**Claude Code** (`.claude.json` en la raíz del proyecto o `~/.claude.json` global):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**Herramientas MCP disponibles tras la conexión:**
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `beacon_wiki_index` | Resumen global del proyecto (rutas, servicios, entidades) |
+| `beacon_wiki_article` | Leer un artículo wiki por ruta |
+| `beacon_query` | Buscar nodos por subcadena de etiqueta |
+| `beacon_path` | Ruta de dependencia más corta entre dos nodos |
+| `beacon_blast_radius` | Llamadores upstream y nodos afectados downstream |
+| `beacon_routes` | Lista de todas las rutas HTTP (filtrable por proyecto) |
+| `beacon_services` | Lista de todos los servicios/clases (filtrable por proyecto) |
+
+---
+
 ## Opciones de instalación
 
 ```bash

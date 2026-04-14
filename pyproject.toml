@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.1.0"
+version = "0.1.2"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
@@ -35,7 +35,7 @@ dependencies = [
     "tree-sitter-php>=0.23",
     "tree-sitter-c-sharp>=0.23",
     "tree-sitter-rust>=0.23",
-    "tree-sitter-swift>=0.23",
+    "tree-sitter-swift>=0.0.1",
     "tree-sitter-html>=0.23",
     "tree-sitter-svelte>=0.23",
 ]

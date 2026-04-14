@@ -135,6 +135,74 @@ codebeacon 运行两阶段提取流水线：
 
 ---
 
+## AI 集成
+
+### Claude Code 技能 (`/codebeacon`)
+
+将 codebeacon 安装为 Claude Code 斜杠命令：
+
+```bash
+pip install codebeacon
+codebeacon install
+```
+
+此命令将 `SKILL.md` 复制到 `~/.claude/skills/codebeacon/`，并在 `~/.claude/CLAUDE.md` 中注册 `/codebeacon` 触发器。重启 Claude Code 会话后，输入 `/codebeacon` 即可扫描当前目录。
+
+```
+/codebeacon                  # 扫描当前目录
+/codebeacon /path/to/project # 扫描指定路径
+/codebeacon sync             # 从 codebeacon.yaml 重新扫描
+```
+
+### MCP 服务器
+
+将 codebeacon 作为 MCP 服务器运行，可让任何兼容 MCP 的客户端直接查询知识图谱。
+
+**第一步 — 扫描项目：**
+```bash
+codebeacon scan .
+```
+
+**第二步 — 添加到 MCP 客户端配置：**
+
+**Claude Code**（项目根目录的 `.claude.json` 或全局 `~/.claude.json`）：
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor**（`~/.cursor/mcp.json`）：
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "codebeacon",
+      "args": ["serve", "--dir", "/path/to/.codebeacon"]
+    }
+  }
+}
+```
+
+**连接后可用的 MCP 工具：**
+
+| 工具 | 说明 |
+|------|------|
+| `beacon_wiki_index` | 全局项目概览（路由、服务、实体数量） |
+| `beacon_wiki_article` | 按路径读取指定 Wiki 文章 |
+| `beacon_query` | 按标签子字符串搜索节点 |
+| `beacon_path` | 两节点间的最短依赖路径 |
+| `beacon_blast_radius` | 上游调用方及下游受影响节点 |
+| `beacon_routes` | 全部 HTTP 路由列表（可按项目筛选） |
+| `beacon_services` | 全部服务/类列表（可按项目筛选） |
+
+---
+
 ## 安装选项
 
 ```bash
