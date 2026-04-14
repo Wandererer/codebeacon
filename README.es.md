@@ -40,7 +40,7 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 ## Características principales
 
 - **Pipeline unificado** — análisis de rutas/controladores + grafo de conocimiento en una sola herramienta
-- **24 frameworks, 9 lenguajes** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor
+- **27 frameworks, 9 lenguajes** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, Tauri, Rocket, Warp, ASP.NET Core, Vapor, Ktor
 - **Basado en tree-sitter** — análisis AST estructural, no expresiones regulares; gramáticas de lenguaje incluidas por defecto
 - **Resolución DI en 2 pasos** — Pass 1 extrae nodos AST locales; Pass 2 construye una tabla de símbolos global y resuelve los mapeos Interface → Implementation
 - **Arquitectura Wave merge** — archivos procesados en chunks paralelos y fusionados globalmente; maneja grandes monorepos sin problemas de memoria
@@ -81,7 +81,7 @@ codebeacon sync                      # ejecuciones posteriores vía configuraci�
 | Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web, Axum |
+| Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 

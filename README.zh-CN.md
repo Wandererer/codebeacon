@@ -40,7 +40,7 @@
 ## 核心功能
 
 - **统一流水线** — 路由/控制器分析 + 知识图谱集于一体，无需手动拼接
-- **24 个框架，9 种语言** — Spring Boot、NestJS、Django、FastAPI、Flask、Rails、Express、Fastify、Koa、React、Next.js、Vue、Nuxt、Angular、SvelteKit、Gin、Echo、Fiber、Laravel、Actix-Web、Axum、ASP.NET Core、Vapor、Ktor
+- **27 个框架，9 种语言** — Spring Boot、NestJS、Django、FastAPI、Flask、Rails、Express、Fastify、Koa、React、Next.js、Vue、Nuxt、Angular、SvelteKit、Gin、Echo、Fiber、Laravel、Actix-Web、Axum、Tauri、Rocket、Warp、ASP.NET Core、Vapor、Ktor
 - **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；语言语法默认内置
 - **两阶段依赖注入解析** — Pass 1 提取本地 AST 节点；Pass 2 构建全局符号表，解析单阶段工具遗漏的接口→实现映射
 - **Wave 合并架构** — 文件以并行块处理后全局合并；大型单仓库也不会出现内存问题
@@ -81,7 +81,7 @@ codebeacon sync                      # 后续运行通过配置文件驱动
 | Go | Gin、Echo、Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web、Axum |
+| Rust | Actix-Web、Axum、Tauri、Rocket、Warp |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 

@@ -38,7 +38,7 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 ## Key Features
 
 - **Unified pipeline** — route/controller analysis + knowledge graph in one tool, no manual stitching
-- **24 frameworks, 9 languages** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor
+- **27 frameworks, 9 languages** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, Tauri, Rocket, Warp, ASP.NET Core, Vapor, Ktor
 - **Tree-sitter based** — structural AST parsing, not regex; all language grammars included out of the box
 - **Two-pass DI resolution** — Pass 1 extracts local AST nodes; Pass 2 builds a global symbol table and resolves Interface → Implementation mappings that single-pass tools miss
 - **Wave merge architecture** — files processed in parallel chunks, results merged globally; handles large monorepos without memory blowouts
@@ -79,7 +79,7 @@ codebeacon sync                      # subsequent runs via config
 | Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web, Axum |
+| Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 

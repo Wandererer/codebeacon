@@ -37,6 +37,9 @@ _FW_TO_QUERY: dict[str, str] = {
     "fastapi":     "fastapi",
     "django":      "django",
     "flask":       "flask",
+    "tornado":     "flask",
+    "aiohttp":     "flask",
+    "python":      "fastapi",
     "gin":         "gin",
     "echo":        "gin",
     "fiber":       "gin",
@@ -47,10 +50,14 @@ _FW_TO_QUERY: dict[str, str] = {
     "actix":       "actix",
     "axum":        "actix",
     "rust":        "actix",
+    "tauri":       "tauri",
+    "rocket":      "actix",
+    "warp":        "actix",
     "vapor":       "vapor",
     "ktor":        "ktor",
     "vue":         "vue",
     "nuxt":        "vue",
+    "node":        "express",
     "sveltekit":   "svelte",
     "angular":     "angular",
 }
@@ -107,6 +114,7 @@ def extract_services(
         "laravel":     _interpret_laravel,
         "aspnet":      _interpret_aspnet,
         "actix":       _interpret_actix,
+        "tauri":       _interpret_tauri,
         "vapor":       _interpret_vapor,
         "ktor":        _interpret_ktor,
         "react":       _interpret_noop,
@@ -595,3 +603,28 @@ def _interpret_angular(
                     break  # assign to first service (constructor_di is inside a class)
 
     return list(services.values()), unresolved
+
+
+def _interpret_tauri(
+    file_path: str, matches: list, framework: str,
+) -> tuple[list[ServiceInfo], list[UnresolvedRef]]:
+    """Tauri: Managed state structs (containing Mutex/RwLock/Arc fields)."""
+    services: list[ServiceInfo] = []
+    seen: set[str] = set()
+
+    for _idx, caps in matches:
+        if "service.struct" in caps and "service.struct_name" in caps:
+            name = node_text(caps["service.struct_name"][0])
+            if name in seen:
+                continue
+            seen.add(name)
+            node = caps["service.struct"][0]
+            services.append(ServiceInfo(
+                name=name,
+                class_name=name,
+                source_file=file_path,
+                line=node.start_point[0] + 1,
+                framework="tauri",
+                annotations=["managed_state"],
+            ))
+    return services, []

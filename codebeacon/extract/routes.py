@@ -39,6 +39,9 @@ _FW_TO_QUERY: dict[str, str] = {
     "fastapi":     "fastapi",
     "django":      "django",
     "flask":       "flask",
+    "tornado":     "flask",
+    "aiohttp":     "flask",
+    "python":      "fastapi",
     "gin":         "gin",
     "echo":        "gin",
     "fiber":       "gin",
@@ -49,10 +52,14 @@ _FW_TO_QUERY: dict[str, str] = {
     "actix":       "actix",
     "axum":        "actix",
     "rust":        "actix",
+    "tauri":       "tauri",
+    "rocket":      "actix",
+    "warp":        "actix",
     "vapor":       "vapor",
     "ktor":        "ktor",
     "vue":         "vue",
     "nuxt":        "vue",
+    "node":        "express",
     "sveltekit":   "svelte",
     "angular":     "angular",
 }
@@ -153,6 +160,7 @@ def extract_routes(
         "laravel":     _interpret_laravel,
         "aspnet":      _interpret_aspnet,
         "actix":       _interpret_actix,
+        "tauri":       _interpret_tauri,
         "vapor":       _interpret_vapor,
         "ktor":        _interpret_ktor,
         "react":       _interpret_react,
@@ -907,4 +915,47 @@ def _interpret_angular(file_path: str, matches: list, framework: str) -> list[Ro
                 line=line,
                 framework="angular",
             ))
+    return routes
+
+
+def _interpret_tauri(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
+    """Tauri: #[tauri::command] functions as IPC endpoints (routes).
+
+    The frontend calls these via invoke("command_name", { args }).
+    Attributes and function_items are siblings in tree-sitter-rust, so
+    we collect the end-lines of all #[tauri::command] attributes, then
+    match each function whose start line follows an attribute end line.
+    """
+    routes: list[RouteInfo] = []
+
+    # Collect end-lines of #[tauri::command] attributes
+    cmd_attr_ends: set[int] = set()
+    for _idx, caps in matches:
+        if "route.tauri_attr" in caps:
+            attr_node = caps["route.tauri_attr"][0]
+            cmd_attr_ends.add(attr_node.end_point[0])
+
+    if not cmd_attr_ends:
+        return []
+
+    # Match function_items that start right after an attribute
+    seen: set[str] = set()
+    for _idx, caps in matches:
+        if "route.func" in caps and "route.func_name" in caps:
+            func_node = caps["route.func"][0]
+            func_start_line = func_node.start_point[0]
+            # Function must start on the line immediately after the attribute
+            if func_start_line in cmd_attr_ends or (func_start_line - 1) in cmd_attr_ends:
+                name = node_text(caps["route.func_name"][0])
+                if name in seen:
+                    continue
+                seen.add(name)
+                routes.append(RouteInfo(
+                    method="INVOKE",
+                    path=f"/tauri/{name}",
+                    handler=name,
+                    source_file=file_path,
+                    line=func_node.start_point[0] + 1,
+                    framework="tauri",
+                ))
     return routes

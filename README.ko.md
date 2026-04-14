@@ -40,7 +40,7 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 ## 주요 기능
 
 - **통합 파이프라인** — 라우트/컨트롤러 분석 + 지식 그래프를 하나의 도구로, 수동 연결 불필요
-- **24개 프레임워크, 9개 언어** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, ASP.NET Core, Vapor, Ktor
+- **27개 프레임워크, 9개 언어** — Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, Tauri, Rocket, Warp, ASP.NET Core, Vapor, Ktor
 - **tree-sitter 기반** — 정규식이 아닌 구조적 AST 파싱; 언어 그래머 기본 포함
 - **2-패스 DI 해결** — Pass 1에서 로컬 AST 노드 추출, Pass 2에서 전역 심볼 테이블로 Interface → Implementation 매핑 해결
 - **Wave 병합 아키텍처** — 파일을 병렬 청크로 처리 후 전역 병합; 대형 모노레포도 메모리 폭발 없이 처리
@@ -81,7 +81,7 @@ codebeacon sync                      # 이후 실행은 설정 파일 기반
 | Go | Gin, Echo, Fiber |
 | Ruby | Rails |
 | PHP | Laravel |
-| Rust | Actix-Web, Axum |
+| Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
 | C# | ASP.NET Core |
 | Swift | Vapor |
 

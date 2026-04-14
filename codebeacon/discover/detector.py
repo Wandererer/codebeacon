@@ -66,8 +66,11 @@ _GO_MOD_REFINEMENTS: list[tuple[str, str]] = [
 ]
 
 _CARGO_REFINEMENTS: list[tuple[str, str]] = [
-    ("axum",   "axum"),
-    ("actix-web", "actix"),
+    ("tauri",      "tauri"),
+    ("axum",       "axum"),
+    ("actix-web",  "actix"),
+    ("rocket",     "rocket"),
+    ("warp",       "warp"),
 ]
 
 _BUILD_GRADLE_KOTLIN_REFINEMENTS: list[tuple[str, str]] = [
@@ -108,7 +111,7 @@ def _refine_go_framework(project_dir: Path) -> str:
     for pattern, fw in _GO_MOD_REFINEMENTS:
         if pattern in content:
             return fw
-    return "gin"  # most common Go web framework default
+    return "go"
 
 
 def _refine_rust_framework(project_dir: Path) -> str:
@@ -116,7 +119,7 @@ def _refine_rust_framework(project_dir: Path) -> str:
     for pattern, fw in _CARGO_REFINEMENTS:
         if pattern in content:
             return fw
-    return "actix"
+    return "rust"
 
 
 def _refine_gradle_framework(project_dir: Path) -> tuple[str, str]:

@@ -63,6 +63,7 @@ QUERY_GRAMMAR_ALLOWLIST: dict[str, frozenset[str]] = {
     "laravel":     frozenset({"php"}),
     "aspnet":      frozenset({"csharp"}),
     "actix":       frozenset({"rust"}),
+    "tauri":       frozenset({"rust"}),
     "vapor":       frozenset({"swift"}),
 }
 

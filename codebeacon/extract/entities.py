@@ -37,6 +37,9 @@ _FW_TO_QUERY: dict[str, str] = {
     "fastapi":     "fastapi",
     "django":      "django",
     "flask":       "flask",
+    "tornado":     "flask",
+    "aiohttp":     "flask",
+    "python":      "fastapi",
     "gin":         "gin",
     "echo":        "gin",
     "fiber":       "gin",
@@ -47,8 +50,12 @@ _FW_TO_QUERY: dict[str, str] = {
     "actix":       "actix",
     "axum":        "actix",
     "rust":        "actix",
+    "tauri":       "tauri",
+    "rocket":      "actix",
+    "warp":        "actix",
     "vapor":       "vapor",
     "ktor":        "ktor",
+    # Frontend-only frameworks intentionally omitted from entities (no ORM).
 }
 
 # GORM struct tag parser: `gorm:"column:name;primaryKey"`
@@ -95,6 +102,7 @@ def extract_entities(file_path: str, framework: str) -> list[EntityInfo]:
         "laravel":     _interpret_laravel,
         "aspnet":      _interpret_aspnet,
         "actix":       _interpret_rust,
+        "tauri":       _interpret_tauri,
         "vapor":       _interpret_vapor,
         "ktor":        _interpret_ktor,
         "react":       _interpret_noop,
@@ -573,3 +581,71 @@ def _interpret_ktor(
             ))
 
     return entities
+
+
+def _interpret_tauri(
+    file_path: str, matches: list, framework: str,
+) -> list[EntityInfo]:
+    """Tauri: structs with #[derive(Serialize/Deserialize)] as IPC payload types.
+
+    Attributes and struct_items are siblings in tree-sitter-rust. We first
+    collect #[derive(...)] attributes containing Serialize or Deserialize,
+    record their end-lines, then pair each struct that starts right after.
+    """
+    _TAURI_ENTITY_TRAITS = frozenset({"Serialize", "Deserialize"})
+
+    # Pass 1: collect derive attributes with Serialize/Deserialize
+    # end_line → set of detected traits
+    derive_ends: dict[int, set[str]] = {}
+    for _idx, caps in matches:
+        if "entity.derive_attr" in caps and "entity.derive_args" in caps:
+            attr_node = caps["entity.derive_attr"][0]
+            args_text = node_text(caps["entity.derive_args"][0])
+            traits = {t.strip() for t in args_text.strip("()").split(",")}
+            if _TAURI_ENTITY_TRAITS.intersection(traits):
+                derive_ends[attr_node.end_point[0]] = traits
+
+    if not derive_ends:
+        return []
+
+    # Pass 2: match structs that start right after a qualifying derive attribute
+    entities: dict[int, EntityInfo] = {}
+    class_ranges: dict[int, tuple[int, int]] = {}
+    for _idx, caps in matches:
+        if "entity.struct" in caps and "entity.struct_name" in caps:
+            struct_node = caps["entity.struct"][0]
+            start_line = struct_node.start_point[0]
+            # Check if preceded by a qualifying derive — allow 1-2 lines gap
+            # (there may be #[serde(...)] between derive and struct)
+            matched = False
+            for gap in range(3):
+                if (start_line - 1 - gap) in derive_ends:
+                    matched = True
+                    break
+            if not matched:
+                continue
+            name = node_text(caps["entity.struct_name"][0])
+            key = struct_node.start_byte
+            entities[key] = EntityInfo(
+                name=name,
+                table_name="",
+                source_file=file_path,
+                line=start_line + 1,
+                framework="tauri",
+            )
+            class_ranges[key] = (struct_node.start_byte, struct_node.end_byte)
+
+    # Pass 3: collect fields
+    for _idx, caps in matches:
+        if "entity.field" in caps and "entity.field_name" in caps:
+            field_node = caps["entity.field"][0]
+            fname = node_text(caps["entity.field_name"][0])
+            ftype = node_text(caps["entity.field_type"][0]) if "entity.field_type" in caps else ""
+            for key, (start, end) in class_ranges.items():
+                if start <= field_node.start_byte <= end:
+                    entities[key].fields.append({
+                        "name": fname, "type": ftype, "annotations": [],
+                    })
+                    break
+
+    return list(entities.values())

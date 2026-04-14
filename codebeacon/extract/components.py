@@ -29,6 +29,7 @@ from codebeacon.extract.base import (
 _FW_TO_QUERY: dict[str, str] = {
     "react":     "react",
     "nextjs":    "react",
+    "node":      "react",
     "vue":       "vue",
     "nuxt":      "vue",
     "sveltekit": "svelte",
