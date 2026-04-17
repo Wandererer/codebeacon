@@ -127,7 +127,7 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         from codebeacon.cache import Cache
         from codebeacon.wave import auto_wave
         from codebeacon.graph.build import build_graph
-        from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db
+        from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db, enrich_ipc_invoke
         from codebeacon.graph.cluster import cluster, apply_communities, score_all
 
         cache = Cache(output_dir)
@@ -176,8 +176,13 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         # Enrichment
         api_edges = enrich_http_api(G)
         db_edges = enrich_shared_db(G)
-        if api_edges or db_edges:
-            print(f"    Enriched: +{api_edges} calls_api, +{db_edges} shares_db_entity edges")
+        ipc_edges = enrich_ipc_invoke(G)
+        enriched_parts = []
+        if api_edges: enriched_parts.append(f"+{api_edges} calls_api")
+        if db_edges: enriched_parts.append(f"+{db_edges} shares_db_entity")
+        if ipc_edges: enriched_parts.append(f"+{ipc_edges} invokes_command")
+        if enriched_parts:
+            print(f"    Enriched: {', '.join(enriched_parts)} edges")
 
         # Community detection
         print("  Detecting communities ...")
@@ -188,7 +193,7 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         print(f"    {n_communities} communities detected")
 
         # Analysis
-        report = analyze(G, communities, cohesion)
+        report = analyze(G, communities, cohesion, project_paths={p.name: p.path for p in projects})
 
         # Save outputs
         import networkx.readwrite.json_graph as nxjson
@@ -249,7 +254,7 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     from pathlib import Path
     from codebeacon.graph.analyze import analyze, report_to_markdown
     from codebeacon.graph.build import build_graph
-    from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db
+    from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db, enrich_ipc_invoke
     from codebeacon.graph.cluster import cluster, apply_communities, score_all
     from codebeacon.wiki.generator import generate_wiki
     from codebeacon.export.obsidian import generate_obsidian_vault
@@ -364,7 +369,7 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             n_communities = len(set(communities.values())) if communities else 0
             print(f"    {n_communities} communities")
 
-            report = analyze(G, communities, cohesion)
+            report = analyze(G, communities, cohesion, project_paths={project.name: project.path})
 
             beacon_path = Path(proj_output_dir) / "beacon.json"
             beacon_path.write_text(
@@ -418,7 +423,7 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
         n_communities_all = len(set(communities_all.values())) if communities_all else 0
         print(f"    {n_communities_all} communities detected")
 
-        report_all = analyze(G_all, communities_all, cohesion_all)
+        report_all = analyze(G_all, communities_all, cohesion_all, project_paths={p.name: p.path for p in projects})
 
         beacon_path = workspace_path / "beacon.json"
         beacon_path.write_text(

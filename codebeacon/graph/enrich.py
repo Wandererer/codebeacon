@@ -1,8 +1,10 @@
-"""Graph enrichment: HTTP API cross-service edges + shared DB entity edges.
+"""Graph enrichment: HTTP/IPC cross-service edges + shared DB entity edges.
 
-Two enrichment passes run AFTER the base graph is built by build.py:
-  1. enrich_http_api()  — frontend URL calls → backend controller routes (calls_api edges)
-  2. enrich_shared_db() — same DAO/Entity used by multiple services (shares_db_entity edges)
+Three enrichment passes run AFTER the base graph is built by build.py:
+  1. enrich_http_api()    — frontend URL calls → backend routes (calls_api edges)
+  2. enrich_shared_db()   — same DAO/Entity across services (shares_db_entity edges)
+  3. enrich_ipc_invoke()  — frontend invoke("cmd") → IPC command routes (invokes_command edges)
+     Covers Tauri, Electron ipcRenderer, and any invoke()-pattern IPC framework.
 """
 
 from __future__ import annotations
@@ -187,6 +189,91 @@ def enrich_shared_db(G: nx.DiGraph) -> int:
                         shared_entities=[entity_id],
                     )
                     added += 1
+
+    return added
+
+
+# ── IPC invoke enrichment (Tauri, Electron, etc.) ────────────────────────────
+
+# Regexes for IPC invoke patterns across desktop/hybrid frameworks:
+#   Tauri:    invoke("cmd")  invoke<T>("cmd")
+#   Electron: ipcRenderer.invoke("cmd")  ipcRenderer.send("cmd")
+_IPC_INVOKE_RES = [
+    re.compile(r"""invoke\s*(?:<[^>]*>)?\s*\(\s*["'](\w+)["']"""),
+    re.compile(r"""ipcRenderer\.(?:invoke|send)\s*\(\s*["']([^"']+)["']"""),
+]
+
+
+def _extract_ipc_commands(source_file: str) -> list[str]:
+    """Extract IPC invoke/send command names from a frontend source file."""
+    try:
+        content = Path(source_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    commands: set[str] = set()
+    for pat in _IPC_INVOKE_RES:
+        for m in pat.finditer(content):
+            commands.add(m.group(1))
+    return list(commands)
+
+
+def enrich_ipc_invoke(G: nx.DiGraph) -> int:
+    """Add invokes_command edges: frontend invoke("cmd") → backend IPC command route.
+
+    Framework-agnostic — works with any route whose method is INVOKE,
+    regardless of backend framework (Tauri, Electron, etc.).
+
+    Strategy:
+    - Collect all 'route' nodes where method == "INVOKE"
+    - Extract the command name from the route handler
+    - For each frontend component, scan for invoke()/ipcRenderer.invoke() calls
+    - Match command names across projects
+
+    Returns:
+        Number of new invokes_command edges added.
+    """
+    added = 0
+
+    # Build command lookup: handler_name → (node_id, project)
+    cmd_map: dict[str, tuple[str, str]] = {}
+    for node_id, data in G.nodes(data=True):
+        if data.get("type") != "route":
+            continue
+        method = data.get("method", "")
+        if method != "INVOKE":
+            continue
+        handler = data.get("label", "").split(" ")[0]  # "handler [INVOKE /...]" → "handler"
+        if handler:
+            cmd_map[handler] = (node_id, data.get("project", ""))
+
+    if not cmd_map:
+        return 0
+
+    # Find frontend component nodes and scan for IPC calls
+    for node_id, data in G.nodes(data=True):
+        if data.get("type") != "component":
+            continue
+        src_proj = data.get("project", "")
+        src_file = data.get("source_file", "")
+        if not src_file:
+            continue
+
+        commands = _extract_ipc_commands(src_file)
+        for cmd in commands:
+            if cmd not in cmd_map:
+                continue
+            target_id, target_proj = cmd_map[cmd]
+            if target_proj == src_proj:
+                continue
+            if not G.has_edge(node_id, target_id):
+                G.add_edge(
+                    node_id, target_id,
+                    relation="invokes_command",
+                    confidence="EXTRACTED",
+                    confidence_score=1.0,
+                    source_file=src_file,
+                )
+                added += 1
 
     return added
 

@@ -3,15 +3,18 @@
 These metrics help users understand their codebase structure at a glance.
 
 Public API:
-    god_nodes(G, top_n, min_degree)          → list[GodNode]
-    surprising_connections(G, communities)    → list[SurprisingConnection]
-    hub_files(G, top_n)                       → list[HubFile]
-    analyze(G, communities, cohesion_scores)  → GraphReport
-    report_to_markdown(report)                → str
+    god_nodes(G, top_n, min_degree, project_paths)  → list[GodNode]
+    surprising_connections(G, communities)           → list[SurprisingConnection]
+    hub_files(G, top_n)                              → list[HubFile]
+    analyze(G, communities, cohesion_scores,
+            project_paths)                           → GraphReport
+    report_to_markdown(report)                       → str
 """
 
 from __future__ import annotations
 
+import os
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,15 +25,15 @@ import networkx as nx
 
 @dataclass
 class GodNode:
-    """A node with unusually high degree (hub / bottleneck)."""
-    node_id: str
-    label: str
-    type: str
-    in_degree: int
-    out_degree: int
-    degree: int
-    centrality: float
-    source_file: str
+    """A directory with unusually high cross-boundary coupling."""
+    folder_path: str    # relative path within project: "lib/utils" or "src-tauri/src"
+    label: str          # folder name: "utils"
+    project: str        # owning project: "desktop"
+    child_count: int    # number of nodes inside this folder
+    in_degree: int      # external → folder edges
+    out_degree: int     # folder → external edges
+    degree: int         # total cross-boundary edges
+    centrality: float   # degree / (total_nodes - child_count)
 
 
 @dataclass
@@ -70,37 +73,123 @@ class GraphReport:
 
 # ── Analysis functions ────────────────────────────────────────────────────────
 
+def _infer_project_paths(G: nx.DiGraph) -> dict[str, str]:
+    """Infer project root paths from source_file attributes in the graph.
+
+    Groups nodes by their ``project`` attribute, then finds the common path
+    prefix of all source_file directories within each project.
+    """
+    project_dirs: dict[str, list[str]] = defaultdict(list)
+    for _node_id, data in G.nodes(data=True):
+        sf = data.get("source_file", "")
+        proj = data.get("project", "")
+        if sf and proj:
+            project_dirs[proj].append(os.path.dirname(os.path.abspath(sf)))
+
+    result: dict[str, str] = {}
+    for proj, dirs in project_dirs.items():
+        if dirs:
+            result[proj] = os.path.commonpath(dirs)
+    return result
+
+
 def god_nodes(
     G: nx.DiGraph,
     top_n: int = 20,
     min_degree: int = 5,
+    project_paths: Optional[dict[str, str]] = None,
 ) -> list[GodNode]:
-    """Find nodes with the highest degree (potential god classes / bottlenecks).
+    """Find directories with the highest cross-boundary coupling.
+
+    Counts only edges that cross folder boundaries (cross-boundary edges).
+    Intra-folder edges are ignored, so a single large wrapper file can no
+    longer dominate solely because of its high node-level degree.
 
     Args:
         G: the knowledge graph
-        top_n: return at most this many nodes
-        min_degree: minimum total degree to qualify
+        top_n: return at most this many folders
+        min_degree: minimum cross-boundary edge count to qualify
+        project_paths: optional dict mapping project name → absolute project
+                       root path.  When None, paths are inferred automatically
+                       from source_file attributes via ``_infer_project_paths``.
 
     Returns:
-        List of GodNode sorted by degree descending.
+        List of GodNode (folder-level) sorted by degree descending.
     """
-    centrality = nx.degree_centrality(G)
+    if project_paths is None:
+        project_paths = _infer_project_paths(G)
 
-    results: list[GodNode] = []
+    total_nodes = G.number_of_nodes()
+
+    # Step 1: build node → (folder_key, folder_path, project) mapping.
+    # folder_key uses "{project}/{rel}" for cross-project uniqueness.
+    # folder_path stores only the relative portion shown in the report.
+    node_folder_key: dict[str, str] = {}
+    key_to_rel: dict[str, str] = {}
+    key_to_project: dict[str, str] = {}
+
     for node_id, data in G.nodes(data=True):
-        deg = G.degree(node_id)
-        if deg < min_degree:
+        sf = data.get("source_file", "")
+        proj = data.get("project", "")
+        if not sf:
             continue
+        dirname = os.path.dirname(os.path.abspath(sf))
+        if proj and proj in project_paths:
+            try:
+                rel = os.path.relpath(dirname, project_paths[proj])
+            except ValueError:
+                rel = dirname
+            # Skip nodes whose source lives outside the project root
+            if rel.startswith(".."):
+                rel = dirname
+        else:
+            rel = dirname
+        key = f"{proj}/{rel}" if proj else rel
+        node_folder_key[node_id] = key
+        key_to_rel[key] = rel
+        key_to_project[key] = proj
+
+    # Step 2: count cross-boundary edges in a single pass.
+    folder_in: dict[str, int] = defaultdict(int)
+    folder_out: dict[str, int] = defaultdict(int)
+    folder_children: dict[str, set] = defaultdict(set)
+
+    for node_id in G.nodes():
+        fk = node_folder_key.get(node_id)
+        if fk:
+            folder_children[fk].add(node_id)
+
+    for src, tgt in G.edges():
+        src_key = node_folder_key.get(src)
+        tgt_key = node_folder_key.get(tgt)
+        if src_key is None or tgt_key is None:
+            continue
+        if src_key != tgt_key:
+            folder_out[src_key] += 1
+            folder_in[tgt_key] += 1
+
+    # Step 3: filter, build GodNode list, sort.
+    results: list[GodNode] = []
+    for folder_key in folder_children:
+        in_d = folder_in.get(folder_key, 0)
+        out_d = folder_out.get(folder_key, 0)
+        degree = in_d + out_d
+        if degree < min_degree:
+            continue
+        child_count = len(folder_children[folder_key])
+        centrality = degree / max(1, total_nodes - child_count)
+        rel = key_to_rel.get(folder_key, folder_key)
+        proj = key_to_project.get(folder_key, "")
+        label = os.path.basename(rel) if rel not in (".", "") else "(root)"
         results.append(GodNode(
-            node_id=node_id,
-            label=data.get("label", node_id),
-            type=data.get("type", "unknown"),
-            in_degree=G.in_degree(node_id),
-            out_degree=G.out_degree(node_id),
-            degree=deg,
-            centrality=centrality.get(node_id, 0.0),
-            source_file=data.get("source_file", ""),
+            folder_path=rel,
+            label=label,
+            project=proj,
+            child_count=child_count,
+            in_degree=in_d,
+            out_degree=out_d,
+            degree=degree,
+            centrality=centrality,
         ))
 
     results.sort(key=lambda n: n.degree, reverse=True)
@@ -207,6 +296,7 @@ def analyze(
     G: nx.DiGraph,
     communities: Optional[dict[str, int]] = None,
     cohesion_scores: Optional[dict[int, float]] = None,
+    project_paths: Optional[dict[str, str]] = None,
 ) -> GraphReport:
     """Run all analyses and return a unified GraphReport.
 
@@ -214,6 +304,8 @@ def analyze(
         G: built knowledge graph (output of build.py + optional enrich.py)
         communities: optional community mapping from cluster.py
         cohesion_scores: optional per-community cohesion scores from cluster.score_all()
+        project_paths: optional dict mapping project name → absolute project root path.
+                       When None, paths are inferred automatically from the graph.
     """
     report = GraphReport(
         node_count=G.number_of_nodes(),
@@ -224,7 +316,7 @@ def analyze(
         isolated_nodes=sum(1 for n in G.nodes() if G.degree(n) == 0),
     )
 
-    report.god_nodes = god_nodes(G)
+    report.god_nodes = god_nodes(G, project_paths=project_paths)
     report.hub_files = hub_files(G)
 
     if communities:
@@ -248,12 +340,14 @@ def report_to_markdown(report: GraphReport) -> str:
     ]
 
     if report.god_nodes:
-        lines += ["## God Nodes (High Coupling)", ""]
-        lines.append(f"{'Node':<40} {'Type':<12} {'Degree':>6} {'Centrality':>10}")
-        lines.append("-" * 72)
+        lines += ["## God Nodes (High-Coupling Directories)", ""]
+        lines.append(
+            f"{'Folder':<44} {'Project':<12} {'Cross-Edges':>11} {'Children':>8} {'Centrality':>10}"
+        )
+        lines.append("-" * 89)
         for gn in report.god_nodes[:10]:
             lines.append(
-                f"{gn.label:<40} {gn.type:<12} {gn.degree:>6} {gn.centrality:>10.4f}"
+                f"{gn.folder_path:<44} {gn.project:<12} {gn.degree:>11} {gn.child_count:>8} {gn.centrality:>10.4f}"
             )
         lines.append("")
 

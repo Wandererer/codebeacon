@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.1.7"
+version = "0.1.8"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
