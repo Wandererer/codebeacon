@@ -273,40 +273,42 @@ def _build_content(
         lines = [
             "# CLAUDE.md",
             "",
-            "## MANDATORY: Lookup Strategy",
+            "## Lookup strategy",
             "",
-            "> **Read these before ANY code exploration. No exceptions.**",
-            ">",
-            "> Skipping these steps and reading source files directly is a rule violation.",
+            "> This repo ships a pre-built index in `.codebeacon/`. Check it first —",
+            "> most \"where is X\" questions resolve in one read without a full-repo search.",
             "",
         ]
     elif tool == "cursor":
         lines = [
             "# Project Context",
             "",
-            "## Lookup Strategy",
+            "## Lookup strategy",
             "",
-            "> Always follow this 3-step lookup before editing code.",
+            "> A pre-built index lives in `.codebeacon/`. Use the 3-step lookup below",
+            "> before reaching for Glob or Grep.",
             "",
         ]
     else:  # agents
         lines = [
             "# AGENTS.md",
             "",
-            "## Context Lookup Protocol",
+            "## Lookup strategy",
             "",
-            "> All agents MUST follow this 3-step lookup before writing or modifying code.",
+            "> A pre-built index lives in `.codebeacon/`. Follow the 3-step lookup below",
+            "> so parallel agents converge on the same answer.",
             "",
         ]
 
     # ── Step 1: wiki ──
     lines += [
-        "### Step 1 → codebeacon wiki (routes, controllers, services, entities) — ALWAYS",
+        "### Step 1 — codebeacon wiki",
+        "Routes, controllers, services, entities.",
         "```",
-        f"{codebeacon_dir}/wiki/index.md                    ← MUST read at session start",
-        f"{codebeacon_dir}/wiki/{{project}}/controllers/{{Name}}.md  ← for controller logic",
-        f"{codebeacon_dir}/wiki/{{project}}/services/{{Name}}.md     ← for service methods",
-        f"{codebeacon_dir}/wiki/{{project}}/entities/{{Name}}.md     ← for data models",
+        f"{codebeacon_dir}/wiki/index.md                    ← global index",
+        f"{codebeacon_dir}/wiki/{{project}}/controllers/{{Name}}.md  ← controller logic",
+        f"{codebeacon_dir}/wiki/{{project}}/services/{{Name}}.md     ← service methods",
+        f"{codebeacon_dir}/wiki/{{project}}/entities/{{Name}}.md     ← data models",
         f"{codebeacon_dir}/wiki/routes.md                   ← all API routes across projects",
         "```",
         "",
@@ -314,11 +316,9 @@ def _build_content(
 
     # ── Step 2: obsidian ──
     lines += [
-        "### Step 2 → codebeacon obsidian (methods, fields, connections) — ALWAYS",
-        "**MUST read even if Step 1 found results.** Obsidian notes contain method lists,",
-        "field definitions, and class-level connections that wiki articles do not have.",
-        "",
-        f"Look up by class name — replace `{{project}}` with the relevant folder:",
+        "### Step 2 — obsidian notes",
+        "Class-level detail (methods, fields, incoming/outgoing edges) the wiki omits.",
+        "Look up by class name — replace `{project}` with the relevant folder:",
         "```",
         f"{obsidian_path}/{{project}}/{{ClassName}}.md",
         "```",
@@ -351,21 +351,17 @@ def _build_content(
 
     # ── Step 3 ──
     lines += [
-        "### Step 3 → source file (ONLY files identified in Steps 1-2)",
-        "Read only the specific source files whose paths were found in Steps 1-2.",
-        "No directory exploration, no Glob scans, no broad Grep searches.",
+        "### Step 3 — source file",
+        "Open the paths surfaced by Steps 1–2.",
         "",
     ]
 
     if tool == "claude":
         lines += [
-            "### Prohibited actions (before completing Steps 1-2)",
-            "- **DO NOT use Explore agent**",
-            "- **DO NOT use Glob for directory scans**",
-            "- **DO NOT use Grep for broad searches**",
-            "- **DO NOT Read source files directly without checking Steps 1-2 first**",
-            "",
-            "Proceed to Step 3 only when Steps 1-2 are insufficient.",
+            "### Fall back to direct search",
+            "Reach for Glob, Grep, or the Explore agent when the index does not cover",
+            "what you need — new files, deep implementation details, or cross-cutting",
+            "searches that span projects.",
             "",
         ]
 
