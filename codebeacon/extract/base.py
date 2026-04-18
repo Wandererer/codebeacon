@@ -104,7 +104,7 @@ def is_grammar_allowed(query_name: str, lang: Language) -> bool:
     # Reverse-lookup the grammar name from the cached Language object
     gram_name = next((k for k, v in _LANG_CACHE.items() if v is lang), None)
     if gram_name is None:
-        return True  # can't determine — let it run
+        return False  # can't determine — deny when allowlist exists
     return gram_name in allowed
 
 

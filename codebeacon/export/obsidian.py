@@ -74,6 +74,12 @@ def generate_obsidian_vault(
     vault = Path(obsidian_dir) if obsidian_dir else Path(output_dir) / "obsidian"
     vault.mkdir(parents=True, exist_ok=True)
 
+    # Clear stale notes from previous runs so step 5 can overwrite them
+    for svc_dir in vault.iterdir():
+        if svc_dir.is_dir() and not svc_dir.name.startswith("."):
+            for md in svc_dir.glob("*.md"):
+                md.unlink()
+
     # Step 1 — basic note generation
     _step1_generate_notes(G, communities, vault)
 

@@ -23,6 +23,8 @@ _API_URL_RES = [
     re.compile(r'''(?:api|http|client|instance|request)\.\w+\b[^`"']*[`"']([^`"'$]+)[`"']'''),
     re.compile(r'''url\s*[:=]\s*[`"']([^`"'$]+)[`"']'''),
     re.compile(r'''["'](/api/[^"'`\s]+)["'`]'''),
+    # Rust reqwest: format!("{}/api/...", base_url)
+    re.compile(r'''"\{\}(/api/[^"'\s]+)'''),
 ]
 _URL_LIKE = re.compile(r'^/[a-zA-Z]')
 
@@ -68,9 +70,9 @@ def enrich_http_api(G: nx.DiGraph) -> int:
     if not route_map:
         return 0
 
-    # Find component/class nodes and scan their source for API calls
+    # Find nodes that may call external APIs and scan their source files
     for node_id, data in G.nodes(data=True):
-        if data.get("type") not in ("component", "class"):
+        if data.get("type") not in ("component", "class", "route", "service"):
             continue
         src_proj = data.get("project", "")
 
