@@ -389,6 +389,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
 
 codebeacon serve [--dir .codebeacon]      # servidor MCP (stdio)
 codebeacon install                        # instalar skill de Claude Code
+codebeacon upgrade                        # pip upgrade + refrescar ~/.claude/skills/codebeacon/SKILL.md
+                                          # (use `--force` si está instalado en modo editable)
 ```
 
 ---

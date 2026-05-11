@@ -216,9 +216,20 @@ This copies `SKILL.md` to `~/.claude/skills/codebeacon/` and registers the `/cod
 /codebeacon serve <path>          # start MCP server pointing at .codebeacon/
 /codebeacon query <term>          # search the graph
 /codebeacon path <src> <tgt>      # shortest path
+/codebeacon upgrade               # pip upgrade + refresh this skill (then restart Claude Code)
 ```
 
 By default `scan` and `sync` invocations automatically run the **AI-semantic** pipeline at the end (see the [AI-Semantic Enrichment](#ai-semantic-enrichment-via-the-codebeacon-skill) section). The agent uses whatever model your Claude Code session is currently running on — Opus, Sonnet, Haiku — codebeacon never hardcodes a model and never needs an API key.
+
+### Updating to a new version
+
+Run **one** command from anywhere:
+
+```bash
+codebeacon upgrade
+```
+
+This pip-upgrades the package, then re-runs `codebeacon install` so `~/.claude/skills/codebeacon/SKILL.md` is overwritten with the new release's copy. Restart your Claude Code session for the new SKILL.md to load. If codebeacon is installed in editable mode (`pip install -e .`), the pip step is skipped — pass `--force` to upgrade anyway.
 
 ### MCP Server
 
@@ -322,6 +333,8 @@ codebeacon merge-driver <base> <cur> <other>  # invoked by git after `hook insta
 # Integrations
 codebeacon serve [--dir .codebeacon]      # start MCP server (stdio)
 codebeacon install                        # install Claude Code skill
+codebeacon upgrade                        # pip install --upgrade + refresh ~/.claude/skills/codebeacon/SKILL.md
+                                          # (`--force` to upgrade even when installed in editable mode)
 ```
 
 ---

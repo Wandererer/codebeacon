@@ -299,6 +299,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
 # 集成
 codebeacon serve [--dir .codebeacon]      # 启动 MCP 服务器（stdio）
 codebeacon install                        # 安装 Claude Code 技能
+codebeacon upgrade                        # pip 升级 + 刷新 ~/.claude/skills/codebeacon/SKILL.md
+                                          # （editable 安装下用 `--force` 强制升级）
 ```
 
 ---

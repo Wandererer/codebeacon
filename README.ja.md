@@ -300,6 +300,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
 # インテグレーション
 codebeacon serve [--dir .codebeacon]      # MCP サーバー起動 (stdio)
 codebeacon install                        # Claude Code スキルをインストール
+codebeacon upgrade                        # pip で更新 + ~/.claude/skills/codebeacon/SKILL.md を再生成
+                                          # (`--force` で editable インストール時も強制実行)
 ```
 
 ---

@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 
-SKILL_SRC = Path(__file__).parent / "SKILL.md"
+SKILL_SRC = Path(__file__).parent.parent / "codebeacon" / "skill" / "SKILL.md"
 
 CLAUDE_TRIGGER_BLOCK = """\
 # codebeacon

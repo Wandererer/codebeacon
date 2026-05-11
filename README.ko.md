@@ -217,9 +217,20 @@ codebeacon install
 /codebeacon serve <path>          # .codebeacon/ 을 가리키는 MCP 서버 시작
 /codebeacon query <term>          # 그래프 검색
 /codebeacon path <src> <tgt>      # 최단 경로
+/codebeacon upgrade               # pip 업그레이드 + 이 스킬 SKILL.md 갱신 (이후 Claude Code 재시작)
 ```
 
 기본적으로 `scan` 과 `sync` 호출은 마지막에 **AI-시맨틱** 파이프라인을 자동 실행합니다 ([AI-시맨틱 보강](#ai-시맨틱-보강-codebeacon-스킬에서-자동) 섹션 참고). 에이전트는 Claude Code 세션이 **현재 실행 중인 모델**을 그대로 사용 — Opus, Sonnet, Haiku — codebeacon 은 절대 모델을 하드코딩하지 않고 API 키도 필요 없습니다.
+
+### 새 버전으로 업그레이드
+
+어디서든 한 줄:
+
+```bash
+codebeacon upgrade
+```
+
+이 명령은 pip 으로 패키지를 업그레이드한 뒤 `codebeacon install` 을 다시 실행해 `~/.claude/skills/codebeacon/SKILL.md` 을 새 릴리스의 사본으로 덮어씁니다. 새 SKILL.md 가 로드되려면 Claude Code 세션을 재시작하세요. editable 모드 (`pip install -e .`) 로 설치되어 있다면 pip 단계는 스킵됩니다 — 강제로 진행하려면 `--force` 를 붙이세요.
 
 ### MCP 서버
 
@@ -324,6 +335,8 @@ codebeacon merge-driver <base> <cur> <other>  # `hook install` 후 git이 자동
 # 통합
 codebeacon serve [--dir .codebeacon]      # MCP 서버 시작 (stdio)
 codebeacon install                        # Claude Code 스킬 설치
+codebeacon upgrade                        # pip 으로 업그레이드 + ~/.claude/skills/codebeacon/SKILL.md 갱신
+                                          # (`--force` 로 editable 설치 환경에서도 강제 업그레이드)
 ```
 
 ---

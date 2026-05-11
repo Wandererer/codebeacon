@@ -758,6 +758,60 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    """``codebeacon upgrade`` — pip upgrade the package + refresh SKILL.md.
+
+    Runs `pip install --upgrade codebeacon` in the current interpreter, then
+    reinvokes `codebeacon install` so ~/.claude/skills/codebeacon/SKILL.md is
+    refreshed to whatever shipped in the new release. Editable installs are
+    detected and skipped (pip upgrade would be a no-op anyway).
+    """
+    import subprocess
+    import sys as _sys
+    from codebeacon import __version__ as _current
+
+    print(f"Current version: codebeacon {_current}", flush=True)
+
+    is_editable = False
+    try:
+        from importlib.metadata import Distribution
+        dist = Distribution.from_name("codebeacon")
+        direct_url = dist.read_text("direct_url.json") or ""
+        if "\"editable\": true" in direct_url:
+            is_editable = True
+    except Exception:
+        pass
+
+    if is_editable and not getattr(args, "force", False):
+        print(
+            "Detected an editable (pip install -e .) install — skipping pip upgrade.\n"
+            "Use `git pull` to get new code, or pass --force to upgrade anyway.",
+            file=_sys.stderr,
+        )
+    else:
+        cmd = [_sys.executable, "-m", "pip", "install", "--upgrade", "codebeacon"]
+        print(f"$ {' '.join(cmd)}")
+        rc = subprocess.call(cmd)
+        if rc != 0:
+            print("pip upgrade failed.", file=_sys.stderr)
+            return rc
+
+    # Refresh SKILL.md by reinvoking the install command. We exec it in a
+    # subprocess so the freshly-installed entry point is used (the current
+    # process is still running the OLD code from before pip upgrade).
+    print("\nRefreshing /codebeacon Claude Code skill ...", flush=True)
+    rc = subprocess.call([_sys.executable, "-m", "codebeacon", "install"])
+    if rc != 0:
+        return rc
+
+    print(
+        "\nUpgrade complete. Restart your Claude Code session so the new "
+        "SKILL.md is loaded.",
+        flush=True,
+    )
+    return 0
+
+
 def _cmd_semantic_prepare(args: argparse.Namespace) -> int:
     from codebeacon.semantic_pipeline import prepare
 
@@ -873,6 +927,17 @@ def build_parser() -> argparse.ArgumentParser:
     # install (Claude Code skill)
     install_p = sub.add_parser("install", help="Install Claude Code skill")
     install_p.set_defaults(func=_cmd_install)
+
+    # upgrade (pip upgrade + refresh skill)
+    upgrade_p = sub.add_parser(
+        "upgrade",
+        help="Upgrade codebeacon via pip and refresh ~/.claude/skills/codebeacon/SKILL.md",
+    )
+    upgrade_p.add_argument(
+        "--force", action="store_true",
+        help="Upgrade even when codebeacon is installed in editable (-e) mode",
+    )
+    upgrade_p.set_defaults(func=_cmd_upgrade)
 
     # semantic-prepare
     sem_prep = sub.add_parser(
