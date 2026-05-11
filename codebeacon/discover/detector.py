@@ -187,11 +187,19 @@ def _has_project_signature(directory: Path) -> bool:
         "svelte.config.js", "svelte.config.ts",
     ]
     for sig in signature_files:
-        if (directory / sig).exists():
-            return True
+        try:
+            if (directory / sig).exists():
+                return True
+        except OSError:
+            # Permission-restricted siblings (e.g. macOS semaphore dirs in /tmp)
+            # would otherwise crash the whole discover pass.
+            continue
     # Check for *.csproj
-    if list(directory.glob("*.csproj")):
-        return True
+    try:
+        if list(directory.glob("*.csproj")):
+            return True
+    except OSError:
+        pass
     return False
 
 

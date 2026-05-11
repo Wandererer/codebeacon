@@ -55,6 +55,7 @@
 - **gitignore 风格 `.codebeaconignore`** — last-match-wins、`!` 否定、目录模式（`build/`）、锚定模式（`/secrets.txt`）、行尾空白处理
 - **零配置** — 自动检测框架和语言；自动生成 `codebeacon.yaml` 供后续运行
 - **深度扫描模式** — `--deep-dive` 为每个子项目生成专属 `.codebeacon/` + `CLAUDE.md`；从**任意**子项目目录执行更新命令，即可自动同步整个工作区的所有项目
+- **工作区自动重新发现** — 每次执行 `scan`/`sync` 时,codebeacon 会重新扫描工作区,并将 `codebeacon.yaml` 中尚未登记的新项目自动追加后再进行抽取,新增子项目不会被静默跳过;若手动维护 yaml,可通过 `--no-rediscover` 退出此行为
 
 ---
 
@@ -270,8 +271,9 @@ codebeacon scan /workspace --deep-dive    # 各项目独立输出 + 工作区合
 
 # 配置驱动模式
 codebeacon init [path]                    # 自动生成 codebeacon.yaml
-codebeacon sync                           # 基于 codebeacon.yaml 运行
+codebeacon sync                           # 基于 codebeacon.yaml 运行(自动追加工作区中的新项目)
 codebeacon sync --config <file>           # 使用指定配置文件
+codebeacon sync --no-rediscover           # 不自动追加新项目(手动维护 yaml 模式)
 
 # 查询知识图谱
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # 通过标签子串搜索节点

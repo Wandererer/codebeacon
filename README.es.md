@@ -55,6 +55,7 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 - **`.codebeaconignore` estilo gitignore** — last-match-wins con negación `!`, patrones de directorio (`build/`), patrones anclados (`/secrets.txt`), reglas de espacio final
 - **Cero configuración** — detecta frameworks y lenguajes automáticamente; genera `codebeacon.yaml` para ejecuciones posteriores
 - **Modo Deep Dive** — `--deep-dive` genera `.codebeacon/` + `CLAUDE.md` propios para cada sub-proyecto; ejecutar el comando de actualización desde **cualquier** sub-proyecto sincroniza automáticamente todos los proyectos del workspace
+- **Auto-redescubrimiento del workspace** — en cada `scan`/`sync`, codebeacon re-escanea el workspace y añade automáticamente al `codebeacon.yaml` los nuevos proyectos antes de extraer, de modo que los sub-proyectos recién añadidos nunca se omitan silenciosamente; usa `--no-rediscover` para optar por el modo de configuración curada manualmente
 
 ---
 
@@ -362,7 +363,8 @@ codebeacon scan . --list-only             # solo detectar frameworks
 codebeacon scan /workspace --deep-dive    # salida por proyecto + workspace combinado
 
 codebeacon init [ruta]                    # generar codebeacon.yaml
-codebeacon sync                           # ejecutar desde codebeacon.yaml
+codebeacon sync                           # ejecutar desde codebeacon.yaml (añade nuevos proyectos del workspace automáticamente)
+codebeacon sync --no-rediscover           # no añadir automáticamente nuevos proyectos (modo yaml curado a mano)
 
 codebeacon query <término> [--dir .codebeacon] [--limit N]   # buscar nodos por substring de etiqueta
 codebeacon path <origen> <destino> [--dir .codebeacon]       # ruta más corta de dependencias

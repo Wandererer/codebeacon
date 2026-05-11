@@ -53,6 +53,7 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 - **gitignore-style `.codebeaconignore`** — last-match-wins with `!` negation, dir patterns (`build/`), anchored patterns (`/secrets.txt`), trailing-whitespace rules
 - **Zero configuration** — auto-detects frameworks and languages; generates `codebeacon.yaml` for repeat runs
 - **Deep-dive mode** — `--deep-dive` generates per-project `.codebeacon/` + `CLAUDE.md` for every sub-project; running `codebeacon scan . --update` from any sub-project folder automatically syncs all projects in the workspace
+- **Workspace auto-rediscovery** — on every `scan` / `sync`, codebeacon re-scans the workspace and appends any new project folders to `codebeacon.yaml` before extraction, so freshly added sub-projects are never silently skipped; pass `--no-rediscover` to opt out for hand-curated configs
 
 ---
 
@@ -281,8 +282,9 @@ codebeacon scan /workspace --deep-dive    # per-project + combined workspace out
 
 # Config-driven mode
 codebeacon init [path]                    # auto-generate codebeacon.yaml
-codebeacon sync                           # run from codebeacon.yaml
+codebeacon sync                           # run from codebeacon.yaml (auto-appends new workspace projects)
 codebeacon sync --config <file>           # use a specific config file
+codebeacon sync --no-rediscover           # don't auto-append newly added projects (hand-curated yaml mode)
 
 # Query the knowledge graph
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # search nodes by label substring

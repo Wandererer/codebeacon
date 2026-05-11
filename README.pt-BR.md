@@ -55,6 +55,7 @@ As ferramentas existentes resolvem isso apenas parcialmente. Analisadores de rot
 - **`.codebeaconignore` estilo gitignore** — last-match-wins com negação `!`, padrões de diretório (`build/`), padrões ancorados (`/secrets.txt`), regras de espaço final
 - **Zero configuração** — detecta frameworks e linguagens automaticamente; gera `codebeacon.yaml` para execuções futuras
 - **Modo Deep Dive** — `--deep-dive` gera `.codebeacon/` + `CLAUDE.md` próprios para cada sub-projeto; executar o comando de atualização de **qualquer** sub-projeto sincroniza automaticamente todos os projetos do workspace
+- **Auto-redescoberta do workspace** — a cada `scan`/`sync`, o codebeacon re-escaneia o workspace e adiciona automaticamente os novos projetos ao `codebeacon.yaml` antes da extração, evitando que sub-projetos recém-criados sejam silenciosamente ignorados; use `--no-rediscover` para manter uma configuração yaml curada manualmente
 
 ---
 
@@ -362,7 +363,8 @@ codebeacon scan . --list-only             # apenas detectar frameworks
 codebeacon scan /workspace --deep-dive    # saída por projeto + workspace combinado
 
 codebeacon init [caminho]                 # gerar codebeacon.yaml
-codebeacon sync                           # executar a partir do codebeacon.yaml
+codebeacon sync                           # executar a partir do codebeacon.yaml (adiciona novos projetos do workspace automaticamente)
+codebeacon sync --no-rediscover           # não adicionar novos projetos automaticamente (modo yaml curado à mão)
 
 codebeacon query <termo> [--dir .codebeacon] [--limit N]   # buscar nós por substring do label
 codebeacon path <origem> <destino> [--dir .codebeacon]     # caminho de dependências mais curto

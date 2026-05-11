@@ -55,6 +55,7 @@ Bestehende Tools lösen dieses Problem nur teilweise. Route-Analyzer erfassen Ih
 - **`.codebeaconignore` im gitignore-Stil** — last-match-wins mit `!`-Negation, Verzeichnis-Patterns (`build/`), verankerte Patterns (`/secrets.txt`), Trailing-Whitespace-Regeln
 - **Keine Konfiguration notwendig** — erkennt Frameworks und Sprachen automatisch; generiert `codebeacon.yaml` für Folgeläufe
 - **Deep-Dive-Modus** — `--deep-dive` erzeugt für jedes Sub-Projekt eigene `.codebeacon/` + `CLAUDE.md`; ein Update-Aufruf aus **beliebigem** Sub-Projekt-Ordner synchronisiert automatisch alle Projekte im Workspace
+- **Automatische Workspace-Wiedererkennung** — bei jedem `scan`/`sync` scannt codebeacon den Workspace erneut und hängt vor der Extraktion automatisch neue Projekte an die `codebeacon.yaml` an, sodass frisch hinzugefügte Sub-Projekte nicht unbemerkt übersprungen werden; `--no-rediscover` deaktiviert dies für handgepflegte Konfigurationen
 
 ---
 
@@ -363,7 +364,8 @@ codebeacon scan . --list-only             # nur Frameworks erkennen
 codebeacon scan /workspace --deep-dive    # Pro-Projekt- + kombinierte Workspace-Ausgabe
 
 codebeacon init [pfad]                    # codebeacon.yaml generieren
-codebeacon sync                           # von codebeacon.yaml ausführen
+codebeacon sync                           # von codebeacon.yaml ausführen (hängt neue Workspace-Projekte automatisch an)
+codebeacon sync --no-rediscover           # neue Projekte nicht automatisch anhängen (handgepflegter yaml-Modus)
 
 codebeacon query <Begriff> [--dir .codebeacon] [--limit N]   # Knoten per Label-Substring suchen
 codebeacon path <Quelle> <Ziel> [--dir .codebeacon]          # kürzester Abhängigkeitspfad

@@ -55,6 +55,7 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 - **gitignore 호환 `.codebeaconignore`** — last-match-wins, `!` 부정, 디렉토리 패턴(`build/`), 앵커 패턴(`/secrets.txt`), 트레일링 공백 처리
 - **제로 설정** — 프레임워크와 언어 자동 감지; 반복 실행을 위한 `codebeacon.yaml` 자동 생성
 - **딥다이브 모드** — `--deep-dive`는 각 서브 프로젝트에 개별 `.codebeacon/` + `CLAUDE.md`를 생성; 어느 서브 프로젝트 폴더에서든 `codebeacon scan . --update`를 실행하면 워크스페이스의 모든 프로젝트가 자동으로 업데이트됨
+- **워크스페이스 자동 재발견** — `scan`/`sync` 실행마다 워크스페이스를 다시 훑어 `codebeacon.yaml`에 없는 신규 프로젝트를 자동으로 yaml에 추가한 뒤 추출 시작 — 새로 추가된 서브 프로젝트가 조용히 누락되지 않음; 수동으로 yaml을 큐레이션 중이라면 `--no-rediscover`로 옵트아웃
 
 ---
 
@@ -282,8 +283,9 @@ codebeacon scan /workspace --deep-dive    # 프로젝트별 + 통합 워크스�
 
 # 설정 기반 모드
 codebeacon init [path]                    # codebeacon.yaml 자동 생성
-codebeacon sync                           # codebeacon.yaml 기반 실행
+codebeacon sync                           # codebeacon.yaml 기반 실행 (신규 워크스페이스 프로젝트 자동 추가)
 codebeacon sync --config <file>           # 특정 설정 파일 사용
+codebeacon sync --no-rediscover           # 신규 프로젝트 자동 추가 비활성화 (수동 큐레이션 모드)
 
 # 지식 그래프 쿼리
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # 라벨 부분 문자열로 노드 검색

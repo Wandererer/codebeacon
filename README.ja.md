@@ -55,6 +55,7 @@ AI コーディングセッションを新しく開くたびに、アシスタ�
 - **gitignore 互換 `.codebeaconignore`** — last-match-wins、`!` 否定、ディレクトリパターン(`build/`)、アンカーパターン(`/secrets.txt`)、末尾空白処理
 - **ゼロ設定** — フレームワークと言語を自動検出；繰り返し実行のために `codebeacon.yaml` を自動生成
 - **ディープダイブモード** — `--deep-dive` で各サブプロジェクトに専用の `.codebeacon/` + `CLAUDE.md` を生成；**どのサブプロジェクトからでも**更新コマンドを実行するだけでワークスペース全体が自動同期
+- **ワークスペース自動再検出** — `scan`/`sync` 実行のたびにワークスペースを再スキャンし、`codebeacon.yaml` に未登録の新規プロジェクトを自動追加してから抽出を開始するため、新しく追加されたサブプロジェクトが見落とされることがない；yaml を手動で管理している場合は `--no-rediscover` でオプトアウト可能
 
 ---
 
@@ -271,8 +272,9 @@ codebeacon scan /workspace --deep-dive    # プロジェクト別 + 統合ワー
 
 # 設定ベースモード
 codebeacon init [path]                    # codebeacon.yaml を自動生成
-codebeacon sync                           # codebeacon.yaml ベースで実行
+codebeacon sync                           # codebeacon.yaml ベースで実行 (新規ワークスペースプロジェクトを自動追加)
 codebeacon sync --config <file>           # 特定の設定ファイルを使用
+codebeacon sync --no-rediscover           # 新規プロジェクトの自動追加を無効化 (手動キュレーションモード)
 
 # ナレッジグラフのクエリ
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # ラベル部分文字列でノード検索

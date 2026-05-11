@@ -561,7 +561,9 @@ def _write_project_artifact_outputs(G, communities, project, proj_output_dir: st
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
-    from codebeacon.config import load_config, find_config
+    from codebeacon.config import (
+        load_config, find_config, discover_new_projects, append_projects_to_yaml,
+    )
     from codebeacon.discover.detector import detect_framework
     from codebeacon.common.types import ProjectInfo
 
@@ -579,6 +581,18 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"Error loading config: {e}", file=sys.stderr)
         return 1
+
+    # Auto-discover projects added to the workspace since the yaml was last written.
+    # Skip when `--no-rediscover` is set so users with hand-curated yaml configs
+    # can opt out.
+    if not getattr(args, "no_rediscover", False):
+        new_projects = discover_new_projects(config)
+        if new_projects:
+            print(f"Found {len(new_projects)} new project(s); adding to {config.config_file}:")
+            for p in new_projects:
+                print(f"  + {p.name:<20}  {p.framework:<15}  {p.path}")
+            append_projects_to_yaml(config.config_file, new_projects)
+            config = load_config(config.config_file)
 
     print(f"Using {config.config_file}")
     print(f"Processing {len(config.projects)} project(s)...")
@@ -768,6 +782,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Generate per-project .codebeacon/ + CLAUDE.md for each sub-project, plus a combined workspace output",
     )
+    scan_p.add_argument(
+        "--no-rediscover",
+        action="store_true",
+        help="When auto-switching to sync mode, do NOT scan the workspace for newly added projects",
+    )
     scan_p.set_defaults(func=_cmd_scan)
 
     # sync
@@ -779,6 +798,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--deep-dive",
         action="store_true",
         help="Override config: force deep-dive mode",
+    )
+    sync_p.add_argument(
+        "--no-rediscover",
+        action="store_true",
+        help="Skip scanning the workspace for newly added projects",
     )
     sync_p.set_defaults(func=_cmd_sync)
 
