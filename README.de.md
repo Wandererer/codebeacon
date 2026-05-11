@@ -44,9 +44,15 @@ Bestehende Tools lösen dieses Problem nur teilweise. Route-Analyzer erfassen Ih
 - **Auf tree-sitter basierend** — strukturelles AST-Parsing, keine Regex; Sprachgrammatiken standardmäßig enthalten
 - **2-Pass DI-Auflösung** — Pass 1 extrahiert lokale AST-Knoten; Pass 2 baut eine globale Symboltabelle auf und löst Interface → Implementation-Mappings auf
 - **Wave-Merge-Architektur** — Dateien werden in parallelen Chunks verarbeitet und global zusammengeführt; auch große Monorepos ohne Speicherprobleme
-- **Mehrere Ausgabeformate** — JSON-Knowledge-Graph, Markdown-Wiki, Obsidian Vault, KI-Kontextkarten, MCP-Server
+- **Mehrere Ausgabeformate** — JSON-Knowledge-Graph, Markdown-Wiki, Obsidian Vault, KI-Kontextkarten, MCP-Server, interaktives HTML
+- **Visuelle Exploration** — `beacon.html` (D3 einklappbarer Baum) und `callflow.html` (Mermaid-Architekturdiagramme nach Community gruppiert) werden bei jedem Scan neu erzeugt
 - **Community-Erkennung** — Leiden/Louvain-Clustering deckt tatsächliche Architekturgrenzen auf
-- **Inkrementeller Cache** — SHA-256-basiert; extrahiert nur seit dem letzten Scan geänderte Dateien neu
+- **Inkrementeller Cache** — SHA-256 + mtime/size Fast-Path; reine mtime-Änderungen durch Sync-Tools (Obsidian/iCloud/Nextcloud) lösen niemals eine unnötige Re-Extraktion aus
+- **Confidence-Promotion** — datei-übergreifende `calls`-Kanten werden automatisch von INFERRED auf EXTRACTED hochgestuft, wenn ein expliziter Import das Binding belegt
+- **Sichere Schreibvorgänge** — beacon.json hat einen Shrink-Guard (ein Teil-Lauf kann niemals einen vollständigen Graph überschreiben) und stempelt `built_at_commit`, sodass REPORT.md veraltete Ausgaben gegen den aktuellen HEAD kennzeichnet
+- **Multi-Entwickler-freundlich** — `codebeacon hook install` registriert einen git-Merge-Driver für `beacon.json` und einen Post-Commit-Hook für inkrementelle Rebuilds; zwei Devs, die denselben Branch scannen, produzieren niemals Merge-Konflikte im Graph
+- **Gehärtete Ausgabe** — YAML-Frontmatter und MCP-Labels werden sanitisiert: U+2028/U+2029, C0-Steuerzeichen und Bidi-Marken werden entfernt, bevor sie Obsidian, Cursor oder den Agenten erreichen
+- **`.codebeaconignore` im gitignore-Stil** — last-match-wins mit `!`-Negation, Verzeichnis-Patterns (`build/`), verankerte Patterns (`/secrets.txt`), Trailing-Whitespace-Regeln
 - **Keine Konfiguration notwendig** — erkennt Frameworks und Sprachen automatisch; generiert `codebeacon.yaml` für Folgeläufe
 - **Deep-Dive-Modus** — `--deep-dive` erzeugt für jedes Sub-Projekt eigene `.codebeacon/` + `CLAUDE.md`; ein Update-Aufruf aus **beliebigem** Sub-Projekt-Ordner synchronisiert automatisch alle Projekte im Workspace
 
@@ -116,8 +122,10 @@ project-root/
   .cursorrules           ← Cursor-IDE-Kontext (gleiche Merge-Strategie)
   AGENTS.md              ← OpenAI-Agents-/Codex-Kontext (gleiche Merge-Strategie)
   .codebeacon/
-    beacon.json          ← vollständiger Knowledge Graph (Node-Link-JSON, abfragbar)
-    REPORT.md            ← God-Nodes, überraschende Verbindungen, Hub-Dateien
+    beacon.json          ← vollständiger Knowledge Graph; bettet `meta.built_at_commit` ein
+    beacon.html          ← D3-Baum-Viewer (im Browser öffnen)
+    callflow.html        ← Mermaid-Call-Flow-Diagramme, nach Community gruppiert
+    REPORT.md            ← God-Nodes, überraschende Verbindungen, Hub-Dateien, Frische
     wiki/
       index.md
       overview.md
@@ -159,6 +167,50 @@ workspace/
     .codebeacon/              ← frontend-Graph
 ```
 
+## Visuelle Exploration
+
+Jeder Scan schreibt zwei eigenständige HTML-Dateien neben `beacon.json`:
+
+```
+.codebeacon/beacon.html      # D3 v7 einklappbarer Baum — in jedem Browser öffnen
+.codebeacon/callflow.html    # Mermaid-Architekturdiagramme, eines pro Community
+```
+
+Kein Build, kein statischer Server, kein Copy-Paste. Datei öffnen, klicken um Projekte → Typen → Knoten auszuklappen; Hover zeigt Source-Pfade und Grad. `callflow.html` gruppiert den Graph nach Community und rendert jede als Mermaid-Flowchart, mit den ausgehenden Cross-Community-Kanten in einer einklappbaren Tabelle.
+
+---
+
+## Multi-Entwickler-Workflow
+
+Zwei Devs, die `codebeacon scan` auf demselben Branch ausführen, produzieren leicht unterschiedliche `beacon.json` — historisch ein Merge-Konflikt-Hotspot. `codebeacon hook install` löst das:
+
+```bash
+codebeacon hook install            # im Repo-Root
+```
+
+Es registriert:
+
+- einen **git-Merge-Driver**, der zwei `beacon.json` per Union zu einer zusammenführt (Knoten per ID, Kanten per `(source, target, relation)` dedupliziert),
+- einen `.gitattributes`-Eintrag, der `*beacon.json` auf den Driver verweist,
+- einen **Post-Commit-Hook**, der `codebeacon scan . --update` im Hintergrund ausführt, damit der Graph niemals hinter den Commits zurückbleibt. Ausgabe in `~/.cache/codebeacon-rebuild.log`.
+
+Der Merge-Driver beendet sich immer mit 0 — eine Graph-Regeneration blockiert niemals einen echten Merge.
+
+---
+
+## Sicherheitsgarantien
+
+Invarianten, die der Writer bei jedem erfolgreichen Scan durchsetzt:
+
+| Guard | Was er verhindert |
+|---|---|
+| **Shrink-Guard** | Eine partielle Extraktion oder ein unterbrochener Lauf kann niemals eine größere vollständige `beacon.json` überschreiben. Per `force=True` aus der API umgehbar. |
+| **Atomares Schreiben** | `beacon.json` wird via `os.replace` geschrieben, die Datei ist also entweder komplett oder unangetastet — niemals halb geschrieben. |
+| **`built_at_commit`-Stempel** | `beacon.json` bettet `meta.built_at_commit` (vollständige SHA) ein und `REPORT.md` zeigt die Kurz-SHA. Wenn HEAD weiter ist, markiert der Report den Graphen als `⚠ stale` mit einem einzeiligen Hinweis. |
+| **Frontmatter-/Label-Härtung** | YAML-Frontmatter-Werte sind single-quoted und escapen U+2028, U+2029, Tab und C0-Steuerzeichen; MCP-Tool-Ausgabe lässt jedes Label durch denselben Sanitizer laufen. Ein böswilliger Identifier im Quellcode kann Obsidians YAML-Parser nicht zerschlagen oder Steuersequenzen in den Kontext eines LLM-Agenten injizieren. |
+
+---
+
 ## Konfiguration
 
 Führe `codebeacon init` aus, um `codebeacon.yaml` zu generieren, oder erstelle die Datei manuell:
@@ -195,15 +247,28 @@ deep_dive: false               # auf true setzen für Pro-Projekt-Ausgabe
 
 ### .codebeaconignore
 
-Platziere eine `.codebeaconignore`-Datei im Projektstammverzeichnis, um Verzeichnisse oder Dateien vom Scan auszuschließen. Gleiche Syntax wie `.gitignore` — ein Muster pro Zeile, `#` für Kommentare.
+Platziere eine `.codebeaconignore`-Datei im Projektstammverzeichnis, um Verzeichnisse oder Dateien vom Scan auszuschließen. Semantik konform zu `.gitignore` — last-match-wins mit `!`-Negation, verankerte Muster (`/foo`), nur-Verzeichnis-Muster (`build/`), Kommentare:
 
 ```
 # .codebeaconignore
-generated/
+
+# Verzeichnisse
 build/
-*.generated.ts
+generated/
 fixtures/
+
+# nur am Root verankert
+/scripts/local-only.ts
+
+# Glob-Muster
+*.gen.ts
+**/snapshots/**
+
+# eine Datei wieder einschließen, auch wenn build/ ignoriert ist
+!build/manifest.ts
 ```
+
+`!pattern` schließt einen zuvor ignorierten Pfad wieder ein; spätere Regeln überschreiben frühere. Der Walker schneidet Verzeichnisse weg, deren Name auf das Regelset matcht, aber er verschiebt das Wegschneiden, wenn eine Negationsregel eine geschachtelte Datei wieder einschließen könnte.
 
 ---
 
@@ -300,8 +365,12 @@ codebeacon scan /workspace --deep-dive    # Pro-Projekt- + kombinierte Workspace
 codebeacon init [pfad]                    # codebeacon.yaml generieren
 codebeacon sync                           # von codebeacon.yaml ausführen
 
-codebeacon query <Begriff>                # Graph durchsuchen (demnächst)
-codebeacon path <Quelle> <Ziel>           # kürzester Pfad zwischen zwei Knoten
+codebeacon query <Begriff> [--dir .codebeacon] [--limit N]   # Knoten per Label-Substring suchen
+codebeacon path <Quelle> <Ziel> [--dir .codebeacon]          # kürzester Abhängigkeitspfad
+
+# Multi-Entwickler-Support (git plumbing)
+codebeacon hook install [path]            # Merge-Driver + Post-Commit-Inkrement-Rebuild installieren
+codebeacon merge-driver <base> <cur> <other>  # von git nach `hook install` aufgerufen; Union-Merge von beacon.json
 
 codebeacon serve [--dir .codebeacon]      # MCP-Server starten (stdio)
 codebeacon install                        # Claude-Code-Skill installieren
