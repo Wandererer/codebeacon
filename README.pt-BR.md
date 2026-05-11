@@ -44,15 +44,9 @@ As ferramentas existentes resolvem isso apenas parcialmente. Analisadores de rot
 - **Baseado em tree-sitter** — análise AST estrutural, não regex; gramáticas de linguagem incluídas por padrão
 - **Resolução DI em 2 passos** — Pass 1 extrai nós AST locais; Pass 2 constrói uma tabela de símbolos global e resolve mapeamentos Interface → Implementation
 - **Arquitetura Wave merge** — arquivos processados em chunks paralelos e mesclados globalmente; lida com grandes monorepos sem problemas de memória
-- **Múltiplos formatos de saída** — knowledge graph JSON, wiki Markdown, Obsidian Vault, mapas de contexto para IA, servidor MCP, HTML interativo
-- **Exploração visual** — `beacon.html` (árvore colapsável D3) e `callflow.html` (diagramas Mermaid de arquitetura agrupados por comunidade) regerados a cada scan
+- **Múltiplos formatos de saída** — knowledge graph JSON, wiki Markdown, Obsidian Vault, mapas de contexto para IA, servidor MCP
 - **Detecção de comunidades** — clustering Leiden/Louvain revela as fronteiras arquiteturais reais
-- **Cache incremental** — SHA-256 + fast path por mtime/size; mudanças apenas de mtime causadas por ferramentas de sync (Obsidian/iCloud/Nextcloud) nunca disparam re-extração desnecessária
-- **Promoção de confiança** — arestas `calls` entre arquivos sobem de INFERRED para EXTRACTED automaticamente quando um import explícito prova o binding
-- **Gravações seguras** — beacon.json tem shrink guard (uma execução parcial nunca sobrescreve um grafo completo) e estampa `built_at_commit`, então REPORT.md sinaliza saídas stale contra o HEAD atual
-- **Amigável a múltiplos desenvolvedores** — `codebeacon hook install` registra um git merge driver para `beacon.json` e um hook post-commit de rebuild incremental, assim dois devs escaneando o mesmo branch nunca produzem conflitos de merge no grafo
-- **Saída endurecida** — frontmatter YAML e labels MCP são sanitizados: U+2028/U+2029, controles C0 e marcas bidi são removidos antes de chegar ao Obsidian, Cursor ou ao agente
-- **`.codebeaconignore` estilo gitignore** — last-match-wins com negação `!`, padrões de diretório (`build/`), padrões ancorados (`/secrets.txt`), regras de espaço final
+- **Cache incremental** — baseado em SHA-256; extrai novamente apenas arquivos alterados desde o último scan
 - **Zero configuração** — detecta frameworks e linguagens automaticamente; gera `codebeacon.yaml` para execuções futuras
 - **Modo Deep Dive** — `--deep-dive` gera `.codebeacon/` + `CLAUDE.md` próprios para cada sub-projeto; executar o comando de atualização de **qualquer** sub-projeto sincroniza automaticamente todos os projetos do workspace
 
@@ -121,10 +115,8 @@ project-root/
   .cursorrules           ← contexto do Cursor IDE (mesma estratégia de mesclagem)
   AGENTS.md              ← contexto OpenAI Agents / Codex (mesma estratégia de mesclagem)
   .codebeacon/
-    beacon.json          ← knowledge graph completo; embute `meta.built_at_commit`
-    beacon.html          ← visualizador de árvore colapsável D3 (abrir em qualquer navegador)
-    callflow.html        ← diagramas Mermaid de call-flow agrupados por comunidade
-    REPORT.md            ← nós deus, conexões surpreendentes, arquivos hub, frescor
+    beacon.json          ← knowledge graph completo (JSON node-link, consultável)
+    REPORT.md            ← nós deus, conexões surpreendentes, arquivos hub
     wiki/
       index.md
       overview.md
@@ -166,50 +158,6 @@ workspace/
     .codebeacon/
 ```
 
-## Exploração visual
-
-Cada scan escreve dois arquivos HTML autocontidos ao lado de `beacon.json`:
-
-```
-.codebeacon/beacon.html      # árvore colapsável D3 v7 — abra em qualquer navegador
-.codebeacon/callflow.html    # diagramas Mermaid de arquitetura, um por comunidade
-```
-
-Sem build, sem servidor estático, sem copy-paste. Abra o arquivo, clique para expandir projetos → tipos → nós; passe o mouse para ver paths e degree. `callflow.html` agrupa o grafo por comunidade e renderiza cada uma como flowchart Mermaid, com as arestas saindo entre comunidades em uma tabela dobrada.
-
----
-
-## Fluxo multi-desenvolvedor
-
-Dois devs rodando `codebeacon scan` no mesmo branch produzem `beacon.json` ligeiramente diferentes — historicamente um hotspot de conflitos de merge. `codebeacon hook install` resolve:
-
-```bash
-codebeacon hook install            # na raiz do repo
-```
-
-Registra:
-
-- um **git merge driver** que une dois `beacon.json` em um só (nós deduplicados por ID, arestas deduplicadas por `(source, target, relation)`),
-- uma entrada `.gitattributes` apontando `*beacon.json` para o driver,
-- um **hook post-commit** que roda `codebeacon scan . --update` em background, para que o grafo nunca fique atrás dos commits. Saída em `~/.cache/codebeacon-rebuild.log`.
-
-O merge driver sempre sai com 0 — uma regeneração de grafo nunca bloqueia um merge real.
-
----
-
-## Garantias de segurança
-
-Invariantes que o writer impõe a cada scan bem-sucedido:
-
-| Guard | O que previne |
-|---|---|
-| **Shrink guard** | Uma extração parcial falha ou uma execução interrompida nunca pode sobrescrever um `beacon.json` completo e maior. Bypass via `force=True` na API. |
-| **Gravação atômica** | `beacon.json` é gravado via `os.replace`, então o arquivo está completo ou intocado — nunca pela metade. |
-| **Estampa `built_at_commit`** | `beacon.json` embute `meta.built_at_commit` (SHA completo) e `REPORT.md` mostra o SHA curto. Se HEAD avançou, o relatório marca o grafo como `⚠ stale` com uma dica de uma linha. |
-| **Hardening de frontmatter / labels** | Valores YAML em single-quoted escapam U+2028, U+2029, tab e controles C0; saída MCP passa todos os labels pelo mesmo sanitizer. Um identificador malicioso no código-fonte não consegue quebrar o parser YAML do Obsidian nem injetar sequências de controle no contexto de um agente LLM. |
-
----
-
 ## Configuração
 
 Execute `codebeacon init` para gerar `codebeacon.yaml`, ou crie manualmente:
@@ -246,28 +194,15 @@ deep_dive: false               # definir true para saída por projeto
 
 ### .codebeaconignore
 
-Coloque um arquivo `.codebeaconignore` na raiz do projeto para excluir diretórios ou arquivos do scan. Semântica idêntica ao `.gitignore` — last-match-wins com negação `!`, padrões ancorados (`/foo`), padrões somente-diretório (`build/`), comentários:
+Coloque um arquivo `.codebeaconignore` na raiz do projeto para excluir diretórios ou arquivos do scan. Mesma sintaxe do `.gitignore` — um padrão por linha, `#` para comentários.
 
 ```
 # .codebeaconignore
-
-# diretórios
-build/
 generated/
+build/
+*.generated.ts
 fixtures/
-
-# ancorado apenas à raiz
-/scripts/local-only.ts
-
-# padrões glob
-*.gen.ts
-**/snapshots/**
-
-# re-incluir um arquivo mesmo com build/ ignorado
-!build/manifest.ts
 ```
-
-`!pattern` re-inclui um caminho previamente ignorado; regras posteriores sobrescrevem as anteriores. O walker poda diretórios cujo nome bate com o conjunto de regras, mas adia a poda quando alguma regra de negação puder re-incluir um arquivo aninhado.
 
 ---
 
@@ -364,12 +299,8 @@ codebeacon scan /workspace --deep-dive    # saída por projeto + workspace combi
 codebeacon init [caminho]                 # gerar codebeacon.yaml
 codebeacon sync                           # executar a partir do codebeacon.yaml
 
-codebeacon query <termo> [--dir .codebeacon] [--limit N]   # buscar nós por substring do label
-codebeacon path <origem> <destino> [--dir .codebeacon]     # caminho de dependências mais curto
-
-# Suporte multi-desenvolvedor (git plumbing)
-codebeacon hook install [path]            # instala merge driver + hook post-commit incremental
-codebeacon merge-driver <base> <cur> <other>  # chamado pelo git após `hook install`; union-merge de beacon.json
+codebeacon query <termo>                  # buscar no grafo (em breve)
+codebeacon path <origem> <destino>        # caminho mais curto entre dois nós
 
 codebeacon serve [--dir .codebeacon]      # servidor MCP (stdio)
 codebeacon install                        # instalar skill do Claude Code

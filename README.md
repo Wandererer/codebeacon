@@ -42,15 +42,9 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 - **Tree-sitter based** — structural AST parsing, not regex; all language grammars included out of the box
 - **Two-pass DI resolution** — Pass 1 extracts local AST nodes; Pass 2 builds a global symbol table and resolves Interface → Implementation mappings that single-pass tools miss
 - **Wave merge architecture** — files processed in parallel chunks, results merged globally; handles large monorepos without memory blowouts
-- **Multiple output formats** — JSON knowledge graph, Markdown wiki, Obsidian vault, AI context maps, MCP server, interactive HTML
-- **Visual exploration** — `beacon.html` (D3 collapsible tree) and `callflow.html` (Mermaid architecture diagrams grouped by community), regenerated on every scan
+- **Multiple output formats** — JSON knowledge graph, Markdown wiki, Obsidian vault, AI context maps, MCP server
 - **Community detection** — Leiden/Louvain clustering reveals your actual architectural boundaries
-- **Incremental cache** — SHA-256 + mtime/size fast path; mtime-only bumps from sync tools (Obsidian/iCloud/Nextcloud) never trigger needless re-extraction
-- **Confidence promotion** — cross-file `calls` edges are promoted from INFERRED to EXTRACTED when an explicit import proves the binding
-- **Safe writes** — beacon.json has a shrink guard (a partial run can never overwrite a complete graph) and stamps `built_at_commit` so REPORT.md flags stale outputs against the current HEAD
-- **Multi-developer friendly** — `codebeacon hook install` registers a git merge driver for `beacon.json` and a post-commit incremental rebuild hook, so two devs scanning the same branch never produce merge conflicts in the graph
-- **Hardened output** — YAML frontmatter and MCP labels are sanitized: U+2028/U+2029, C0 controls, and bidi marks are stripped before they reach Obsidian, Cursor, or the agent
-- **gitignore-style `.codebeaconignore`** — last-match-wins with `!` negation, dir patterns (`build/`), anchored patterns (`/secrets.txt`), trailing-whitespace rules
+- **Incremental cache** — SHA-256 based; only re-extracts files that changed since the last scan
 - **Zero configuration** — auto-detects frameworks and languages; generates `codebeacon.yaml` for repeat runs
 - **Deep-dive mode** — `--deep-dive` generates per-project `.codebeacon/` + `CLAUDE.md` for every sub-project; running `codebeacon scan . --update` from any sub-project folder automatically syncs all projects in the workspace
 
@@ -122,10 +116,8 @@ project-root/
   .cursorrules           ← Cursor IDE context (same merge strategy)
   AGENTS.md              ← OpenAI Agents / Codex context (same merge strategy)
   .codebeacon/
-    beacon.json          ← full knowledge graph; embeds `meta.built_at_commit`
-    beacon.html          ← D3 collapsible-tree viewer (open in browser)
-    callflow.html        ← Mermaid call-flow diagrams grouped by community
-    REPORT.md            ← god nodes, surprising connections, hub files, freshness
+    beacon.json          ← full knowledge graph (node-link JSON, queryable)
+    REPORT.md            ← god nodes, surprising connections, hub files
     wiki/
       index.md           ← global index (~200 tokens)
       overview.md        ← platform stats + cross-project connections
@@ -272,7 +264,7 @@ All language parsers (Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PH
 codebeacon scan <path> [options]
 codebeacon scan .                         # current directory
 codebeacon scan /workspace                # workspace root (multi-project)
-codebeacon scan . --update                # incremental: mtime/size fast path + content-hash fallback
+codebeacon scan . --update                # incremental: only re-extract changed files
 codebeacon scan . --wiki-only             # skip re-extraction, regenerate wiki/obsidian/context map from existing beacon.json
 codebeacon scan . --obsidian-dir <path>   # write Obsidian vault to custom location
 codebeacon scan . --semantic              # enable LLM semantic extraction
@@ -284,70 +276,14 @@ codebeacon init [path]                    # auto-generate codebeacon.yaml
 codebeacon sync                           # run from codebeacon.yaml
 codebeacon sync --config <file>           # use a specific config file
 
-# Query the knowledge graph
-codebeacon query <term> [--dir .codebeacon] [--limit N]   # search nodes by label substring
-codebeacon path <source> <target> [--dir .codebeacon]     # shortest dependency path
-
-# Multi-developer support (git plumbing)
-codebeacon hook install [path]            # install merge driver + post-commit incremental rebuild
-codebeacon merge-driver <base> <cur> <other>  # invoked by git after `hook install`; union-merges beacon.json
+# Query the knowledge graph (coming soon)
+codebeacon query <term>                   # search nodes and edges
+codebeacon path <source> <target>         # shortest path between two nodes
 
 # Integrations
 codebeacon serve [--dir .codebeacon]      # start MCP server (stdio)
 codebeacon install                        # install Claude Code skill
 ```
-
----
-
-## Visual Exploration
-
-Every scan writes two self-contained HTML files alongside `beacon.json`:
-
-```
-.codebeacon/beacon.html      # D3 v7 collapsible tree — open in any browser
-.codebeacon/callflow.html    # Mermaid architecture diagrams, one per community
-```
-
-No build step, no static server, no copy-paste. Open the file, click to expand
-projects → types → nodes; hover for source paths and degree. `callflow.html`
-groups your graph by community and renders each as a Mermaid flowchart, with
-the cross-community out-edges listed in a collapsed table.
-
----
-
-## Multi-Developer Workflow
-
-Two developers running `codebeacon scan` on the same branch produce two
-slightly different `beacon.json` files — historically a merge conflict
-hotspot. `codebeacon hook install` solves this:
-
-```bash
-codebeacon hook install            # in the repo root
-```
-
-This registers:
-
-- a **git merge driver** that union-merges two `beacon.json` files into one
-  (nodes deduped by ID, edges deduped by `(source, target, relation)`),
-- a `.gitattributes` entry pointing `*beacon.json` at the driver,
-- a **post-commit hook** that runs `codebeacon scan . --update` in the
-  background so the graph never falls behind your commits. Output goes to
-  `~/.cache/codebeacon-rebuild.log`.
-
-The merge driver always exits 0 — a graph regen never blocks a real merge.
-
----
-
-## Safety Guarantees
-
-A few invariants the writer enforces on every successful scan:
-
-| Guard | What it prevents |
-|---|---|
-| **Shrink guard** | A partial-extraction failure or interrupted run can never overwrite a larger complete `beacon.json`. Pass `force=True` from the API to bypass. |
-| **Atomic write** | `beacon.json` is written via `os.replace`, so the file is either complete or untouched — no half-written graphs. |
-| **`built_at_commit` stamp** | `beacon.json` embeds `meta.built_at_commit` (full SHA) and `REPORT.md` shows the short SHA. If HEAD has advanced past it, the report flags the graph as `⚠ stale` with a one-line remediation hint. |
-| **Frontmatter / label hardening** | YAML frontmatter values are single-quoted and escape U+2028, U+2029, tabs, and C0 controls; MCP tool output runs every label through the same sanitizer. A malicious identifier in source code cannot break Obsidian's YAML parser or inject control sequences into an LLM agent's context. |
 
 ---
 
@@ -387,28 +323,15 @@ deep_dive: false               # set to true to generate per-project outputs
 
 ### .codebeaconignore
 
-Place a `.codebeaconignore` file at your project root to exclude directories or files from scanning. Syntax matches `.gitignore` — last-match-wins with `!` negation, anchored patterns (`/foo`), dir-only patterns (`build/`), and comments:
+Place a `.codebeaconignore` file at your project root to exclude directories or files from scanning. Syntax is the same as `.gitignore` — one pattern per line, `#` for comments.
 
 ```
 # .codebeaconignore
-
-# directories
-build/
 generated/
+build/
+*.generated.ts
 fixtures/
-
-# anchored to root only
-/scripts/local-only.ts
-
-# glob patterns
-*.gen.ts
-**/snapshots/**
-
-# re-include a specific file even though build/ is ignored
-!build/manifest.ts
 ```
-
-`!pattern` re-includes a previously-ignored path; later rules override earlier ones. The walker prunes directories whose name matches the rule set, but defers pruning when any negation rule could un-ignore a nested file.
 
 ---
 

@@ -1,13 +1,10 @@
 """Graph enrichment: HTTP/IPC cross-service edges + shared DB entity edges.
 
-Four enrichment passes run AFTER the base graph is built by build.py:
-  1. enrich_http_api()      — frontend URL calls → backend routes (calls_api edges)
-  2. enrich_shared_db()     — same DAO/Entity across services (shares_db_entity edges)
-  3. enrich_ipc_invoke()    — frontend invoke("cmd") → IPC command routes (invokes_command edges)
+Three enrichment passes run AFTER the base graph is built by build.py:
+  1. enrich_http_api()    — frontend URL calls → backend routes (calls_api edges)
+  2. enrich_shared_db()   — same DAO/Entity across services (shares_db_entity edges)
+  3. enrich_ipc_invoke()  — frontend invoke("cmd") → IPC command routes (invokes_command edges)
      Covers Tauri, Electron ipcRenderer, and any invoke()-pattern IPC framework.
-  4. promote_confirmed_calls() — promote cross-file ``calls`` edges from INFERRED
-     to EXTRACTED when the caller's source file imports the callee's file.
-     Eliminates a class of false-uncertainty in code that uses explicit imports.
 """
 
 from __future__ import annotations
@@ -281,59 +278,6 @@ def enrich_ipc_invoke(G: nx.DiGraph) -> int:
                 added += 1
 
     return added
-
-
-# ── INFERRED→EXTRACTED promotion ──────────────────────────────────────────────
-
-def promote_confirmed_calls(G: nx.DiGraph) -> int:
-    """Promote cross-file ``calls`` edges from INFERRED to EXTRACTED.
-
-    Heuristic: if the caller's source file has an outgoing ``imports`` or
-    ``imports_from`` edge that resolves into the callee's source file, then the
-    binding is provably correct and the call is no longer "inferred". This
-    catches a large class of false-uncertainty in CommonJS / TypeScript code
-    where every cross-file call defaults to INFERRED because the AST walker
-    only sees a bare name at the call site.
-
-    Returns:
-        Number of edges promoted.
-    """
-    if G.number_of_edges() == 0:
-        return 0
-
-    # caller_file → set(target_files reachable via an EXTRACTED import edge)
-    proven_targets: dict[str, set[str]] = {}
-    for src, tgt, edata in G.edges(data=True):
-        rel = edata.get("relation", "")
-        if rel not in ("imports", "imports_from"):
-            continue
-        src_file = G.nodes[src].get("source_file", "")
-        tgt_file = G.nodes[tgt].get("source_file", "")
-        if not src_file or not tgt_file:
-            continue
-        proven_targets.setdefault(src_file, set()).add(tgt_file)
-
-    if not proven_targets:
-        return 0
-
-    promoted = 0
-    for src, tgt, edata in G.edges(data=True):
-        if edata.get("relation") != "calls":
-            continue
-        if edata.get("confidence") != "INFERRED":
-            continue
-        src_file = G.nodes[src].get("source_file", "")
-        tgt_file = G.nodes[tgt].get("source_file", "")
-        if not src_file or not tgt_file or src_file == tgt_file:
-            continue
-        if tgt_file in proven_targets.get(src_file, ()):
-            edata["confidence"] = "EXTRACTED"
-            # Lift the score to match other EXTRACTED edges (1.0 is the
-            # convention used by dependencies.py and the http_api enricher).
-            edata["confidence_score"] = 1.0
-            promoted += 1
-
-    return promoted
 
 
 # ── URL / path utilities ──────────────────────────────────────────────────────

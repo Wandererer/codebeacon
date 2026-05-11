@@ -1,17 +1,8 @@
 """SHA-256 based incremental cache for codebeacon.
 
-Stores file_path → {hash, result, ts, mtime, size} mapping in
-``.codebeacon/cache/cache.json``. On re-scan:
-
-1. **Fast path** — if the cached entry's ``mtime`` and ``size`` still match the
-   file on disk, we skip hashing entirely and reuse the cached result. This
-   makes incremental scans near-instant on large repos where most files are
-   untouched.
-
-2. **Slow path** — if mtime or size has changed, we hash the file. If the
-   content hash still matches the cached hash, we trust it (mtime-only bumps
-   from sync tools like Obsidian/Nextcloud/iCloud no longer cause needless
-   re-extraction). Otherwise the file is treated as changed.
+Stores file_path → {hash, result, ts} mapping in .codebeacon/cache/cache.json.
+On re-scan, files whose hash hasn't changed reuse cached extraction results,
+skipping tree-sitter re-parsing.
 
 Usage:
     cache = Cache(output_dir)
@@ -32,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -48,8 +38,6 @@ class Cache:
         self._dirty = False
         # Memoize hashes within a single run to avoid double-reading files
         self._hash_memo: dict[str, str] = {}
-        # Memoize stat() results within a single run as well
-        self._stat_memo: dict[str, tuple[int, int]] = {}
 
     def load(self) -> None:
         """Load cache from disk. Safe to call even if the cache file doesn't exist."""
@@ -87,37 +75,11 @@ class Cache:
         self._hash_memo[file_path] = digest
         return digest
 
-    def _file_stat(self, file_path: str) -> tuple[int, int]:
-        """Return ``(mtime_ns, size)`` for ``file_path``, memoized per run.
-
-        Falls back to ``(0, 0)`` when the file is unreadable; treating an
-        unstattable file as "unchanged from a (0, 0) cache" can never produce
-        a stale-cache hit because a real file always has size > 0 mtime > 0.
-        """
-        memo = self._stat_memo.get(file_path)
-        if memo is not None:
-            return memo
-        try:
-            st = os.stat(file_path)
-            result = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            result = (0, 0)
-        self._stat_memo[file_path] = result
-        return result
-
     def is_fresh(self, file_path: str) -> bool:
-        """Return True if the cached entry still matches the file.
-
-        Uses mtime + size as a fast path. On a stat mismatch we fall back to a
-        full content hash so a true content change is detected, but a mtime-only
-        bump (sync tools, ``touch``) is treated as unchanged.
-        """
+        """Return True if the cached hash matches the current file hash."""
         entry = self._data.get(file_path)
         if not entry:
             return False
-        mtime_ns, size = self._file_stat(file_path)
-        if entry.get("mtime_ns") == mtime_ns and entry.get("size") == size:
-            return True
         return entry.get("hash") == self.file_hash(file_path)
 
     def get(self, file_path: str) -> Optional[dict]:
@@ -125,16 +87,8 @@ class Cache:
         entry = self._data.get(file_path)
         if not entry:
             return None
-        mtime_ns, size = self._file_stat(file_path)
-        if entry.get("mtime_ns") == mtime_ns and entry.get("size") == size:
-            return entry.get("result")
         if entry.get("hash") != self.file_hash(file_path):
             return None
-        # Content unchanged despite mtime bump — refresh the stat fields so the
-        # next run skips hashing.
-        entry["mtime_ns"] = mtime_ns
-        entry["size"] = size
-        self._dirty = True
         return entry.get("result")
 
     def put(self, file_path: str, result: Any, file_hash: Optional[str] = None) -> None:
@@ -153,13 +107,10 @@ class Cache:
             except (TypeError, ImportError):
                 result = {"_raw": str(result)}
 
-        mtime_ns, size = self._file_stat(file_path)
         self._data[file_path] = {
             "hash": h,
             "result": result,
             "ts": time.time(),
-            "mtime_ns": mtime_ns,
-            "size": size,
         }
         self._hash_memo[file_path] = h
         self._dirty = True
@@ -170,13 +121,11 @@ class Cache:
             del self._data[file_path]
             self._dirty = True
         self._hash_memo.pop(file_path, None)
-        self._stat_memo.pop(file_path, None)
 
     def clear(self) -> None:
         """Remove all cache entries."""
         self._data = {}
         self._hash_memo = {}
-        self._stat_memo = {}
         self._dirty = True
 
     def stats(self) -> dict:

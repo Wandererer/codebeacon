@@ -108,8 +108,9 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
             )
             return 1
 
-        from codebeacon.graph.write import load_beacon
-        G, meta = load_beacon(beacon_path)
+        import networkx.readwrite.json_graph as nxjson
+        data = json.loads(beacon_path.read_text(encoding="utf-8"))
+        G = nxjson.node_link_graph(data, directed=True, multigraph=False)
         print(f"  Loaded graph from {beacon_path}")
         print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
 
@@ -121,31 +122,19 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         n_communities = len(set(communities.values())) if communities else 0
 
         report = analyze(G, communities, {})
-        report.built_at_commit = meta.get("built_at_commit", "")
-        from codebeacon.common.safety import git_head
-        report.current_commit = git_head(output_path)
     else:
         from codebeacon.discover.scanner import collect_files
         from codebeacon.cache import Cache
         from codebeacon.wave import auto_wave
         from codebeacon.graph.build import build_graph
-        from codebeacon.graph.enrich import (
-            enrich_http_api, enrich_shared_db, enrich_ipc_invoke,
-            promote_confirmed_calls,
-        )
+        from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db, enrich_ipc_invoke
         from codebeacon.graph.cluster import cluster, apply_communities, score_all
-        from codebeacon.graph.write import write_beacon
-        from codebeacon.export.tree_html import write_tree_html
-        from codebeacon.export.callflow_html import write_callflow_html
 
-        # Always carry a cache so each scan populates it for the next run.
-        # `--update` controls whether we *load* the existing cache to skip
-        # unchanged files; a fresh scan starts with an empty in-memory cache
-        # (so every file is re-extracted from scratch) but still writes the
-        # cache out, so the next `--update` invocation has something to hit.
         cache = Cache(output_dir)
         if getattr(args, "update", False):
             cache.load()
+        else:
+            cache = None  # fresh scan, no cache
 
         wave_results = []
         for project in projects:
@@ -177,7 +166,8 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
             print(stats)
             wave_results.append(wave)
 
-        cache.save()
+        if cache is not None:
+            cache.save()
 
         print("\n  Building knowledge graph ...")
         G = build_graph(wave_results)
@@ -187,14 +177,12 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         api_edges = enrich_http_api(G)
         db_edges = enrich_shared_db(G)
         ipc_edges = enrich_ipc_invoke(G)
-        promoted = promote_confirmed_calls(G)
         enriched_parts = []
         if api_edges: enriched_parts.append(f"+{api_edges} calls_api")
         if db_edges: enriched_parts.append(f"+{db_edges} shares_db_entity")
         if ipc_edges: enriched_parts.append(f"+{ipc_edges} invokes_command")
-        if promoted: enriched_parts.append(f"{promoted} calls promoted to EXTRACTED")
         if enriched_parts:
-            print(f"    Enriched: {', '.join(enriched_parts)}")
+            print(f"    Enriched: {', '.join(enriched_parts)} edges")
 
         # Community detection
         print("  Detecting communities ...")
@@ -204,35 +192,19 @@ def _run_pipeline(projects, output_dir: str, args) -> int:
         n_communities = len(set(communities.values())) if communities else 0
         print(f"    {n_communities} communities detected")
 
-        # Persist beacon.json first; shrink/desync guard refuses to overwrite a
-        # larger prior graph and prevents the report from racing ahead of a
-        # half-written graph.
-        wr = write_beacon(G, output_path, repo_path=projects[0].path if projects else output_path)
-        if wr.skipped_shrink:
-            print(
-                "  Aborting outputs because the new graph is smaller than the existing one.",
-                file=sys.stderr,
-            )
-            return 1
-
-        # Analysis (after write, so the report can quote the stamped commit)
+        # Analysis
         report = analyze(G, communities, cohesion, project_paths={p.name: p.path for p in projects})
-        report.built_at_commit = wr.built_at_commit
-        report.current_commit = wr.built_at_commit  # same run; not stale yet
+
+        # Save outputs
+        import networkx.readwrite.json_graph as nxjson
+        beacon_path = output_path / "beacon.json"
+        beacon_path.write_text(
+            json.dumps(nxjson.node_link_data(G), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         report_path = output_path / "REPORT.md"
         report_path.write_text(report_to_markdown(report), encoding="utf-8")
-
-        # Visual exports — best-effort, never block the pipeline.
-        try:
-            tree_path = write_tree_html(G, output_path)
-            print(f"    Wrote {tree_path.name}")
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: tree HTML failed: {exc}", file=sys.stderr)
-        try:
-            flow_path = write_callflow_html(G, output_path)
-            print(f"    Wrote {flow_path.name}")
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: callflow HTML failed: {exc}", file=sys.stderr)
 
     # Wiki generation (always runs — whether full scan or --wiki-only)
     print("  Generating wiki ...")
@@ -282,18 +254,11 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     from pathlib import Path
     from codebeacon.graph.analyze import analyze, report_to_markdown
     from codebeacon.graph.build import build_graph
-    from codebeacon.graph.enrich import (
-        enrich_http_api, enrich_shared_db, enrich_ipc_invoke,
-        promote_confirmed_calls,
-    )
+    from codebeacon.graph.enrich import enrich_http_api, enrich_shared_db, enrich_ipc_invoke
     from codebeacon.graph.cluster import cluster, apply_communities, score_all
-    from codebeacon.graph.write import write_beacon, load_beacon
     from codebeacon.wiki.generator import generate_wiki
     from codebeacon.export.obsidian import generate_obsidian_vault
-    from codebeacon.export.tree_html import write_tree_html
-    from codebeacon.export.callflow_html import write_callflow_html
     from codebeacon.contextmap.generator import generate_context_map
-    from codebeacon.common.safety import git_head
     import networkx.readwrite.json_graph as nxjson
 
     workspace_path = Path(workspace_output_dir)
@@ -321,10 +286,9 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
         for project in projects:
             proj_output_dir = str(Path(project.path) / ".codebeacon")
 
-            # Same rule as the single-project pipeline: always create + save the
-            # cache so a fresh scan primes it for the next `--update`.
-            cache = Cache(proj_output_dir)
+            cache = None
             if getattr(args, "update", False):
+                cache = Cache(proj_output_dir)
                 cache.load()
 
             print(f"\n  Extracting {project.name} ({project.framework}) ...")
@@ -354,7 +318,8 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 stats_str += f" (cache hits: {wave.skipped_count})"
             print(stats_str)
 
-            cache.save()
+            if cache is not None:
+                cache.save()
 
             project_waves.append((project, wave))
 
@@ -372,14 +337,13 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 )
                 continue
 
-            G, meta = load_beacon(beacon_path)
+            data = json.loads(beacon_path.read_text(encoding="utf-8"))
+            G = nxjson.node_link_graph(data, directed=True, multigraph=False)
             communities: dict = {}
             for node_id, node_data in G.nodes(data=True):
                 if "community" in node_data:
                     communities[node_id] = node_data["community"]
             report = analyze(G, communities, {})
-            report.built_at_commit = meta.get("built_at_commit", "")
-            report.current_commit = git_head(project.path)
             n_communities = len(set(communities.values())) if communities else 0
 
             _write_project_artifact_outputs(
@@ -396,13 +360,8 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
             api_edges = enrich_http_api(G)
             db_edges = enrich_shared_db(G)
-            promoted = promote_confirmed_calls(G)
-            parts = []
-            if api_edges: parts.append(f"+{api_edges} calls_api")
-            if db_edges: parts.append(f"+{db_edges} shares_db_entity")
-            if promoted: parts.append(f"{promoted} calls promoted")
-            if parts:
-                print(f"    Enriched: {', '.join(parts)}")
+            if api_edges or db_edges:
+                print(f"    Enriched: +{api_edges} calls_api, +{db_edges} shares_db_entity edges")
 
             communities = cluster(G)
             apply_communities(G, communities)
@@ -410,25 +369,16 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             n_communities = len(set(communities.values())) if communities else 0
             print(f"    {n_communities} communities")
 
-            wr = write_beacon(G, proj_output_dir, repo_path=project.path)
-            if wr.skipped_shrink:
-                print(
-                    f"    Warning: refused to shrink {project.name} graph; keeping prior beacon.json.",
-                    file=sys.stderr,
-                )
-
             report = analyze(G, communities, cohesion, project_paths={project.name: project.path})
-            report.built_at_commit = wr.built_at_commit
-            report.current_commit = wr.built_at_commit
+
+            beacon_path = Path(proj_output_dir) / "beacon.json"
+            beacon_path.write_text(
+                json.dumps(nxjson.node_link_data(G), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             (Path(proj_output_dir) / "REPORT.md").write_text(
                 report_to_markdown(report), encoding="utf-8"
             )
-
-            try:
-                write_tree_html(G, proj_output_dir)
-                write_callflow_html(G, proj_output_dir)
-            except (OSError, ValueError) as exc:
-                print(f"    Warning: HTML export failed for {project.name}: {exc}", file=sys.stderr)
 
             _write_project_artifact_outputs(
                 G, communities, project, proj_output_dir,
@@ -446,7 +396,8 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 file=sys.stderr,
             )
             return 1
-        G_all, meta_all = load_beacon(beacon_path)
+        data = json.loads(beacon_path.read_text(encoding="utf-8"))
+        G_all = nxjson.node_link_graph(data, directed=True, multigraph=False)
         print(f"  Loaded combined graph from {beacon_path}")
         print(f"    Nodes: {G_all.number_of_nodes()}, Edges: {G_all.number_of_edges()}")
         communities_all: dict = {}
@@ -455,8 +406,6 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 communities_all[node_id] = node_data["community"]
         n_communities_all = len(set(communities_all.values())) if communities_all else 0
         report_all = analyze(G_all, communities_all, {})
-        report_all.built_at_commit = meta_all.get("built_at_commit", "")
-        report_all.current_commit = git_head(workspace_output_dir)
     else:
         all_waves = [w for _, w in project_waves]
         G_all = build_graph(all_waves)
@@ -464,13 +413,8 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
         api_edges = enrich_http_api(G_all)
         db_edges = enrich_shared_db(G_all)
-        promoted = promote_confirmed_calls(G_all)
-        parts = []
-        if api_edges: parts.append(f"+{api_edges} calls_api")
-        if db_edges: parts.append(f"+{db_edges} shares_db_entity")
-        if promoted: parts.append(f"{promoted} calls promoted")
-        if parts:
-            print(f"    Enriched: {', '.join(parts)}")
+        if api_edges or db_edges:
+            print(f"    Enriched: +{api_edges} calls_api, +{db_edges} shares_db_entity edges")
 
         print("  Detecting communities ...")
         communities_all = cluster(G_all)
@@ -479,26 +423,16 @@ def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
         n_communities_all = len(set(communities_all.values())) if communities_all else 0
         print(f"    {n_communities_all} communities detected")
 
-        wr_all = write_beacon(G_all, workspace_path, repo_path=workspace_output_dir)
-        if wr_all.skipped_shrink:
-            print(
-                "  Aborting workspace outputs because the combined graph is smaller than the existing one.",
-                file=sys.stderr,
-            )
-            return 1
-
         report_all = analyze(G_all, communities_all, cohesion_all, project_paths={p.name: p.path for p in projects})
-        report_all.built_at_commit = wr_all.built_at_commit
-        report_all.current_commit = wr_all.built_at_commit
+
+        beacon_path = workspace_path / "beacon.json"
+        beacon_path.write_text(
+            json.dumps(nxjson.node_link_data(G_all), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         (workspace_path / "REPORT.md").write_text(
             report_to_markdown(report_all), encoding="utf-8"
         )
-
-        try:
-            write_tree_html(G_all, workspace_path)
-            write_callflow_html(G_all, workspace_path)
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: workspace HTML export failed: {exc}", file=sys.stderr)
 
     print("  Generating combined wiki ...")
     generate_wiki(G_all, communities_all, workspace_output_dir)
@@ -639,60 +573,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_query(args: argparse.Namespace) -> int:
-    """Search the beacon graph for nodes whose label contains ``args.term``.
-
-    Reuses :class:`codebeacon.export.mcp.BeaconIndex` so query semantics match
-    what an MCP client gets — one source of truth for the lookup logic.
-    """
-    from codebeacon.export.mcp import BeaconIndex, tool_beacon_query
-
-    beacon_dir = _resolve_beacon_dir(args)
-    idx = BeaconIndex(beacon_dir)
-    try:
-        idx.load()
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    print(tool_beacon_query(idx, {"term": args.term, "limit": int(getattr(args, "limit", 20))}))
+    print(f"[query] Not yet implemented (Task 8). Query: {args.term}")
     return 0
 
 
 def _cmd_path(args: argparse.Namespace) -> int:
-    """Print the shortest dependency path between two named nodes."""
-    from codebeacon.export.mcp import BeaconIndex, tool_beacon_path
-
-    beacon_dir = _resolve_beacon_dir(args)
-    idx = BeaconIndex(beacon_dir)
-    try:
-        idx.load()
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    print(tool_beacon_path(idx, {"source": args.source, "target": args.target}))
+    print(f"[path] Not yet implemented (Task 8). From: {args.source}, To: {args.target}")
     return 0
-
-
-def _resolve_beacon_dir(args: argparse.Namespace) -> Path:
-    """Resolve which ``.codebeacon`` directory the user wants to query."""
-    candidate = getattr(args, "dir", None) or ".codebeacon"
-    p = Path(candidate)
-    return p if p.is_absolute() else Path.cwd() / p
-
-
-def _cmd_merge_driver(args: argparse.Namespace) -> int:
-    """Git merge driver entry point — never block a merge."""
-    from codebeacon.export.merge import merge_files
-    return merge_files(args.base, args.current, args.other)
-
-
-def _cmd_hook(args: argparse.Namespace) -> int:
-    """``codebeacon hook install`` — wire git hooks + merge driver."""
-    from codebeacon.export.hooks import install_hooks
-    if args.hook_action != "install":
-        print(f"Unknown hook action: {args.hook_action}", file=sys.stderr)
-        return 1
-    target = Path(getattr(args, "path", ".") or ".").resolve()
-    return install_hooks(target)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -789,18 +676,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # query
     query_p = sub.add_parser("query", help="Search nodes and edges in the graph")
-    query_p.add_argument("term", help="Search term (case-insensitive substring)")
-    query_p.add_argument("--dir", metavar="DIR", default=".codebeacon",
-                         help="Path to .codebeacon output directory (default: .codebeacon)")
-    query_p.add_argument("--limit", type=int, default=20, help="Max results (default 20)")
+    query_p.add_argument("term", help="Search term")
     query_p.set_defaults(func=_cmd_query)
 
     # path
     path_p = sub.add_parser("path", help="Find shortest path between two nodes")
     path_p.add_argument("source", help="Source node name")
     path_p.add_argument("target", help="Target node name")
-    path_p.add_argument("--dir", metavar="DIR", default=".codebeacon",
-                        help="Path to .codebeacon output directory (default: .codebeacon)")
     path_p.set_defaults(func=_cmd_path)
 
     # serve
@@ -813,27 +695,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_p.set_defaults(func=_cmd_serve)
 
-    # install (Claude Code skill)
+    # install
     install_p = sub.add_parser("install", help="Install Claude Code skill")
     install_p.set_defaults(func=_cmd_install)
-
-    # merge-driver (git plumbing — invoked by git, not directly by humans)
-    md_p = sub.add_parser(
-        "merge-driver",
-        help="Git merge driver for beacon.json (invoked by git after 'codebeacon hook install')",
-    )
-    md_p.add_argument("base", help="Path to base version of beacon.json")
-    md_p.add_argument("current", help="Path to current (HEAD) version; merged result is written here")
-    md_p.add_argument("other", help="Path to other branch's version")
-    md_p.set_defaults(func=_cmd_merge_driver)
-
-    # hook install
-    hook_p = sub.add_parser("hook", help="Install git hooks + merge driver in the current repo")
-    hook_sub = hook_p.add_subparsers(dest="hook_action", metavar="<action>")
-    hook_sub.required = True
-    hook_install = hook_sub.add_parser("install", help="Install hooks in the repo at PATH (default: cwd)")
-    hook_install.add_argument("path", nargs="?", default=".", help="Repository path (default: cwd)")
-    hook_p.set_defaults(func=_cmd_hook)
 
     return parser
 

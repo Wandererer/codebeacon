@@ -8,8 +8,6 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from codebeacon.discover.ignore import IgnoreMatcher
-
 IGNORE_DIRS: set[str] = {
     "node_modules",
     ".git",
@@ -71,22 +69,23 @@ CODE_EXTENSIONS: set[str] = {
 
 
 def read_ignore_file(root: str | Path, filename: str = ".codebeaconignore") -> list[str]:
-    """Return the raw lines of ``.codebeaconignore`` (no filtering).
-
-    Pattern parsing is delegated to :class:`codebeacon.discover.ignore.IgnoreMatcher`,
-    which implements gitignore semantics (negation, dir-only, anchored, trailing
-    whitespace handling). Returning raw lines here keeps that responsibility in
-    one place.
-    """
+    """Read .codebeaconignore at the project root and return ignore patterns."""
     ignore_path = Path(root) / filename
     try:
-        return ignore_path.read_text(encoding="utf-8").splitlines()
+        content = ignore_path.read_text(encoding="utf-8")
+        return [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
     except (FileNotFoundError, OSError):
         return []
 
 
-def _should_ignore_dir(name: str) -> bool:
+def _should_ignore_dir(name: str, extra_ignore: set[str]) -> bool:
     if name in IGNORE_DIRS:
+        return True
+    if name in extra_ignore:
         return True
     if name.startswith("."):
         # Hidden dirs — skip most except known config dirs
@@ -101,21 +100,22 @@ def collect_files(
 ) -> list[str]:
     """Recursively collect code files under root.
 
-    Returns absolute paths sorted by directory then filename. Honours
-    ``.codebeaconignore`` using gitignore semantics — negation (``!pattern``)
-    re-includes paths that would otherwise be skipped.
+    Returns absolute paths sorted by directory then filename.
     """
     root = Path(root).resolve()
-    lines = read_ignore_file(root)
+    ignore_patterns = read_ignore_file(root)
     if extra_ignore:
-        lines.extend(extra_ignore)
-    matcher = IgnoreMatcher(lines)
-    # If any rule has `negate=True`, directory pruning is deferred to per-file
-    # checks so a negated file inside an ignored directory can still be reached.
-    has_negation = any(r.negate for r in matcher._rules)  # noqa: SLF001 — intentional internal access
+        ignore_patterns.extend(extra_ignore)
+
+    extra_ignore_set: set[str] = set()
+    for p in ignore_patterns:
+        # Simple patterns: strip leading / and trailing /* or /**
+        clean = p.lstrip("/").rstrip("/").rstrip("*").rstrip("/")
+        if clean:
+            extra_ignore_set.add(clean)
 
     result: list[str] = []
-    _walk(root, root, 0, max_depth, matcher, has_negation, result)
+    _walk(root, root, 0, max_depth, extra_ignore_set, result)
     return sorted(result)
 
 
@@ -124,8 +124,7 @@ def _walk(
     current: Path,
     depth: int,
     max_depth: int,
-    matcher: IgnoreMatcher,
-    has_negation: bool,
+    extra_ignore: set[str],
     result: list[str],
 ) -> None:
     if depth > max_depth:
@@ -138,22 +137,12 @@ def _walk(
     for entry in entries:
         if entry.is_symlink():
             continue
-        rel = entry.relative_to(base).as_posix()
         if entry.is_dir():
-            if _should_ignore_dir(entry.name):
-                continue
-            # Skip the descent only when no negation rules could un-ignore a
-            # nested file. When `!pattern` exists, we must descend so that
-            # negated files inside ignored directories are still reachable.
-            if not has_negation and matcher.is_ignored(rel, is_dir=True):
-                continue
-            _walk(base, entry, depth + 1, max_depth, matcher, has_negation, result)
+            if not _should_ignore_dir(entry.name, extra_ignore):
+                _walk(base, entry, depth + 1, max_depth, extra_ignore, result)
         elif entry.is_file():
-            if entry.suffix not in CODE_EXTENSIONS:
-                continue
-            if matcher.is_ignored(rel, is_dir=False):
-                continue
-            result.append(str(entry))
+            if entry.suffix in CODE_EXTENSIONS:
+                result.append(str(entry))
 
 
 def hash_file(path: str | Path) -> str:

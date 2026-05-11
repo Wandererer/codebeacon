@@ -44,15 +44,9 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 - **tree-sitter 기반** — 정규식이 아닌 구조적 AST 파싱; 언어 그래머 기본 포함
 - **2-패스 DI 해결** — Pass 1에서 로컬 AST 노드 추출, Pass 2에서 전역 심볼 테이블로 Interface → Implementation 매핑 해결
 - **Wave 병합 아키텍처** — 파일을 병렬 청크로 처리 후 전역 병합; 대형 모노레포도 메모리 폭발 없이 처리
-- **다양한 출력 형식** — JSON 지식 그래프, 마크다운 위키, Obsidian 볼트, AI 컨텍스트 맵, MCP 서버, 인터랙티브 HTML
-- **시각적 탐색** — `beacon.html`(D3 접이식 트리)과 `callflow.html`(커뮤니티별 Mermaid 아키텍처 다이어그램)이 모든 스캔에서 자동 재생성됨
+- **다양한 출력 형식** — JSON 지식 그래프, 마크다운 위키, Obsidian 볼트, AI 컨텍스트 맵, MCP 서버
 - **커뮤니티 감지** — Leiden/Louvain 클러스터링으로 실제 아키텍처 경계 도출
-- **증분 캐시** — SHA-256 + mtime/size 빠른 경로; Obsidian/iCloud/Nextcloud처럼 mtime만 튀는 경우는 재추출 트리거하지 않음
-- **신뢰도 승격** — 명시적 import가 바인딩을 증명하면 파일 간 `calls` 엣지가 INFERRED에서 EXTRACTED로 자동 승격
-- **안전한 쓰기** — beacon.json에는 shrink guard(부분 실행이 완전한 그래프를 덮어쓰지 못함)와 `built_at_commit` 스탬프가 있어 REPORT.md가 현재 HEAD 대비 stale 상태를 표시
-- **멀티 개발자 친화적** — `codebeacon hook install`은 `beacon.json`용 git merge driver와 post-commit 증분 재빌드 훅을 등록해, 같은 브랜치에서 두 개발자가 동시에 스캔해도 머지 충돌이 발생하지 않음
-- **하드닝된 출력** — YAML frontmatter와 MCP 레이블은 U+2028/U+2029, C0 컨트롤, bidi 마크를 모두 제거; 소스 코드의 악의적 식별자가 Obsidian YAML 파서를 깨뜨리거나 LLM 에이전트 컨텍스트에 컨트롤 시퀀스를 주입할 수 없음
-- **gitignore 호환 `.codebeaconignore`** — last-match-wins, `!` 부정, 디렉토리 패턴(`build/`), 앵커 패턴(`/secrets.txt`), 트레일링 공백 처리
+- **증분 캐시** — SHA-256 기반; 마지막 스캔 이후 변경된 파일만 재추출
 - **제로 설정** — 프레임워크와 언어 자동 감지; 반복 실행을 위한 `codebeacon.yaml` 자동 생성
 - **딥다이브 모드** — `--deep-dive`는 각 서브 프로젝트에 개별 `.codebeacon/` + `CLAUDE.md`를 생성; 어느 서브 프로젝트 폴더에서든 `codebeacon scan . --update`를 실행하면 워크스페이스의 모든 프로젝트가 자동으로 업데이트됨
 
@@ -123,10 +117,8 @@ project-root/
   .cursorrules           ← Cursor IDE 컨텍스트 (동일 병합 방식)
   AGENTS.md              ← OpenAI Agents / Codex 컨텍스트 (동일 병합 방식)
   .codebeacon/
-    beacon.json          ← 전체 지식 그래프; `meta.built_at_commit` 임베드
-    beacon.html          ← D3 접이식 트리 뷰어 (브라우저에서 열기)
-    callflow.html        ← 커뮤니티별 Mermaid 콜플로우 다이어그램
-    REPORT.md            ← 갓 노드, 놀라운 연결, 허브 파일, 신선도
+    beacon.json          ← 전체 지식 그래프 (노드-링크 JSON, 쿼리 가능)
+    REPORT.md            ← 갓 노드, 놀라운 연결, 허브 파일
     wiki/
       index.md           ← 전역 인덱스 (~200 토큰)
       overview.md        ← 플랫폼 통계 + 교차 프로젝트 연결
@@ -273,7 +265,7 @@ Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HT
 codebeacon scan <path> [옵션]
 codebeacon scan .                         # 현재 디렉토리
 codebeacon scan /workspace                # 워크스페이스 루트 (멀티 프로젝트)
-codebeacon scan . --update                # 증분: mtime/size 빠른 경로 + 콘텐츠 해시 폴백
+codebeacon scan . --update                # 증분: 변경된 파일만 재추출
 codebeacon scan . --wiki-only             # 재추출 건너뛰고 기존 beacon.json에서 위키/obsidian/컨텍스트 맵 재생성
 codebeacon scan . --obsidian-dir <path>   # Obsidian 볼트를 커스텀 위치에 저장
 codebeacon scan . --semantic              # LLM 시맨틱 추출 활성화
@@ -285,62 +277,14 @@ codebeacon init [path]                    # codebeacon.yaml 자동 생성
 codebeacon sync                           # codebeacon.yaml 기반 실행
 codebeacon sync --config <file>           # 특정 설정 파일 사용
 
-# 지식 그래프 쿼리
-codebeacon query <term> [--dir .codebeacon] [--limit N]   # 라벨 부분 문자열로 노드 검색
-codebeacon path <source> <target> [--dir .codebeacon]     # 최단 의존성 경로
-
-# 멀티 개발자 지원 (git plumbing)
-codebeacon hook install [path]            # merge driver + post-commit 증분 재빌드 설치
-codebeacon merge-driver <base> <cur> <other>  # `hook install` 후 git이 자동 호출; beacon.json union 머지
+# 지식 그래프 쿼리 (예정)
+codebeacon query <term>                   # 노드와 엣지 검색
+codebeacon path <source> <target>         # 두 노드 간 최단 경로
 
 # 통합
 codebeacon serve [--dir .codebeacon]      # MCP 서버 시작 (stdio)
 codebeacon install                        # Claude Code 스킬 설치
 ```
-
----
-
-## 시각적 탐색
-
-모든 스캔은 `beacon.json` 옆에 self-contained HTML 파일 2개를 함께 작성합니다:
-
-```
-.codebeacon/beacon.html      # D3 v7 접이식 트리 — 브라우저에서 바로 열기
-.codebeacon/callflow.html    # 커뮤니티별 Mermaid 아키텍처 다이어그램
-```
-
-빌드도, 정적 서버도, 복사-붙여넣기도 불필요. 파일을 열고 프로젝트 → 타입 → 노드 순서로 클릭해서 펼치고, 호버하면 소스 경로와 차수가 표시됩니다. `callflow.html`은 그래프를 커뮤니티별로 그룹화하고 각각을 Mermaid 플로우차트로 렌더링하며, 커뮤니티 외부 출력 엣지는 접힌 테이블에 나열됩니다.
-
----
-
-## 멀티 개발자 워크플로
-
-두 개발자가 같은 브랜치에서 `codebeacon scan`을 실행하면 약간 다른 `beacon.json` 파일이 나옵니다 — 전통적인 머지 충돌 원인. `codebeacon hook install`이 해결합니다:
-
-```bash
-codebeacon hook install            # 저장소 루트에서
-```
-
-이 명령은 다음을 등록합니다:
-
-- 두 개의 `beacon.json` 파일을 하나로 union 머지하는 **git merge driver** (노드는 ID로, 엣지는 `(source, target, relation)`로 중복 제거)
-- `*beacon.json`을 드라이버에 연결하는 `.gitattributes` 항목
-- 그래프가 커밋과 멀어지지 않도록 백그라운드에서 `codebeacon scan . --update`를 실행하는 **post-commit 훅**. 출력은 `~/.cache/codebeacon-rebuild.log`로 향함
-
-머지 드라이버는 항상 0으로 종료 — 그래프 재생성은 실제 머지를 절대 막지 않습니다.
-
----
-
-## 안전성 보장
-
-매 성공적인 스캔에서 라이터가 강제하는 불변식들:
-
-| 가드 | 방지하는 상황 |
-|---|---|
-| **Shrink guard** | 부분 추출 실패나 중단된 실행이 더 큰 완전한 `beacon.json`을 덮어쓸 수 없음. API에서 `force=True`로 우회 가능 |
-| **원자적 쓰기** | `beacon.json`은 `os.replace`로 작성되어, 파일은 완전하거나 손대지 않은 상태 둘 중 하나 — 반쯤 작성된 그래프 없음 |
-| **`built_at_commit` 스탬프** | `beacon.json`은 `meta.built_at_commit` (풀 SHA)를 임베드하고 `REPORT.md`는 short SHA를 표시. HEAD가 그 시점보다 앞서 있으면 한 줄짜리 해결 힌트와 함께 `⚠ stale`로 표시 |
-| **Frontmatter / 라벨 하드닝** | YAML frontmatter 값은 single-quoted + U+2028, U+2029, 탭, C0 컨트롤 이스케이프; MCP 도구 출력은 모든 라벨을 동일한 sanitizer로 통과시킴. 소스 코드의 악의적 식별자가 Obsidian YAML 파서를 깨거나 LLM 에이전트 컨텍스트에 컨트롤 시퀀스를 주입할 수 없음 |
 
 ---
 
@@ -380,28 +324,15 @@ deep_dive: false               # true로 설정하면 프로젝트별 출력 생
 
 ### .codebeaconignore
 
-프로젝트 루트에 `.codebeaconignore` 파일을 두면 스캔에서 특정 디렉토리나 파일을 제외할 수 있습니다. `.gitignore`와 동일한 시멘틱 — last-match-wins, `!` 부정, 앵커 패턴(`/foo`), 디렉토리 전용 패턴(`build/`), 주석:
+프로젝트 루트에 `.codebeaconignore` 파일을 두면 스캔에서 특정 디렉토리나 파일을 제외할 수 있습니다. `.gitignore`와 동일한 문법 — 한 줄에 패턴 하나, `#`은 주석.
 
 ```
 # .codebeaconignore
-
-# 디렉토리
-build/
 generated/
+build/
+*.generated.ts
 fixtures/
-
-# 루트에만 앵커
-/scripts/local-only.ts
-
-# 글로브 패턴
-*.gen.ts
-**/snapshots/**
-
-# build/이 무시되더라도 특정 파일은 다시 포함
-!build/manifest.ts
 ```
-
-`!pattern`은 이전에 무시된 경로를 다시 포함시킵니다; 뒤의 규칙이 앞의 규칙을 덮어씁니다. 워커는 룰셋에 매칭되는 디렉토리는 가지치기하지만, `!` 부정 규칙이 있을 때는 가지치기를 보류하고 각 파일별로 검사합니다.
 
 ---
 

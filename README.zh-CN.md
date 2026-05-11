@@ -44,15 +44,9 @@
 - **基于 tree-sitter** — 结构化抽象语法树解析，而非正则表达式；语言语法默认内置
 - **两阶段依赖注入解析** — Pass 1 提取本地 AST 节点；Pass 2 构建全局符号表，解析单阶段工具遗漏的接口→实现映射
 - **Wave 合并架构** — 文件以并行块处理后全局合并；大型单仓库也不会出现内存问题
-- **多种输出格式** — JSON 知识图谱、Markdown Wiki、Obsidian Vault、AI 上下文映射、MCP 服务器、交互式 HTML
-- **可视化浏览** — 每次扫描自动重新生成 `beacon.html`（D3 可折叠树）与 `callflow.html`（按社区分组的 Mermaid 架构图）
+- **多种输出格式** — JSON 知识图谱、Markdown Wiki、Obsidian Vault、AI 上下文映射、MCP 服务器
 - **社区检测** — Leiden/Louvain 聚类揭示真实的架构边界
-- **增量缓存** — SHA-256 + mtime/size 快速路径；同步工具（Obsidian/iCloud/Nextcloud）造成的仅 mtime 跳动不会触发重新提取
-- **置信度提升** — 当显式 import 证明绑定关系时，跨文件 `calls` 边自动从 INFERRED 提升为 EXTRACTED
-- **安全写入** — beacon.json 拥有 shrink guard（部分运行的失败不会覆盖完整图谱）和 `built_at_commit` 印记，REPORT.md 会标记相对于当前 HEAD 是否已 stale
-- **多开发者友好** — `codebeacon hook install` 注册 `beacon.json` 的 git merge driver 和 post-commit 增量重建 hook，同一分支上两位开发者同时扫描不会产生合并冲突
-- **强化的输出** — YAML frontmatter 与 MCP 标签会清除 U+2028/U+2029、C0 控制字符与双向标记；源代码中的恶意标识符无法破坏 Obsidian YAML 解析器，也无法向 LLM agent 上下文注入控制序列
-- **gitignore 风格 `.codebeaconignore`** — last-match-wins、`!` 否定、目录模式（`build/`）、锚定模式（`/secrets.txt`）、行尾空白处理
+- **增量缓存** — 基于 SHA-256；仅重新提取自上次扫描以来发生变更的文件
 - **零配置** — 自动检测框架和语言；自动生成 `codebeacon.yaml` 供后续运行
 - **深度扫描模式** — `--deep-dive` 为每个子项目生成专属 `.codebeacon/` + `CLAUDE.md`；从**任意**子项目目录执行更新命令，即可自动同步整个工作区的所有项目
 
@@ -123,10 +117,8 @@ project-root/
   .cursorrules           ← Cursor IDE 上下文（相同合并策略）
   AGENTS.md              ← OpenAI Agents / Codex 上下文（相同合并策略）
   .codebeacon/
-    beacon.json          ← 完整知识图谱；嵌入 `meta.built_at_commit`
-    beacon.html          ← D3 可折叠树查看器（用浏览器打开）
-    callflow.html        ← 按社区分组的 Mermaid 调用流程图
-    REPORT.md            ← 上帝节点、意外连接、枢纽文件、新鲜度
+    beacon.json          ← 完整知识图谱（节点-链接 JSON，可查询）
+    REPORT.md            ← 上帝节点、意外连接、枢纽文件
     wiki/
       index.md           ← 全局索引（约 200 tokens）
       overview.md        ← 平台统计 + 跨项目连接
@@ -273,62 +265,14 @@ codebeacon init [path]                    # 自动生成 codebeacon.yaml
 codebeacon sync                           # 基于 codebeacon.yaml 运行
 codebeacon sync --config <file>           # 使用指定配置文件
 
-# 查询知识图谱
-codebeacon query <term> [--dir .codebeacon] [--limit N]   # 通过标签子串搜索节点
-codebeacon path <source> <target> [--dir .codebeacon]     # 最短依赖路径
-
-# 多开发者支持（git plumbing）
-codebeacon hook install [path]            # 安装 merge driver + post-commit 增量重建 hook
-codebeacon merge-driver <base> <cur> <other>  # `hook install` 后由 git 自动调用；对 beacon.json 做 union 合并
+# 查询知识图谱（即将推出）
+codebeacon query <term>                   # 搜索节点和边
+codebeacon path <source> <target>         # 两节点间最短路径
 
 # 集成
 codebeacon serve [--dir .codebeacon]      # 启动 MCP 服务器（stdio）
 codebeacon install                        # 安装 Claude Code 技能
 ```
-
----
-
-## 可视化浏览
-
-每次扫描都会在 `beacon.json` 旁边写出两个自包含的 HTML 文件：
-
-```
-.codebeacon/beacon.html      # D3 v7 可折叠树 — 任意浏览器打开即可
-.codebeacon/callflow.html    # 按社区一张 Mermaid 架构图
-```
-
-无需构建步骤、无需静态服务器、无需复制粘贴。打开文件，点击展开项目 → 类型 → 节点；悬停查看源路径和度数。`callflow.html` 按社区对图谱分组，每组用 Mermaid 流程图渲染，跨社区的出边在可折叠的表格中列出。
-
----
-
-## 多开发者工作流
-
-两位开发者在同一分支上运行 `codebeacon scan` 会产生略有不同的 `beacon.json` — 历史上是合并冲突的高发地带。`codebeacon hook install` 解决这个问题：
-
-```bash
-codebeacon hook install            # 在仓库根目录
-```
-
-它会注册：
-
-- **git merge driver**，将两个 `beacon.json` union 合并为一个（节点按 ID 去重，边按 `(source, target, relation)` 去重）
-- 将 `*beacon.json` 指向该 driver 的 `.gitattributes` 条目
-- **post-commit hook**，在后台执行 `codebeacon scan . --update`，让图谱不落后于提交。输出写入 `~/.cache/codebeacon-rebuild.log`
-
-merge driver 始终以 0 退出 — 图谱重建绝不会阻塞实际的合并。
-
----
-
-## 安全保证
-
-每次成功扫描都由 writer 强制执行以下不变量：
-
-| 守卫 | 阻止的情况 |
-|---|---|
-| **Shrink guard** | 部分提取失败或中断的运行不能覆盖更大、更完整的 `beacon.json`。可通过 API 中 `force=True` 绕过 |
-| **原子写入** | `beacon.json` 通过 `os.replace` 写入，文件要么完整要么未触碰 — 不存在写一半的图谱 |
-| **`built_at_commit` 印记** | `beacon.json` 嵌入 `meta.built_at_commit`（完整 SHA），`REPORT.md` 显示 short SHA。HEAD 超前时，报告会用一行修复提示标记 `⚠ stale` |
-| **Frontmatter / 标签强化** | YAML frontmatter 值采用单引号并转义 U+2028、U+2029、Tab、C0 控制字符；MCP 工具输出会让所有标签经过同一 sanitizer。源代码中的恶意标识符无法破坏 Obsidian 的 YAML 解析器，也无法向 LLM agent 上下文注入控制序列 |
 
 ---
 
@@ -368,28 +312,15 @@ deep_dive: false               # 设为 true 可生成各项目独立输出
 
 ### .codebeaconignore
 
-在项目根目录放置 `.codebeaconignore` 文件可将特定目录或文件排除在扫描之外。语义与 `.gitignore` 一致 — last-match-wins、`!` 否定、锚定模式（`/foo`）、目录专用模式（`build/`）、注释：
+在项目根目录放置 `.codebeaconignore` 文件可将特定目录或文件排除在扫描之外。语法与 `.gitignore` 相同 — 每行一个模式，`#` 为注释。
 
 ```
 # .codebeaconignore
-
-# 目录
-build/
 generated/
+build/
+*.generated.ts
 fixtures/
-
-# 仅锚定到根
-/scripts/local-only.ts
-
-# 通配符模式
-*.gen.ts
-**/snapshots/**
-
-# 即使 build/ 被忽略也重新包含特定文件
-!build/manifest.ts
 ```
-
-`!pattern` 重新包含先前被忽略的路径；后面的规则覆盖前面的规则。Walker 会修剪名称匹配规则集的目录，但当存在 `!` 否定规则时会推迟修剪，转而对每个文件单独检查。
 
 ---
 

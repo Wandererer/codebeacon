@@ -308,38 +308,6 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     )]
 
 
-def classify_repo_type(root: str | Path, projects: list[ProjectInfo]) -> str:
-    """Classify the repo structure into one of: meta, microservices, monorepo, single.
-
-    - meta:          `.gitmodules` exists → git submodules aggregate independent
-                     projects (org-wide umbrella repos).
-    - microservices: 2+ projects AND either (a) infra orchestration at root
-                     (k8s/, kubernetes/, helm/), or (b) 2+ projects ship a Dockerfile.
-    - monorepo:      2+ projects without microservice signals.
-    - single:        one project.
-    """
-    root = Path(root)
-
-    if (root / ".gitmodules").is_file():
-        return "meta"
-
-    if len(projects) <= 1:
-        return "single"
-
-    for infra in ("k8s", "kubernetes", "helm"):
-        if (root / infra).is_dir():
-            return "microservices"
-
-    dockerfile_count = 0
-    for p in projects:
-        if (Path(p.path) / "Dockerfile").is_file():
-            dockerfile_count += 1
-            if dockerfile_count >= 2:
-                return "microservices"
-
-    return "monorepo"
-
-
 def _multi_from_paths(paths: list[str]) -> list[ProjectInfo]:
     """Treat each path as an independent project."""
     projects = []
