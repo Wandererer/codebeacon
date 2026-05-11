@@ -266,7 +266,7 @@ codebeacon scan /workspace                # ワークスペースルート (マ�
 codebeacon scan . --update                # インクリメンタル：変更ファイルのみ再抽出
 codebeacon scan . --wiki-only             # 再抽出をスキップし、既存の beacon.json からウィキ/obsidian/コンテキストマップを再生成
 codebeacon scan . --obsidian-dir <path>   # Obsidian Vault をカスタム場所に書き込み
-codebeacon scan . --semantic              # LLM セマンティック抽出を有効化
+codebeacon scan . --semantic              # 構造化コメント参照（Javadoc/JSDoc/docstring）の抽出を有効化
 codebeacon scan . --list-only             # フレームワーク検出のみ、抽出なし
 codebeacon scan /workspace --deep-dive    # プロジェクト別 + 統合ワークスペース出力
 
@@ -284,10 +284,68 @@ codebeacon path <source> <target> [--dir .codebeacon]     # 最短依存関係�
 codebeacon hook install [path]            # merge driver + post-commit インクリメンタル再ビルドのインストール
 codebeacon merge-driver <base> <cur> <other>  # `hook install` 後 git が呼び出す；beacon.json を union マージ
 
+# AI-セマンティック補強 (LLM はエージェント、整合性管理は codebeacon)
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
+                                          # 過去のアーカイブを fresh beacon.json に再適用後、
+                                          # 未処理の NEW 候補 (god-node フォルダ + unresolved
+                                          # ターゲット) のみを .codebeacon/semantic-tasks.jsonl
+                                          # に書き出す
+codebeacon semantic-apply   [--dir .codebeacon]
+                                          # .codebeacon/semantic-results.jsonl を INFERRED
+                                          # references エッジとして beacon.json に統合し、
+                                          # .codebeacon/semantic/original.jsonl アーカイブに
+                                          # 追記、pending ファイルを掃除し、
+                                          # wiki/obsidian/コンテキストマップを再生成
+
 # インテグレーション
 codebeacon serve [--dir .codebeacon]      # MCP サーバー起動 (stdio)
 codebeacon install                        # Claude Code スキルをインストール
 ```
+
+---
+
+## AI-セマンティック補強（`/codebeacon` スキル経由）
+
+tree-sitter パースは AST に**ある**ものを見つけます。**AI-セマンティック**は**コメントのみにある**ものを見つけます — Javadoc 中の `@see UserService`、Python docstring 中の `:class:`OrderRepository``、ルートハンドラの横に書かれた契約上の参照など。codebeacon はこのために 2 層を提供します：
+
+| レイヤー | フラグ | コスト | 捕捉対象 |
+|---|---|---|---|
+| 構造化コメントパース | `--semantic` | 無料、ローカル、LLM 不要 | Javadoc `@see` / `{@link}`、JSDoc `@see` / `@param` 型、Python `:class:` / `:func:` / `See Also` |
+| **AI-セマンティック** | `/codebeacon` スキルで自動 | エージェントの**現在のモデル**を使用 — **API キー不要** | 正規表現が捕えられないクラス／型／サービス参照（自由文、間接的言及、型ヒントのみ等） |
+
+CLI 自体は LLM API 呼び出しを **行いません**。AI-セマンティック層は意図的に `/codebeacon` Claude Code スキル内で**実行中のエージェントが所有**します — そうすることでユーザーが選んだモデル（Opus / Sonnet / Haiku など）がそのまま使われ、codebeacon 自体は `ANTHROPIC_API_KEY` もクラウド設定も必要としません。
+
+### 実行フロー
+
+Claude Code で `/codebeacon` を呼び出すと：
+
+1. `scan` / `sync` が AST から `beacon.json` を構築（LLM 呼び出しなし）。
+2. `codebeacon semantic-prepare` が過去のアーカイブを新しいグラフに再適用後、**新しい候補のみ**を含む `.codebeacon/semantic-tasks.jsonl` を書き出します — スコアが高い（unresolved ターゲットエッジ + god-node フォルダ）かつ一度も処理されたことのないファイル。
+3. スキルが tasks ファイルを順次処理。各行についてエージェント（現在セッションのモデル）が `excerpt` フィールドを読み、推論された references をインラインで返します。結果は `.codebeacon/semantic-results.jsonl` に書き込まれます。
+4. `codebeacon semantic-apply` が結果を `INFERRED references` エッジとして `beacon.json` にマージし、**`.codebeacon/semantic/original.jsonl`**（永続アーカイブ）に追記、pending ファイルを掃除、wiki + obsidian + コンテキストマップを再生成します。
+5. 次回スキャン時：`semantic-prepare` がアーカイブを新グラフに再適用（再スキャンで過去の推論が失われないように）し、最後のアーカイブ以降の**新しく発見された候補のみ**を tasks ファイルに含めます。処理済みファイルは `task_id`（SHA1 of `file_path|node_id`）でスキップ。
+
+→ 増分かつ冪等の補強。同じファイルを二度分析せず、蓄積された AI シグナルは毎回の再スキャンを生き延びます。
+
+### 直接 CLI 使用
+
+スキルを介さず（例：CI）に同じ 2 コマンドで手動運用し、`semantic-results.jsonl` を自分で書くこともできます：
+
+```bash
+codebeacon scan .
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+
+# 次に .codebeacon/semantic-results.jsonl を自分で書く；各行：
+#   {"task_id":"...", "source_node_id":"...", "edges":[
+#     {"target_name":"UserService","relation":"references","confidence_score":0.7}
+#   ]}
+
+codebeacon semantic-apply --dir .codebeacon
+```
+
+### オプトアウト
+
+スキル呼び出し時に `--no-semantic`（または `--wiki-only`、`--list-only`）を渡せば AI ステップは完全にスキップされます。`--semantic` を `scan` / `sync` に渡すと構造化コメント層は引き続き動作します。
 
 ---
 
@@ -364,7 +422,10 @@ wave:
   max_parallel: 5              # 並列スレッド数
 
 semantic:
-  enabled: false               # --semantic フラグでオーバーライド
+  enabled: false               # 構造化コメント抽出のみ。--semantic で上書き。
+                               # AI-セマンティックはこのキーに無い ―
+                               # /codebeacon スキル (= 実行中のエージェント)
+                               # が trigger する。
 
 deep_dive: false               # true にすると各プロジェクト別出力を生成
 ```
@@ -426,13 +487,13 @@ codebeacon は両ツールの代替ではなく統合です — 共有の抽出�
 
 ## プライバシーとセキュリティ
 
-すべての処理はローカルで行われます。ソースコードは外部に送信されません。
+AST 処理はすべてローカルで実行されます。codebeacon を直接呼び出す限り、ソースコードはマシンの外に出ません。
 
 - tree-sitter AST パースはプロセス内でのみ実行
 - テレメトリ、分析、通常操作中のネットワーク呼び出しなし
-- `--semantic` フラグ（デフォルト無効）は 2 つの抽出モードを有効化します：
-  1. **構造化コメント解析**（LLM 不要） — Javadoc（`@see`、`{@link}`）、Python ドキュメント文字列（`:class:`、`:func:`）、JSDoc（`@see`、`@param` 型）からクロスリファレンスを推論
-  2. **LLM 推論**（オプション） — `ANTHROPIC_API_KEY` が設定されている場合、Claude API にコードの抜粋を送信して深い関係推論を実行；明示的に有効化した場合のみ使用
+- CLI 自体は **LLM プロバイダーを一切呼び出しません** — codebeacon パッケージには API クライアントもキー処理もモデル名もありません
+- `--semantic` は **構造化コメントパースのみ** を有効化します（Javadoc `@see` / `{@link}`、JSDoc `@see` / `@param` 型、Python `:class:` / `:func:` / `See Also`）。完全ローカル。
+- **AI-セマンティック**（LLM ベースの深い推論層）は `/codebeacon` Claude Code スキルが起動します。エージェントが `semantic-tasks.jsonl` を読み、**現在セッションのモデル** で解析を実行して `semantic-results.jsonl` を書き戻します。Python CLI はタスクバッチの準備と結果の統合のみを担当し、どのモデルが使われたかすら知りません。スキル呼び出しに `--no-semantic` を渡せば LLM ステップは完全にスキップされます。
 
 ---
 

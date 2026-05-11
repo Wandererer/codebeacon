@@ -241,7 +241,10 @@ wave:
   max_parallel: 5              # parallele Threads
 
 semantic:
-  enabled: false               # mit --semantic überschreiben
+  enabled: false               # nur strukturierte Kommentaranalyse;
+                               # mit --semantic überschreiben. AI-semantik lebt NICHT
+                               # hier — sie wird vom /codebeacon-Skill
+                               # (= laufender Agent) ausgelöst.
 
 deep_dive: false               # auf true setzen für Pro-Projekt-Ausgabe
 ```
@@ -359,7 +362,7 @@ Java, Kotlin, Python, JavaScript, TypeScript, Go, Ruby, PHP, C#, Rust, Swift, HT
 codebeacon scan .                         # aktuelles Verzeichnis
 codebeacon scan . --update                # inkrementell: nur geänderte Dateien
 codebeacon scan . --wiki-only             # Extraktion überspringen, Wiki/Obsidian/Kontext aus vorhandenem beacon.json regenerieren
-codebeacon scan . --semantic              # LLM-semantische Extraktion
+codebeacon scan . --semantic              # Extraktion strukturierter Kommentar-Referenzen (Javadoc/JSDoc/docstring)
 codebeacon scan . --list-only             # nur Frameworks erkennen
 codebeacon scan /workspace --deep-dive    # Pro-Projekt- + kombinierte Workspace-Ausgabe
 
@@ -374,9 +377,66 @@ codebeacon path <Quelle> <Ziel> [--dir .codebeacon]          # kürzester Abhän
 codebeacon hook install [path]            # Merge-Driver + Post-Commit-Inkrement-Rebuild installieren
 codebeacon merge-driver <base> <cur> <other>  # von git nach `hook install` aufgerufen; Union-Merge von beacon.json
 
+# AI-semantische Anreicherung (LLM macht der Agent, codebeacon nur die Buchführung)
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
+                                          # spielt vorhandenes Archiv wieder auf das frische
+                                          # beacon.json an und gibt Aufgaben nur für NEUE
+                                          # Kandidaten aus (god-node-Ordner + unaufgelöste Ziele)
+codebeacon semantic-apply   [--dir .codebeacon]
+                                          # mergt .codebeacon/semantic-results.jsonl als
+                                          # INFERRED references-Kanten in beacon.json,
+                                          # hängt an .codebeacon/semantic/original.jsonl an,
+                                          # räumt Pending-Dateien auf und regeneriert
+                                          # wiki/obsidian/Kontextkarte
+
 codebeacon serve [--dir .codebeacon]      # MCP-Server starten (stdio)
 codebeacon install                        # Claude-Code-Skill installieren
 ```
+
+---
+
+## AI-semantische Anreicherung (via `/codebeacon`-Skill)
+
+Tree-sitter-Parsing findet, was im AST steht. **AI-semantik** findet, was nur in den *Kommentaren* lebt — das `@see UserService` in einer Javadoc, das `:class:`OrderRepository`` in einer Python-Docstring, die vertraglichen Referenzen neben einem Route-Handler. codebeacon liefert dafür zwei Schichten:
+
+| Schicht | Flag | Kosten | Was sie erfasst |
+|---|---|---|---|
+| Strukturierte Kommentaranalyse | `--semantic` | kostenlos, lokal, kein LLM | Javadoc `@see` / `{@link}`, JSDoc `@see` / `@param`-Typen, Python `:class:` / `:func:` / `See Also` |
+| **AI-semantik** | automatisch im `/codebeacon`-Skill | nutzt das aktuelle Modell des Agenten — **kein extra API-Schlüssel** | nicht aufgelöste Klassen-/Typ-/Service-Referenzen, die Regex nicht findet (freier Prosa, indirekte Erwähnungen, reine Typ-Hinweise) |
+
+Das CLI selbst **ruft niemals einen LLM-Anbieter auf**. Die AI-semantik-Schicht gehört bewusst dem **laufenden Agenten** innerhalb des `/codebeacon` Claude-Code-Skills — so wird die Modellwahl des Nutzers (Opus / Sonnet / Haiku / etc.) respektiert, und codebeacon braucht weder `ANTHROPIC_API_KEY` noch irgendeine Cloud-Konfiguration.
+
+### Wie es läuft
+
+Wenn Sie `/codebeacon` in Claude Code aufrufen:
+
+1. `scan` / `sync` baut `beacon.json` aus dem AST (kein LLM-Aufruf).
+2. `codebeacon semantic-prepare` spielt das frühere Archiv wieder auf den frischen Graphen ein und schreibt dann `.codebeacon/semantic-tasks.jsonl` mit **nur neuen Kandidaten** — hochbewertete Dateien (Kanten zu nicht aufgelösten Zielen + god-node-Ordner), die noch nie verarbeitet wurden.
+3. Der Skill iteriert die Tasks-Datei. Für jede Zeile liest der Agent (mit dem Modell der aktuellen Sitzung) das `excerpt`-Feld und liefert inline gefolgerte References. Ergebnisse werden in `.codebeacon/semantic-results.jsonl` geschrieben.
+4. `codebeacon semantic-apply` mergt die Ergebnisse als `INFERRED references`-Kanten in `beacon.json`, **hängt sie an `.codebeacon/semantic/original.jsonl`** (das dauerhafte Archiv) an, räumt die Pending-Dateien auf und regeneriert Wiki + Obsidian + Kontextkarte.
+5. Beim nächsten Scan: `semantic-prepare` rehydriert das Archiv auf den frisch gebauten Graphen (damit historische Inferenzen nicht durch ein erneutes Scannen verschwinden) und gibt eine Tasks-Datei mit **nur den seit dem letzten Archiv neu entdeckten Kandidaten** aus. Bereits verarbeitete Dateien werden per `task_id` (SHA1 von `file_path|node_id`) übersprungen.
+
+Das ergibt inkrementelle, idempotente Anreicherung: der Agent analysiert dieselbe Datei nie zweimal, und das angesammelte AI-Signal überlebt jeden Rescan.
+
+### Direkte CLI-Nutzung
+
+Wenn Sie nicht über den Skill gehen (z. B. CI), können Sie dieselben zwei Befehle manuell ausführen und Ihr eigenes `semantic-results.jsonl` liefern:
+
+```bash
+codebeacon scan .
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+
+# jetzt selbst .codebeacon/semantic-results.jsonl schreiben; jede Zeile:
+#   {"task_id":"...", "source_node_id":"...", "edges":[
+#     {"target_name":"UserService","relation":"references","confidence_score":0.7}
+#   ]}
+
+codebeacon semantic-apply --dir .codebeacon
+```
+
+### Deaktivieren
+
+Übergeben Sie `--no-semantic` (oder `--wiki-only`, oder `--list-only`) beim Aufruf des Skills, um den AI-Schritt komplett zu überspringen. Die strukturierte Kommentaranalyse läuft weiterhin, wenn Sie `--semantic` an `scan` / `sync` übergeben.
 
 ---
 
@@ -408,11 +468,11 @@ codebeacon install                        # Claude-Code-Skill installieren
 
 ## Datenschutz und Sicherheit
 
-Alle Verarbeitung erfolgt lokal. Ihr Quellcode verlässt niemals Ihren Rechner. Keine Telemetrie, keine Netzwerkaufrufe im normalen Betrieb.
+Die gesamte AST-Verarbeitung läuft lokal. Wenn Sie codebeacon direkt aufrufen, verlässt Ihr Quellcode niemals Ihren Rechner. Keine Telemetrie, keine Netzwerkaufrufe im normalen Betrieb.
 
-- Das Flag `--semantic` (standardmäßig deaktiviert) aktiviert zwei Extraktionsmodi:
-  1. **Strukturierte Kommentaranalyse** (kein LLM erforderlich) — leitet Kreuzreferenzen aus Javadoc (`@see`, `{@link}`), Python-Docstrings (`:class:`, `:func:`) und JSDoc (`@see`, `@param`-Typen) ab
-  2. **LLM-Inferenz** (optional) — bei gesetztem `ANTHROPIC_API_KEY` werden Code-Ausschnitte an die Claude-API gesendet; nur bei expliziter Aktivierung verwenden
+- Die CLI selbst **ruft niemals einen LLM-Anbieter auf** — das codebeacon-Paket enthält weder API-Client, noch Schlüsselverwaltung, noch Modellnamen.
+- `--semantic` aktiviert **ausschließlich die strukturierte Kommentaranalyse** (Javadoc `@see` / `{@link}`, JSDoc `@see` / `@param`-Typen, Python `:class:` / `:func:` / `See Also`). Vollständig lokal.
+- **AI-semantik** (die tiefere LLM-Schicht) wird vom `/codebeacon` Claude-Code-Skill ausgelöst. Der Agent liest `semantic-tasks.jsonl`, führt die Analyse mit dem **Modell der laufenden Sitzung** aus und schreibt `semantic-results.jsonl`. Die Python-CLI bereitet nur das Aufgaben-Batch vor und mergt die Ergebnisse — sie weiß nicht einmal, welches Modell verwendet wurde. Übergeben Sie `--no-semantic` an den Skill, um den LLM-Schritt vollständig zu überspringen.
 
 ---
 

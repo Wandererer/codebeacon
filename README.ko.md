@@ -142,6 +142,12 @@ project-root/
         entities/<Name>.md
         components/<Name>.md
     obsidian/            ← Obsidian 볼트 (그래프 노드당 노트 1개)
+    semantic/
+      original.jsonl     ← 적용된 모든 AI-시맨틱 결과의 영구 아카이브
+                           (재스캔 시 스킵됨, 다시 task 로 발행되지 않음)
+    semantic-tasks.jsonl     ← pending AI-시맨틱 배치
+                               (`semantic-prepare` 와 `semantic-apply` 사이에만 존재)
+    semantic-results.jsonl   ← 에이전트가 작성한 결과 (동일 라이프사이클)
 ```
 
 ### 딥다이브 모드
@@ -201,10 +207,19 @@ codebeacon install
 `SKILL.md`를 `~/.claude/skills/codebeacon/`에 복사하고 `/codebeacon` 트리거를 `~/.claude/CLAUDE.md`에 등록합니다. Claude Code 세션을 재시작한 후 `/codebeacon`을 입력하면 현재 디렉토리를 스캔합니다.
 
 ```
-/codebeacon                  # 현재 디렉토리 스캔
-/codebeacon /path/to/project # 특정 경로 스캔
-/codebeacon sync             # codebeacon.yaml 기반 재스캔
+/codebeacon                       # 현재 디렉토리 스캔 + AI-시맨틱 자동
+/codebeacon /path/to/project      # 특정 경로 스캔  + AI-시맨틱 자동
+/codebeacon sync                  # codebeacon.yaml 기반 재스캔 + AI-시맨틱 자동
+/codebeacon <path> --no-semantic  # 스캔만, AI-시맨틱 단계 스킵
+/codebeacon <path> --wiki-only    # 기존 beacon.json 에서 wiki 만 재생성
+/codebeacon semantic-prepare      # 새 tasks 파일만 발행
+/codebeacon semantic-apply        # 에이전트가 이미 작성한 결과 파일 머지
+/codebeacon serve <path>          # .codebeacon/ 을 가리키는 MCP 서버 시작
+/codebeacon query <term>          # 그래프 검색
+/codebeacon path <src> <tgt>      # 최단 경로
 ```
+
+기본적으로 `scan` 과 `sync` 호출은 마지막에 **AI-시맨틱** 파이프라인을 자동 실행합니다 ([AI-시맨틱 보강](#ai-시맨틱-보강-codebeacon-스킬에서-자동) 섹션 참고). 에이전트는 Claude Code 세션이 **현재 실행 중인 모델**을 그대로 사용 — Opus, Sonnet, Haiku — codebeacon 은 절대 모델을 하드코딩하지 않고 API 키도 필요 없습니다.
 
 ### MCP 서버
 
@@ -277,7 +292,7 @@ codebeacon scan /workspace                # 워크스페이스 루트 (멀티 �
 codebeacon scan . --update                # 증분: mtime/size 빠른 경로 + 콘텐츠 해시 폴백
 codebeacon scan . --wiki-only             # 재추출 건너뛰고 기존 beacon.json에서 위키/obsidian/컨텍스트 맵 재생성
 codebeacon scan . --obsidian-dir <path>   # Obsidian 볼트를 커스텀 위치에 저장
-codebeacon scan . --semantic              # LLM 시맨틱 추출 활성화
+codebeacon scan . --semantic              # 구조화 주석 시맨틱 추출 활성화 (Javadoc/JSDoc/docstring 참조)
 codebeacon scan . --list-only             # 프레임워크 감지만, 추출 제외
 codebeacon scan /workspace --deep-dive    # 프로젝트별 + 통합 워크스페이스 출력
 
@@ -286,6 +301,17 @@ codebeacon init [path]                    # codebeacon.yaml 자동 생성
 codebeacon sync                           # codebeacon.yaml 기반 실행 (신규 워크스페이스 프로젝트 자동 추가)
 codebeacon sync --config <file>           # 특정 설정 파일 사용
 codebeacon sync --no-rediscover           # 신규 프로젝트 자동 추가 비활성화 (수동 큐레이션 모드)
+
+# AI-시맨틱 보강 (LLM 작업은 에이전트가, 부기는 codebeacon이 담당)
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
+                                          # 시맨틱 아카이브를 fresh beacon.json에 재적용 후,
+                                          # 아카이브에 없는 NEW 후보(god-node 폴더 + unresolved 타겟)
+                                          # 만 골라 .codebeacon/semantic-tasks.jsonl 작성
+codebeacon semantic-apply   [--dir .codebeacon]
+                                          # .codebeacon/semantic-results.jsonl 을 읽어
+                                          # INFERRED references 엣지로 beacon.json 에 머지,
+                                          # .codebeacon/semantic/original.jsonl 아카이브에 적재,
+                                          # pending 파일 정리, wiki/obsidian/컨텍스트 맵 재생성
 
 # 지식 그래프 쿼리
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # 라벨 부분 문자열로 노드 검색
@@ -299,6 +325,51 @@ codebeacon merge-driver <base> <cur> <other>  # `hook install` 후 git이 자동
 codebeacon serve [--dir .codebeacon]      # MCP 서버 시작 (stdio)
 codebeacon install                        # Claude Code 스킬 설치
 ```
+
+---
+
+## AI-시맨틱 보강 (`/codebeacon` 스킬에서 자동)
+
+tree-sitter 파싱은 AST에 있는 것을 찾습니다. **AI-시맨틱**은 **주석에만** 있는 것을 찾습니다 — Javadoc 의 `@see UserService`, Python 독스트링의 `:class:`OrderRepository``, 라우트 핸들러 옆에 문서화된 계약상 참조들. codebeacon 은 이를 두 계층으로 다룹니다:
+
+| 계층 | 플래그 | 비용 | 잡아내는 것 |
+|---|---|---|---|
+| 구조화 주석 파싱 | `--semantic` | 무료, 로컬, LLM 불필요 | Javadoc `@see` / `{@link}`, JSDoc `@see` / `@param` 타입, Python `:class:` / `:func:` / `See Also` |
+| **AI-시맨틱** | `/codebeacon` 스킬에서 자동 | 에이전트의 **현재 모델** 사용 — **별도 API 키 불필요** | 정규식이 못 잡는 클래스/타입/서비스 참조 (자연어 산문, 간접 언급, 타입 힌트 전용 등) |
+
+CLI 자체는 LLM API 호출을 **하지 않습니다**. AI-시맨틱 계층은 의도적으로 `/codebeacon` Claude Code 스킬 안에서 **실행 중인 에이전트가 소유**합니다 — 그래야 사용자가 고른 모델 (Opus / Sonnet / Haiku / 무엇이든) 이 그대로 사용되고, codebeacon 자체는 `ANTHROPIC_API_KEY` 도 클라우드 설정도 필요하지 않습니다.
+
+### 실행 흐름
+
+Claude Code 에서 `/codebeacon` 호출 시:
+
+1. `scan` / `sync` 가 AST 로부터 `beacon.json` 빌드 (LLM 호출 없음).
+2. `codebeacon semantic-prepare` 가 이전 아카이브를 새 그래프에 재적용한 뒤, **신규 후보만** 담긴 `.codebeacon/semantic-tasks.jsonl` 작성 — 점수가 높은 파일 (unresolved 타겟 엣지 + god-node 폴더) 중 한 번도 처리된 적 없는 것.
+3. 스킬이 tasks 파일을 순회합니다. 각 라인마다 에이전트(현재 세션의 모델)가 `excerpt` 필드를 읽고 추론된 references 를 인라인으로 반환. 결과는 `.codebeacon/semantic-results.jsonl` 에 기록.
+4. `codebeacon semantic-apply` 가 결과를 `INFERRED references` 엣지로 `beacon.json` 에 머지하고, **`.codebeacon/semantic/original.jsonl`** (영구 아카이브) 에 append, pending 파일 정리, wiki + obsidian + 컨텍스트 맵 재생성.
+5. 다음 스캔: `semantic-prepare` 가 아카이브를 새 그래프에 재적용 (재스캔으로 인해 과거 추론이 사라지지 않도록) 한 뒤, 마지막 아카이브 이후 **새로 발견된 후보만** tasks 파일에 담음. 이미 처리된 파일은 `task_id` (SHA1(`file_path|node_id`)) 로 스킵.
+
+→ 증분 + 멱등 보강. 같은 파일을 두 번 분석하지 않고, 누적된 AI 시그널은 매 재스캔을 살아남습니다.
+
+### 직접 CLI 사용
+
+스킬 없이 (예: CI) 같은 두 명령으로 직접 운영하고 `semantic-results.jsonl` 을 본인이 채울 수 있습니다:
+
+```bash
+codebeacon scan .
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+
+# 이제 .codebeacon/semantic-results.jsonl 을 직접 작성; 각 라인:
+#   {"task_id":"...", "source_node_id":"...", "edges":[
+#     {"target_name":"UserService","relation":"references","confidence_score":0.7}
+#   ]}
+
+codebeacon semantic-apply --dir .codebeacon
+```
+
+### 비활성화
+
+스킬 호출 시 `--no-semantic` (또는 `--wiki-only`, `--list-only`) 을 넘기면 AI 단계가 완전히 건너뜁니다. `--semantic` 플래그를 `scan` / `sync` 에 넘기면 구조화 주석 계층은 그대로 동작합니다.
 
 ---
 
@@ -375,7 +446,9 @@ wave:
   max_parallel: 5              # 병렬 스레드 수
 
 semantic:
-  enabled: false               # --semantic 플래그로 오버라이드
+  enabled: false               # 구조화 주석 추출; --semantic 플래그로 오버라이드.
+                               # AI-시맨틱은 이 키에 없습니다 — 위의 "AI-시맨틱 보강" 참고
+                               # (codebeacon 자체가 아니라 /codebeacon 스킬이 트리거).
 
 deep_dive: false               # true로 설정하면 프로젝트별 출력 생성
 ```
@@ -437,13 +510,13 @@ codebeacon은 두 도구의 대체재가 아니라 통합입니다 — 공유 �
 
 ## 프라이버시 & 보안
 
-모든 처리는 로컬에서 이루어집니다. 소스코드는 외부로 전송되지 않습니다.
+모든 AST 처리는 로컬에서 이루어집니다. codebeacon 을 직접 실행할 때 소스코드는 기기 밖으로 나가지 않습니다.
 
 - tree-sitter AST 파싱은 프로세스 내에서만 실행
 - 텔레메트리, 분석, 일반 동작 중 네트워크 호출 없음
-- `--semantic` 플래그(기본 비활성화)는 두 가지 추출 모드를 활성화합니다:
-  1. **구조화된 주석 파싱** (LLM 불필요) — Javadoc(`@see`, `{@link}`), Python 독스트링(`:class:`, `:func:`), JSDoc(`@see`, `@param` 타입)에서 크로스 레퍼런스 추론
-  2. **LLM 추론** (선택 사항) — `ANTHROPIC_API_KEY` 설정 시 Claude API로 코드 발췌문을 전송하여 심층 관계 추론; 명시적으로 활성화할 때만 사용됩니다
+- CLI 자체는 **LLM 제공자를 절대 호출하지 않습니다** — codebeacon 패키지에는 API 클라이언트도, 키 처리도, 모델 이름도 없습니다
+- `--semantic` 은 **구조화된 주석 파싱만** 활성화합니다 (Javadoc `@see` / `{@link}`, JSDoc `@see` / `@param` 타입, Python `:class:` / `:func:` / `See Also`). 100% 로컬.
+- **AI-시맨틱** (LLM 기반 심층 계층) 은 `/codebeacon` Claude Code 스킬이 트리거합니다. 에이전트가 `semantic-tasks.jsonl` 을 읽고 **현재 세션의 모델**로 분석을 수행한 뒤 `semantic-results.jsonl` 을 씁니다. Python CLI 는 태스크 배치 준비와 결과 머지만 담당하며, 어떤 모델이 쓰였는지조차 모릅니다. 스킬에 `--no-semantic` 을 넘기면 LLM 단계가 완전히 건너뜁니다.
 
 ---
 

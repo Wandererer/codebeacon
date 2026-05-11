@@ -1,15 +1,14 @@
 """Semantic extraction: structured comment/docstring parsing → Edge objects.
 
-Activated with `--semantic` flag. Does NOT require an LLM by default — parses
-structured documentation comments (Javadoc, Python docstrings, JSDoc) to infer
-additional "references" relationships between code entities.
-
-LLM-based deeper inference is available via extract_semantic_llm() when an
-ANTHROPIC_API_KEY is set.
+Activated with `--semantic` flag. Parses structured documentation comments
+(Javadoc, Python docstrings, JSDoc) to infer additional "references"
+relationships between code entities. No LLM is invoked here — LLM-driven
+inference is owned by the ``/codebeacon`` skill via
+:mod:`codebeacon.semantic_pipeline`, which lets the running agent choose
+its own model rather than hardcoding one inside this package.
 
 Public API:
     extract_semantic_refs(file_path, framework, source_node_id="") -> list[Edge]
-    extract_semantic_llm(file_path, framework, source_node_id="") -> list[Edge]
 """
 
 from __future__ import annotations
@@ -197,84 +196,3 @@ def extract_semantic_refs(
     elif ext in _JS_EXTS:
         return _extract_js_refs(content, source_node_id, file_path)
     return []
-
-
-def extract_semantic_llm(
-    file_path: str,
-    framework: str,
-    source_node_id: str = "",
-    model: str = "claude-haiku-4-5-20251001",
-) -> list[Edge]:
-    """LLM-based deeper semantic inference.
-
-    Requires ANTHROPIC_API_KEY environment variable.
-    Falls back to extract_semantic_refs() if the API key is not set.
-
-    Args:
-        file_path: source file path
-        framework: detected framework
-        source_node_id: node ID for the source of edges
-        model: Claude model to use (defaults to Haiku for cost efficiency)
-
-    Returns:
-        list of Edge objects with confidence="INFERRED", confidence_score=0.7
-    """
-    import os
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return extract_semantic_refs(file_path, framework, source_node_id)
-
-    path = Path(file_path)
-    if not path.exists():
-        return []
-
-    if not source_node_id:
-        source_node_id = str(path)
-
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-
-    # Truncate to avoid large token counts
-    MAX_CHARS = 4000
-    excerpt = content[:MAX_CHARS]
-
-    prompt = (
-        "Analyze this source file and list ONLY explicit class/type references that appear "
-        "in comments, docstrings, or type annotations — NOT in code logic.\n"
-        "Return a JSON array of strings (type/class names only). Example: [\"UserService\", \"OrderRepository\"]\n"
-        "If none found, return []\n\n"
-        f"File: {path.name}\nFramework: {framework}\n\n```\n{excerpt}\n```"
-    )
-
-    try:
-        import anthropic
-        client = anthropic.Anthropic()
-        message = client.messages.create(
-            model=model,
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
-        import json
-        names = json.loads(raw)
-        if not isinstance(names, list):
-            return []
-        edges = []
-        seen: set[str] = set()
-        for name in names:
-            if isinstance(name, str) and _is_type_name(name) and name not in seen:
-                seen.add(name)
-                edges.append(Edge(
-                    source=source_node_id,
-                    target=name,
-                    relation="references",
-                    confidence="INFERRED",
-                    confidence_score=0.7,
-                    source_file=file_path,
-                ))
-        return edges
-    except Exception:
-        # Fall back to regex parsing
-        return extract_semantic_refs(file_path, framework, source_node_id)

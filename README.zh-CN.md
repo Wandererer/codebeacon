@@ -265,7 +265,7 @@ codebeacon scan /workspace                # 工作区根目录（多项目）
 codebeacon scan . --update                # 增量：仅重新提取变更文件
 codebeacon scan . --wiki-only             # 跳过重新提取，从现有 beacon.json 重新生成 Wiki/obsidian/上下文映射
 codebeacon scan . --obsidian-dir <path>   # 将 Obsidian Vault 写入自定义位置
-codebeacon scan . --semantic              # 启用 LLM 语义提取
+codebeacon scan . --semantic              # 启用结构化注释引用提取 (Javadoc/JSDoc/docstring)
 codebeacon scan . --list-only             # 仅检测框架，不提取
 codebeacon scan /workspace --deep-dive    # 各项目独立输出 + 工作区合并输出
 
@@ -283,10 +283,68 @@ codebeacon path <source> <target> [--dir .codebeacon]     # 最短依赖路径
 codebeacon hook install [path]            # 安装 merge driver + post-commit 增量重建 hook
 codebeacon merge-driver <base> <cur> <other>  # `hook install` 后由 git 自动调用；对 beacon.json 做 union 合并
 
+# AI 语义增强 (LLM 由代理执行，codebeacon 仅做记账)
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
+                                          # 把之前的归档重新应用到 fresh beacon.json，
+                                          # 然后只为档案里没有的 NEW 候选 (god-node 文件夹
+                                          # + unresolved 目标) 生成 .codebeacon/
+                                          # semantic-tasks.jsonl
+codebeacon semantic-apply   [--dir .codebeacon]
+                                          # 读取 .codebeacon/semantic-results.jsonl，
+                                          # 作为 INFERRED references 边并入 beacon.json，
+                                          # 追加到 .codebeacon/semantic/original.jsonl 档案，
+                                          # 清理 pending 文件，重新生成
+                                          # wiki/obsidian/上下文映射
+
 # 集成
 codebeacon serve [--dir .codebeacon]      # 启动 MCP 服务器（stdio）
 codebeacon install                        # 安装 Claude Code 技能
 ```
+
+---
+
+## AI 语义增强（通过 `/codebeacon` 技能）
+
+tree-sitter 解析找到 AST 里**有**的东西。**AI 语义**找到**只在注释里**的东西 — Javadoc 中的 `@see UserService`、Python docstring 中的 `:class:`OrderRepository``、写在路由处理器旁边的契约引用。codebeacon 为此提供两层：
+
+| 层 | 标志 | 成本 | 捕获内容 |
+|---|---|---|---|
+| 结构化注释解析 | `--semantic` | 免费、本地、无需 LLM | Javadoc `@see` / `{@link}`、JSDoc `@see` / `@param` 类型、Python `:class:` / `:func:` / `See Also` |
+| **AI 语义** | `/codebeacon` 技能中自动 | 使用代理的**当前模型** — **无需额外 API 密钥** | 正则无法捕获的类/类型/服务引用（自由散文、间接提及、纯类型提示等） |
+
+CLI 自身**绝不**调用任何 LLM API。AI 语义层有意由 `/codebeacon` Claude Code 技能内**运行中的代理拥有** — 这样用户选择的模型（Opus / Sonnet / Haiku 等）会被直接使用，codebeacon 自身既不需要 `ANTHROPIC_API_KEY` 也不需要任何云端配置。
+
+### 执行流程
+
+在 Claude Code 中调用 `/codebeacon` 时：
+
+1. `scan` / `sync` 从 AST 构建 `beacon.json`（不调用 LLM）。
+2. `codebeacon semantic-prepare` 把已有归档重新应用到新图上，然后写出**只包含新候选**的 `.codebeacon/semantic-tasks.jsonl` — 评分高（unresolved 目标边 + god-node 文件夹）且从未被处理过的文件。
+3. 技能遍历 tasks 文件。对每一行，代理（使用当前会话的模型）读取 `excerpt` 字段并内联返回推断的 references。结果写入 `.codebeacon/semantic-results.jsonl`。
+4. `codebeacon semantic-apply` 将结果作为 `INFERRED references` 边并入 `beacon.json`，**追加到 `.codebeacon/semantic/original.jsonl`**（持久归档），清理待处理文件，并重新生成 wiki + obsidian + 上下文映射。
+5. 下次扫描：`semantic-prepare` 把归档重新应用到新构建的图上（以免重扫丢失历史推断），并只把**自上次归档以来新发现的候选**写入 tasks 文件。已处理的文件通过 `task_id`（`file_path|node_id` 的 SHA1）跳过。
+
+→ 增量、幂等增强。代理不会重复分析同一文件，累积的 AI 信号在每次重扫后依然保留。
+
+### 直接 CLI 使用
+
+不走技能（如 CI 场景）也可以用同样的两条命令手动运行，自己生成 `semantic-results.jsonl`：
+
+```bash
+codebeacon scan .
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+
+# 自己写 .codebeacon/semantic-results.jsonl；每行：
+#   {"task_id":"...", "source_node_id":"...", "edges":[
+#     {"target_name":"UserService","relation":"references","confidence_score":0.7}
+#   ]}
+
+codebeacon semantic-apply --dir .codebeacon
+```
+
+### 关闭
+
+调用技能时传 `--no-semantic`（或 `--wiki-only`、`--list-only`）会完全跳过 AI 步骤。如果给 `scan` / `sync` 传 `--semantic`，结构化注释层仍然会运行。
 
 ---
 
@@ -363,7 +421,9 @@ wave:
   max_parallel: 5              # 并行线程数
 
 semantic:
-  enabled: false               # 通过 --semantic 标志覆盖
+  enabled: false               # 仅结构化注释提取; --semantic 标志覆盖。
+                               # AI 语义不在这里 — 它由 /codebeacon 技能
+                               # (= 正在运行的代理) 触发。
 
 deep_dive: false               # 设为 true 可生成各项目独立输出
 ```
@@ -425,13 +485,13 @@ codebeacon 不是两个工具的替代品，而是两者的统合——在共享
 
 ## 隐私与安全
 
-所有处理均在本地完成。源代码不会离开你的设备。
+所有 AST 处理均在本地完成。直接运行 codebeacon 时，源代码不会离开你的设备。
 
 - tree-sitter AST 解析完全在进程内运行
 - 正常操作期间无遥测、无分析、无网络调用
-- `--semantic` 标志（默认禁用）激活两种提取模式：
-  1. **结构化注释解析**（无需 LLM） — 从 Javadoc（`@see`、`{@link}`）、Python 文档字符串（`:class:`、`:func:`）和 JSDoc（`@see`、`@param` 类型）中推断交叉引用
-  2. **LLM 推断**（可选） — 设置 `ANTHROPIC_API_KEY` 后，向 Claude API 发送代码片段进行深度关系推断；仅在明确启用时使用
+- CLI 本身 **绝不主动调用任何 LLM 提供方** — codebeacon 包内没有 API 客户端、没有密钥处理、没有模型名
+- `--semantic` 只激活 **结构化注释解析**（Javadoc `@see` / `{@link}`、JSDoc `@see` / `@param` 类型、Python `:class:` / `:func:` / `See Also`）。完全本地。
+- **AI 语义**（更深的 LLM 推断层）由 `/codebeacon` Claude Code 技能触发。代理读取 `semantic-tasks.jsonl`，使用 **当前会话所选的模型** 进行分析，然后写出 `semantic-results.jsonl`。Python CLI 仅负责准备任务批次和合并结果，甚至不知道用了哪个模型。调用技能时传 `--no-semantic` 即可完全跳过 LLM 步骤。
 
 ---
 

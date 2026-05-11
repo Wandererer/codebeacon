@@ -758,6 +758,39 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_semantic_prepare(args: argparse.Namespace) -> int:
+    from codebeacon.semantic_pipeline import prepare
+
+    beacon_dir = Path(args.dir).resolve()
+    try:
+        result = prepare(beacon_dir, max_tasks=args.max_tasks)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"semantic-prepare: {result.new_tasks} new task(s) → {result.tasks_path}\n"
+        f"  re-applied {result.reapplied_edges} archived edge(s); "
+        f"archive size: {result.archive_size}"
+    )
+    return 0
+
+
+def _cmd_semantic_apply(args: argparse.Namespace) -> int:
+    from codebeacon.semantic_pipeline import apply
+
+    beacon_dir = Path(args.dir).resolve()
+    try:
+        result = apply(beacon_dir)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"semantic-apply: applied {result.applied} edge(s), "
+        f"skipped {result.skipped}; archive size: {result.archive_size}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codebeacon",
@@ -840,6 +873,32 @@ def build_parser() -> argparse.ArgumentParser:
     # install (Claude Code skill)
     install_p = sub.add_parser("install", help="Install Claude Code skill")
     install_p.set_defaults(func=_cmd_install)
+
+    # semantic-prepare
+    sem_prep = sub.add_parser(
+        "semantic-prepare",
+        help="Pick AI-semantic candidate files and write .codebeacon/semantic-tasks.jsonl",
+    )
+    sem_prep.add_argument(
+        "--dir", metavar="DIR", default=".codebeacon",
+        help="Path to .codebeacon output directory (default: .codebeacon)",
+    )
+    sem_prep.add_argument(
+        "--max-tasks", type=int, default=50,
+        help="Max tasks to emit (default: 50)",
+    )
+    sem_prep.set_defaults(func=_cmd_semantic_prepare)
+
+    # semantic-apply
+    sem_apply = sub.add_parser(
+        "semantic-apply",
+        help="Merge .codebeacon/semantic-results.jsonl edges into beacon.json + regenerate wiki",
+    )
+    sem_apply.add_argument(
+        "--dir", metavar="DIR", default=".codebeacon",
+        help="Path to .codebeacon output directory (default: .codebeacon)",
+    )
+    sem_apply.set_defaults(func=_cmd_semantic_apply)
 
     # merge-driver (git plumbing — invoked by git, not directly by humans)
     md_p = sub.add_parser(
