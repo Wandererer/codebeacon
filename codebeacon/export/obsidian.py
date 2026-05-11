@@ -33,6 +33,8 @@ from typing import Any
 
 import networkx as nx
 
+from codebeacon.common.safety import escape_frontmatter_value, sanitize_label
+
 
 # ── Regexes ────────────────────────────────────────────────────────────────────
 
@@ -184,19 +186,26 @@ def _build_note(
     """Render a single Obsidian note from node data."""
 
     # ── Frontmatter ──
+    # Every value below is run through escape_frontmatter_value so a tree-sitter
+    # artefact containing U+2028/U+2029, tabs, or C0 controls cannot break YAML
+    # parsing or break out of the scalar.
+    safe_source  = escape_frontmatter_value(source_file)
+    safe_project = escape_frontmatter_value(project)
+    safe_ntype   = escape_frontmatter_value(ntype) or "unknown"
+    safe_label   = sanitize_label(label) or "(unnamed)"
     lines = [
         "---",
-        f'source_file: "{source_file}"',
-        f'type: "code"',
-        f'community: "{project}"',
+        f"source_file: '{safe_source}'",
+        "type: 'code'",
+        f"community: '{safe_project}'",
         "tags:",
         "  - codebeacon/code",
-        f"  - codebeacon/{ntype}",
+        f"  - codebeacon/{safe_ntype}",
         "  - codebeacon/EXTRACTED",
-        f"  - community/{project}",
+        f"  - community/{safe_project}",
         "---",
         "",
-        f"# {label}",
+        f"# {safe_label}",
         "",
     ]
 
@@ -461,11 +470,12 @@ def _step4_fix_community_tags(vault: Path) -> None:
 
         new_c = content
         if folder:
-            new_c = _COMM_FRONT.sub(f'community: "{folder}"', new_c)
-            new_c = _COMM_YAML.sub(f"  - community/{folder}\n", new_c)
-            new_c = _COMM_BODY.sub(f"#community/{folder}", new_c)
+            safe_folder = escape_frontmatter_value(folder)
+            new_c = _COMM_FRONT.sub(f"community: '{safe_folder}'", new_c)
+            new_c = _COMM_YAML.sub(f"  - community/{safe_folder}\n", new_c)
+            new_c = _COMM_BODY.sub(f"#community/{safe_folder}", new_c)
         else:
-            new_c = _COMM_FRONT.sub('community: ""', new_c)
+            new_c = _COMM_FRONT.sub("community: ''", new_c)
             new_c = _COMM_YAML.sub("", new_c)
             new_c = _COMM_BODY.sub("", new_c)
 
@@ -635,16 +645,18 @@ def _step9_hub_notes(vault: Path) -> None:
         notes = sorted(svc_dir.glob("*.md"), key=lambda f: f.name)
 
         # Hub note content
+        safe_svc = escape_frontmatter_value(svc)
+        display_svc = sanitize_label(svc) or "(unnamed)"
         lines = [
             "---",
-            f'type: "folder-index"',
-            f'community: "{svc}"',
+            "type: 'folder-index'",
+            f"community: '{safe_svc}'",
             "tags:",
             "  - codebeacon/folder-index",
-            f"  - community/{svc}",
+            f"  - community/{safe_svc}",
             "---",
             "",
-            f"# {svc}",
+            f"# {display_svc}",
             "",
             f"Service folder — {len(notes)} node(s)",
             "",

@@ -69,6 +69,8 @@ class GraphReport:
     cohesion_scores: dict[int, float] = field(default_factory=dict)
     isolated_nodes: int = 0
     density: float = 0.0
+    built_at_commit: str = ""        # git HEAD at the time beacon.json was written
+    current_commit: str = ""         # git HEAD at the time the report is rendered
 
 
 # ── Analysis functions ────────────────────────────────────────────────────────
@@ -336,8 +338,19 @@ def report_to_markdown(report: GraphReport) -> str:
         f"- Communities: {report.community_count}",
         f"- Graph density: {report.density:.4f}",
         f"- Isolated nodes: {report.isolated_nodes}",
-        "",
     ]
+
+    if report.built_at_commit:
+        short = report.built_at_commit[:8]
+        if report.current_commit and report.current_commit != report.built_at_commit:
+            current_short = report.current_commit[:8]
+            lines.append(
+                f"- Built at: `{short}` ⚠ stale — HEAD is now `{current_short}`; "
+                f"re-run `codebeacon scan . --update` to refresh."
+            )
+        else:
+            lines.append(f"- Built at: `{short}`")
+    lines.append("")
 
     if report.god_nodes:
         lines += ["## God Nodes (High-Coupling Directories)", ""]

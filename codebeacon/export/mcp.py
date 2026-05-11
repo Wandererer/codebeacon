@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from codebeacon import __version__
+from codebeacon.common.safety import sanitize_label
 
 
 # ── Graph loader ──────────────────────────────────────────────────────────────
@@ -67,15 +68,20 @@ class BeaconIndex:
         return results
 
     def node_summary(self, node_id: str) -> dict[str, Any]:
-        """Return a compact dict for a single node."""
+        """Return a compact dict for a single node.
+
+        All free-text fields are run through :func:`sanitize_label` so that
+        control characters from source files cannot bleed into MCP text output
+        consumed by an LLM agent.
+        """
         data = self.G.nodes[node_id]
         return {
-            "id": node_id,
-            "label": data.get("label", node_id),
-            "type": data.get("type", ""),
-            "project": data.get("project", ""),
-            "source_file": data.get("source_file", ""),
-            "framework": data.get("framework", ""),
+            "id": sanitize_label(node_id),
+            "label": sanitize_label(data.get("label", node_id)),
+            "type": sanitize_label(data.get("type", "")),
+            "project": sanitize_label(data.get("project", "")),
+            "source_file": sanitize_label(data.get("source_file", "")),
+            "framework": sanitize_label(data.get("framework", "")),
         }
 
 
@@ -127,18 +133,18 @@ def tool_beacon_query(idx: BeaconIndex, args: dict) -> str:
     if not node_ids:
         return f"No nodes matching '{term}'."
 
-    lines = [f"## Nodes matching '{term}' ({len(node_ids)} found)\n"]
+    lines = [f"## Nodes matching '{sanitize_label(term)}' ({len(node_ids)} found)\n"]
     for nid in node_ids:
         s = idx.node_summary(nid)
         lines.append(f"- **{s['label']}** ({s['type']}) — {s['project']} — `{s['source_file']}`")
 
         # Immediate edges
         out_edges = [
-            f"  → {idx.G.nodes[t].get('label', t)} [{d.get('relation','')}]"
+            f"  → {sanitize_label(idx.G.nodes[t].get('label', t))} [{sanitize_label(d.get('relation',''))}]"
             for _, t, d in idx.G.out_edges(nid, data=True)
         ][:5]
         in_edges = [
-            f"  ← {idx.G.nodes[s].get('label', s)} [{d.get('relation','')}]"
+            f"  ← {sanitize_label(idx.G.nodes[s].get('label', s))} [{sanitize_label(d.get('relation',''))}]"
             for s, _, d in idx.G.in_edges(nid, data=True)
         ][:5]
         lines.extend(out_edges + in_edges)

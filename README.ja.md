@@ -44,9 +44,15 @@ AI コーディングセッションを新しく開くたびに、アシスタ�
 - **tree-sitter ベース** — 正規表現ではなく構造的 AST パース；言語グラマーをデフォルトで同梱
 - **2 パス DI 解決** — Pass 1 でローカル AST ノードを抽出、Pass 2 でグローバルシンボルテーブルを構築して Interface → Implementation のマッピングを解決
 - **Wave マージアーキテクチャ** — ファイルを並列チャンクで処理して結果をグローバルにマージ；大規模モノレポでもメモリ問題なし
-- **多様な出力形式** — JSON ナレッジグラフ、Markdown ウィキ、Obsidian Vault、AI コンテキストマップ、MCP サーバー
+- **多様な出力形式** — JSON ナレッジグラフ、Markdown ウィキ、Obsidian Vault、AI コンテキストマップ、MCP サーバー、インタラクティブ HTML
+- **ビジュアル探索** — `beacon.html`(D3 折りたたみツリー) と `callflow.html`(コミュニティ別 Mermaid アーキテクチャ図) を全スキャンで自動再生成
 - **コミュニティ検出** — Leiden/Louvain クラスタリングで実際のアーキテクチャ境界を発見
-- **インクリメンタルキャッシュ** — SHA-256 ベース；前回スキャン以降に変更されたファイルのみ再抽出
+- **インクリメンタルキャッシュ** — SHA-256 + mtime/size 高速パス；Obsidian/iCloud/Nextcloud のような mtime のみの更新では再抽出をトリガしない
+- **信頼度プロモーション** — 明示的な import がバインディングを証明する場合、ファイル間 `calls` エッジを INFERRED から EXTRACTED へ自動昇格
+- **安全な書き込み** — beacon.json には shrink guard(部分実行が完全なグラフを上書きできない)と `built_at_commit` スタンプがあり、REPORT.md は現在の HEAD に対して stale 状態を表示
+- **マルチ開発者対応** — `codebeacon hook install` で `beacon.json` の git マージドライバと post-commit インクリメンタル再ビルドフックを登録；同じブランチで複数の開発者が同時にスキャンしてもマージ競合が発生しない
+- **ハードニング済み出力** — YAML フロントマターと MCP ラベルは U+2028/U+2029、C0 制御文字、bidi マークをすべて除去；ソースコード中の悪意ある識別子が Obsidian YAML パーサを破壊したり、LLM エージェントのコンテキストに制御シーケンスを注入することを防止
+- **gitignore 互換 `.codebeaconignore`** — last-match-wins、`!` 否定、ディレクトリパターン(`build/`)、アンカーパターン(`/secrets.txt`)、末尾空白処理
 - **ゼロ設定** — フレームワークと言語を自動検出；繰り返し実行のために `codebeacon.yaml` を自動生成
 - **ディープダイブモード** — `--deep-dive` で各サブプロジェクトに専用の `.codebeacon/` + `CLAUDE.md` を生成；**どのサブプロジェクトからでも**更新コマンドを実行するだけでワークスペース全体が自動同期
 
@@ -118,8 +124,10 @@ project-root/
   .cursorrules           ← Cursor IDE コンテキスト (同じマージ方式)
   AGENTS.md              ← OpenAI Agents / Codex コンテキスト (同じマージ方式)
   .codebeacon/
-    beacon.json          ← 完全なナレッジグラフ (ノード-リンク JSON、クエリ可能)
-    REPORT.md            ← ゴッドノード、驚くべき接続、ハブファイル
+    beacon.json          ← 完全なナレッジグラフ；`meta.built_at_commit` 埋め込み
+    beacon.html          ← D3 折りたたみツリービューア (ブラウザで開く)
+    callflow.html        ← コミュニティ別 Mermaid コールフロー図
+    REPORT.md            ← ゴッドノード、驚くべき接続、ハブファイル、フレッシュネス
     wiki/
       index.md           ← グローバルインデックス (~200 トークン)
       overview.md        ← プラットフォーム統計 + クロスプロジェクト接続
@@ -266,14 +274,62 @@ codebeacon init [path]                    # codebeacon.yaml を自動生成
 codebeacon sync                           # codebeacon.yaml ベースで実行
 codebeacon sync --config <file>           # 特定の設定ファイルを使用
 
-# ナレッジグラフのクエリ (近日公開)
-codebeacon query <term>                   # ノードとエッジを検索
-codebeacon path <source> <target>         # 2 ノード間の最短パス
+# ナレッジグラフのクエリ
+codebeacon query <term> [--dir .codebeacon] [--limit N]   # ラベル部分文字列でノード検索
+codebeacon path <source> <target> [--dir .codebeacon]     # 最短依存関係パス
+
+# マルチ開発者サポート (git plumbing)
+codebeacon hook install [path]            # merge driver + post-commit インクリメンタル再ビルドのインストール
+codebeacon merge-driver <base> <cur> <other>  # `hook install` 後 git が呼び出す；beacon.json を union マージ
 
 # インテグレーション
 codebeacon serve [--dir .codebeacon]      # MCP サーバー起動 (stdio)
 codebeacon install                        # Claude Code スキルをインストール
 ```
+
+---
+
+## ビジュアル探索
+
+毎回のスキャンで `beacon.json` の隣に self-contained な HTML ファイルが 2 つ書き出されます：
+
+```
+.codebeacon/beacon.html      # D3 v7 折りたたみツリー — どのブラウザでも開ける
+.codebeacon/callflow.html    # Mermaid アーキテクチャ図、コミュニティごとに 1 つ
+```
+
+ビルド不要、静的サーバー不要、コピペ不要。ファイルを開いて、プロジェクト → タイプ → ノードの順にクリックして展開；ホバーするとソースパスと次数が表示。`callflow.html` はグラフをコミュニティでグループ化し、それぞれを Mermaid フローチャートで描画。コミュニティ外への出力エッジは折りたたみテーブルに一覧表示。
+
+---
+
+## マルチ開発者ワークフロー
+
+同じブランチで 2 人の開発者が `codebeacon scan` を実行すると、わずかに異なる `beacon.json` が出力されます — 歴史的にマージ競合のホットスポット。`codebeacon hook install` がこれを解決します：
+
+```bash
+codebeacon hook install            # リポジトリのルートで
+```
+
+以下を登録します：
+
+- 2 つの `beacon.json` を 1 つに union マージする **git マージドライバ** (ノードは ID で、エッジは `(source, target, relation)` で重複排除)
+- `*beacon.json` をドライバに向ける `.gitattributes` エントリ
+- グラフがコミットから取り残されないよう、バックグラウンドで `codebeacon scan . --update` を走らせる **post-commit フック**。出力は `~/.cache/codebeacon-rebuild.log` へ
+
+マージドライバは常に 0 で終了 — グラフ再生成は実際のマージを絶対にブロックしません。
+
+---
+
+## 安全性の保証
+
+毎回の成功したスキャンでライターが強制する不変条件：
+
+| ガード | 防げるもの |
+|---|---|
+| **Shrink guard** | 部分抽出失敗や中断された実行が、より大きく完全な `beacon.json` を上書きできない。API から `force=True` でバイパス可能 |
+| **アトミック書き込み** | `beacon.json` は `os.replace` 経由で書かれるため、ファイルは完全か未変更のどちらか — 半書きグラフは存在しない |
+| **`built_at_commit` スタンプ** | `beacon.json` は `meta.built_at_commit` (完全 SHA) を埋め込み、`REPORT.md` は short SHA を表示。HEAD がそれより進んでいる場合、1 行の対処ヒント付きで `⚠ stale` を表示 |
+| **Frontmatter / ラベルのハードニング** | YAML フロントマター値は single-quoted で U+2028、U+2029、タブ、C0 制御文字をエスケープ；MCP ツール出力はすべてのラベルを同じ sanitizer に通す。ソースコード中の悪意ある識別子は Obsidian の YAML パーサを壊したり、LLM エージェントのコンテキストに制御シーケンスを注入できない |
 
 ---
 
@@ -313,15 +369,28 @@ deep_dive: false               # true にすると各プロジェクト別出力
 
 ### .codebeaconignore
 
-プロジェクトルートに `.codebeaconignore` ファイルを置くと、スキャンから特定のディレクトリやファイルを除外できます。`.gitignore` と同じ文法 — 1 行に 1 パターン、`#` はコメント。
+プロジェクトルートに `.codebeaconignore` ファイルを置くと、スキャンから特定のディレクトリやファイルを除外できます。`.gitignore` のセマンティクスと一致 — last-match-wins、`!` 否定、アンカーパターン(`/foo`)、ディレクトリ専用パターン(`build/`)、コメント：
 
 ```
 # .codebeaconignore
-generated/
+
+# ディレクトリ
 build/
-*.generated.ts
+generated/
 fixtures/
+
+# ルートにのみアンカー
+/scripts/local-only.ts
+
+# グロブパターン
+*.gen.ts
+**/snapshots/**
+
+# build/ が無視されていても特定ファイルは再包含
+!build/manifest.ts
 ```
+
+`!pattern` は以前に無視されたパスを再包含；後の規則が前の規則を上書きします。ウォーカーはルールセットに名前が一致するディレクトリを刈り取りますが、`!` 否定規則があるときは刈り取りを遅延し、各ファイルごとに検査します。
 
 ---
 
