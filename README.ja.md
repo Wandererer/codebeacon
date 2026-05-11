@@ -56,6 +56,7 @@ AI コーディングセッションを新しく開くたびに、アシスタ�
 - **ゼロ設定** — フレームワークと言語を自動検出；繰り返し実行のために `codebeacon.yaml` を自動生成
 - **ディープダイブモード** — `--deep-dive` で各サブプロジェクトに専用の `.codebeacon/` + `CLAUDE.md` を生成；**どのサブプロジェクトからでも**更新コマンドを実行するだけでワークスペース全体が自動同期
 - **ワークスペース自動再検出** — `scan`/`sync` 実行のたびにワークスペースを再スキャンし、`codebeacon.yaml` に未登録の新規プロジェクトを自動追加してから抽出を開始するため、新しく追加されたサブプロジェクトが見落とされることがない；yaml を手動で管理している場合は `--no-rediscover` でオプトアウト可能
+- **Graphify 風のセマンティック強化** — AST 抽出後、スキルがチャンクごとに 1 つのサブエージェントを並列でディスパッチし、`{nodes, edges, hyperedges}` のフル知識グラフ断片を抽出。関係 8 種（`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`）+ 信頼度 3 段階（EXTRACTED/INFERRED/AMBIGUOUS）をサポート。Claude Code ではサブエージェントがホストモデルより 1 段階下（Opus→Sonnet、Sonnet→Haiku）に自動ダウングレードされ、コーパスサイズに比例したコストを維持。コードノードは AST が担当し、LLM は `concept`/`document`/`paper` ノードのみ寄与可能。既存の 0.3.x アーカイブは新スキーマで透過的にリプレイされる
 
 ---
 
@@ -285,17 +286,19 @@ codebeacon hook install [path]            # merge driver + post-commit インク
 codebeacon merge-driver <base> <cur> <other>  # `hook install` 後 git が呼び出す；beacon.json を union マージ
 
 # AI-セマンティック補強 (LLM はエージェント、整合性管理は codebeacon)
-codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
-                                          # 過去のアーカイブを fresh beacon.json に再適用後、
-                                          # 未処理の NEW 候補 (god-node フォルダ + unresolved
-                                          # ターゲット) のみを .codebeacon/semantic-tasks.jsonl
-                                          # に書き出す
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
+                                          # .codebeacon/semantic/original/*.jsonl アーカイブを fresh
+                                          # beacon.json に再適用 + 失われたノードを指す stale エントリ
+                                          # を prune し、新規候補のみを .codebeacon/semantic/pending/
+                                          # chunk_NNN.jsonl に書き出す (chunk あたり --chunk-size 件、
+                                          # 既定 10)。task_id にコンテンツハッシュが入っているので、
+                                          # ファイル内容が変わると自動で再発行される。
 codebeacon semantic-apply   [--dir .codebeacon]
-                                          # .codebeacon/semantic-results.jsonl を INFERRED
-                                          # references エッジとして beacon.json に統合し、
-                                          # .codebeacon/semantic/original.jsonl アーカイブに
-                                          # 追記、pending ファイルを掃除し、
-                                          # wiki/obsidian/コンテキストマップを再生成
+                                          # エージェントが書いた .codebeacon/semantic/results/
+                                          # chunk_NNN.jsonl をそれぞれ INFERRED references エッジ
+                                          # として beacon.json にマージし、pending/chunk_NNN.jsonl
+                                          # を original/chunk_NNN.jsonl に移動 (永続アーカイブ)。
+                                          # results は削除、wiki/obsidian/コンテキストマップを再生成。
 
 # インテグレーション
 codebeacon serve [--dir .codebeacon]      # MCP サーバー起動 (stdio)
@@ -322,22 +325,23 @@ CLI 自体は LLM API 呼び出しを **行いません**。AI-セマンティ�
 Claude Code で `/codebeacon` を呼び出すと：
 
 1. `scan` / `sync` が AST から `beacon.json` を構築（LLM 呼び出しなし）。
-2. `codebeacon semantic-prepare` が過去のアーカイブを新しいグラフに再適用後、**新しい候補のみ**を含む `.codebeacon/semantic-tasks.jsonl` を書き出します — スコアが高い（unresolved ターゲットエッジ + god-node フォルダ）かつ一度も処理されたことのないファイル。
-3. スキルが tasks ファイルを順次処理。各行についてエージェント（現在セッションのモデル）が `excerpt` フィールドを読み、推論された references をインラインで返します。結果は `.codebeacon/semantic-results.jsonl` に書き込まれます。
-4. `codebeacon semantic-apply` が結果を `INFERRED references` エッジとして `beacon.json` にマージし、**`.codebeacon/semantic/original.jsonl`**（永続アーカイブ）に追記、pending ファイルを掃除、wiki + obsidian + コンテキストマップを再生成します。
-5. 次回スキャン時：`semantic-prepare` がアーカイブを新グラフに再適用（再スキャンで過去の推論が失われないように）し、最後のアーカイブ以降の**新しく発見された候補のみ**を tasks ファイルに含めます。処理済みファイルは `task_id`（SHA1 of `file_path|node_id`）でスキップ。
+2. `codebeacon semantic-prepare` が `.codebeacon/semantic/original/*.jsonl` アーカイブを新グラフに再適用し、グラフから消えたノードを指す stale エントリを **prune**。続いて新規 task を `.codebeacon/semantic/pending/chunk_NNN.jsonl` に書き出す（`--chunk-size` 単位、既定 10）。chunk 番号は永続アーカイブの続きから始まるため衝突しません。
+3. スキルは pending chunk を**1 つずつ**処理。各 `pending/chunk_NNN.jsonl` について、エージェント（現在セッションのモデル）が task の `excerpt` を読み、同名の `semantic/results/chunk_NNN.jsonl` を書きます。
+4. `codebeacon semantic-apply` が結果を `INFERRED references` エッジとして `beacon.json` にマージし、完了済み `pending/chunk_NNN.jsonl` を **`semantic/original/chunk_NNN.jsonl`** に**移動**（適用済みエッジを一緒に記録）。results は削除、wiki + obsidian + コンテキストマップを再生成。
+5. 次回スキャン時：`semantic-prepare` が `original/` の全 chunk のエッジを新グラフに再適用（過去の推論を保全）し、既に処理済みの `task_id` はスキップ。`task_id` = `SHA1(file_path | node_id | excerpt_hash[:8])` — ファイルのセマンティック内容が変われば自動的に新しい id になり再解析されます。
 
-→ 増分かつ冪等の補強。同じファイルを二度分析せず、蓄積された AI シグナルは毎回の再スキャンを生き延びます。
+→ 増分かつ冪等の補強。同じ (ファイル, 内容) を二度分析せず、蓄積された AI シグナルは毎回の再スキャンを生き延び、chunk 分割でエージェントの作業セットも小さく保てます。
 
 ### 直接 CLI 使用
 
-スキルを介さず（例：CI）に同じ 2 コマンドで手動運用し、`semantic-results.jsonl` を自分で書くこともできます：
+スキルを介さず（例：CI）に同じ 2 コマンドで手動運用し、`results/chunk_NNN.jsonl` を自分で書くこともできます：
 
 ```bash
 codebeacon scan .
-codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50 --chunk-size 10
 
-# 次に .codebeacon/semantic-results.jsonl を自分で書く；各行：
+# .codebeacon/semantic/pending/chunk_001.jsonl ... が生成される。
+# 各 pending chunk について同名の results/chunk_NNN.jsonl を書く。各行：
 #   {"task_id":"...", "source_node_id":"...", "edges":[
 #     {"target_name":"UserService","relation":"references","confidence_score":0.7}
 #   ]}

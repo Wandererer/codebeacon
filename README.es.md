@@ -56,6 +56,7 @@ Las herramientas existentes resuelven esto de forma parcial. Los analizadores de
 - **Cero configuración** — detecta frameworks y lenguajes automáticamente; genera `codebeacon.yaml` para ejecuciones posteriores
 - **Modo Deep Dive** — `--deep-dive` genera `.codebeacon/` + `CLAUDE.md` propios para cada sub-proyecto; ejecutar el comando de actualización desde **cualquier** sub-proyecto sincroniza automáticamente todos los proyectos del workspace
 - **Auto-redescubrimiento del workspace** — en cada `scan`/`sync`, codebeacon re-escanea el workspace y añade automáticamente al `codebeacon.yaml` los nuevos proyectos antes de extraer, de modo que los sub-proyectos recién añadidos nunca se omitan silenciosamente; usa `--no-rediscover` para optar por el modo de configuración curada manualmente
+- **Enriquecimiento semántico estilo Graphify** — tras la extracción AST, el skill despacha un subagente paralelo por chunk para emitir fragmentos completos de grafo `{nodes, edges, hyperedges}` con 8 tipos de relación (`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`) y confianza EXTRACTED/INFERRED/AMBIGUOUS; en Claude Code el subagente se ejecuta un nivel por debajo del modelo host (Opus→Sonnet, Sonnet→Haiku) para mantener el gasto proporcional al tamaño del corpus. El AST posee los nodos de código; el LLM solo puede aportar nodos `concept`/`document`/`paper`. Los archivos 0.3.x existentes se replayean con el nuevo esquema sin cambios
 
 ---
 
@@ -376,16 +377,19 @@ codebeacon hook install [path]            # instala merge driver + hook post-com
 codebeacon merge-driver <base> <cur> <other>  # invocado por git tras `hook install`; union-merge de beacon.json
 
 # Enriquecimiento AI-semántico (el LLM lo ejecuta el agente, codebeacon lleva la contabilidad)
-codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
-                                          # rehidrata el archivo histórico sobre el nuevo beacon.json
-                                          # y emite tareas solo para candidatos NUEVOS
-                                          # (carpetas god-node + objetivos no resueltos)
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
+                                          # rehidrata .codebeacon/semantic/original/*.jsonl sobre el
+                                          # nuevo beacon.json + poda entradas que apuntan a nodos
+                                          # desaparecidos, luego escribe tareas en
+                                          # .codebeacon/semantic/pending/chunk_NNN.jsonl
+                                          # (--chunk-size por chunk, predet. 10). El task_id incluye
+                                          # hash de contenido: si el archivo cambia, se reemite.
 codebeacon semantic-apply   [--dir .codebeacon]
-                                          # fusiona .codebeacon/semantic-results.jsonl como
-                                          # aristas INFERRED references en beacon.json,
-                                          # añade al archivo .codebeacon/semantic/original.jsonl,
-                                          # limpia los archivos pendientes y regenera
-                                          # wiki/obsidian/mapa de contexto
+                                          # por cada .codebeacon/semantic/results/chunk_NNN.jsonl que
+                                          # haya escrito el agente, fusiona las aristas INFERRED
+                                          # references en beacon.json y MUEVE el chunk pendiente a
+                                          # .codebeacon/semantic/original/chunk_NNN.jsonl (archivo
+                                          # durable). Borra los resultados y regenera todo.
 
 codebeacon serve [--dir .codebeacon]      # servidor MCP (stdio)
 codebeacon install                        # instalar skill de Claude Code
@@ -411,22 +415,24 @@ El CLI por sí mismo **nunca llama a un LLM**. La capa AI-semántica es propieda
 Cuando invocas `/codebeacon` en Claude Code:
 
 1. `scan` / `sync` construye `beacon.json` desde el AST (sin LLM).
-2. `codebeacon semantic-prepare` reaplica el archivo histórico sobre el grafo nuevo y luego escribe `.codebeacon/semantic-tasks.jsonl` con **sólo los candidatos nuevos** — archivos con puntuación alta (aristas a objetivos no resueltos + carpetas god-node) que nunca se han procesado.
-3. El skill itera sobre el archivo de tareas. Por cada línea, el agente (usando el modelo de su sesión actual) lee el campo `excerpt` y devuelve referencias inferidas en línea. Los resultados se escriben en `.codebeacon/semantic-results.jsonl`.
-4. `codebeacon semantic-apply` mezcla los resultados como aristas `INFERRED references` en `beacon.json`, **los anexa a `.codebeacon/semantic/original.jsonl`** (el archivo durable), limpia los ficheros pendientes y regenera wiki + obsidian + mapa de contexto.
-5. En la próxima ejecución: `semantic-prepare` rehidrata el archivo sobre el grafo recién construido (para que las inferencias históricas no desaparezcan en una nueva exploración) y emite un fichero de tareas con **sólo candidatos nuevos** desde la última actualización del archivo. Los archivos ya procesados se omiten vía `task_id` (SHA1 de `file_path|node_id`).
+2. `codebeacon semantic-prepare` rehidrata el archivo en `.codebeacon/semantic/original/*.jsonl` sobre el grafo nuevo y **poda** las entradas que apuntan a nodos ya desaparecidos. Después escribe los nuevos task chunks en `.codebeacon/semantic/pending/chunk_NNN.jsonl` (cada chunk ≤ `--chunk-size`, predet. 10). La numeración de chunks continúa donde dejó el archivo durable, así nunca colisiona.
+3. El skill itera los chunks pendientes **uno por uno**. Para cada `pending/chunk_NNN.jsonl`, el agente (con el modelo de su sesión actual) lee el `excerpt` de cada task y escribe un `semantic/results/chunk_NNN.jsonl` con el mismo nombre.
+4. `codebeacon semantic-apply` mezcla los resultados como aristas `INFERRED references` en `beacon.json` y **mueve** cada `pending/chunk_NNN.jsonl` terminado a **`semantic/original/chunk_NNN.jsonl`** (con las aristas aplicadas para auditoría). Los archivos de resultados se eliminan; wiki + obsidian + mapa de contexto se regeneran.
+5. En la siguiente ejecución: `semantic-prepare` lee cada chunk bajo `original/`, aplica sus aristas al grafo recién construido (las inferencias históricas no se pierden) y omite cualquier task cuyo `task_id` ya esté archivado. `task_id` = `SHA1(file_path | node_id | excerpt_hash[:8])`: si el contenido del archivo cambia, recibe un id nuevo y se reanaliza.
 
-Esto da enriquecimiento incremental e idempotente: el agente nunca reanaliza el mismo archivo dos veces, y la señal AI acumulada sobrevive a cada re-escaneo.
+Enriquecimiento incremental e idempotente: el agente nunca reanaliza la misma combinación (archivo, contenido) dos veces, la señal AI acumulada sobrevive a cada re-escaneo y los chunks mantienen pequeño el conjunto de trabajo del agente.
 
 ### Uso directo del CLI
 
-Si no usas el skill (p. ej. en CI), puedes ejecutar las mismas dos órdenes manualmente y suministrar tu propio `semantic-results.jsonl`:
+Si no usas el skill (p. ej. en CI), puedes ejecutar las mismas dos órdenes manualmente y proporcionar tus propios `results/chunk_NNN.jsonl`:
 
 ```bash
 codebeacon scan .
-codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50 --chunk-size 10
 
-# ahora escribe tú mismo .codebeacon/semantic-results.jsonl; cada línea:
+# Existen .codebeacon/semantic/pending/chunk_001.jsonl ...
+# Para cada chunk pendiente, escribe un results/chunk_NNN.jsonl con el mismo
+# nombre. Cada línea:
 #   {"task_id":"...", "source_node_id":"...", "edges":[
 #     {"target_name":"UserService","relation":"references","confidence_score":0.7}
 #   ]}

@@ -817,14 +817,19 @@ def _cmd_semantic_prepare(args: argparse.Namespace) -> int:
 
     beacon_dir = Path(args.dir).resolve()
     try:
-        result = prepare(beacon_dir, max_tasks=args.max_tasks)
+        result = prepare(
+            beacon_dir,
+            max_tasks=args.max_tasks,
+            chunk_size=args.chunk_size,
+        )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(
-        f"semantic-prepare: {result.new_tasks} new task(s) → {result.tasks_path}\n"
+        f"semantic-prepare: {result.new_tasks} new task(s) across "
+        f"{result.chunks} chunk(s) → {result.pending_dir}\n"
         f"  re-applied {result.reapplied_edges} archived edge(s); "
-        f"archive size: {result.archive_size}"
+        f"pruned {result.pruned_archive} stale; archive size: {result.archive_size}"
     )
     return 0
 
@@ -840,7 +845,8 @@ def _cmd_semantic_apply(args: argparse.Namespace) -> int:
         return 1
     print(
         f"semantic-apply: applied {result.applied} edge(s), "
-        f"skipped {result.skipped}; archive size: {result.archive_size}"
+        f"skipped {result.skipped}; archived {result.chunks_archived} chunk(s); "
+        f"archive size: {result.archive_size}"
     )
     return 0
 
@@ -949,8 +955,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to .codebeacon output directory (default: .codebeacon)",
     )
     sem_prep.add_argument(
-        "--max-tasks", type=int, default=50,
-        help="Max tasks to emit (default: 50)",
+        "--max-tasks", type=int, default=0,
+        help="Cap on new tasks to emit; 0 = no cap, emit every scored candidate (default: 0)",
+    )
+    sem_prep.add_argument(
+        "--chunk-size", type=int, default=20,
+        help="Tasks per chunk file (default: 20)",
     )
     sem_prep.set_defaults(func=_cmd_semantic_prepare)
 

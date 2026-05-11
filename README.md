@@ -54,6 +54,7 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 - **Zero configuration** — auto-detects frameworks and languages; generates `codebeacon.yaml` for repeat runs
 - **Deep-dive mode** — `--deep-dive` generates per-project `.codebeacon/` + `CLAUDE.md` for every sub-project; running `codebeacon scan . --update` from any sub-project folder automatically syncs all projects in the workspace
 - **Workspace auto-rediscovery** — on every `scan` / `sync`, codebeacon re-scans the workspace and appends any new project folders to `codebeacon.yaml` before extraction, so freshly added sub-projects are never silently skipped; pass `--no-rediscover` to opt out for hand-curated configs
+- **Graphify-style semantic enrichment** — after AST extraction, the skill dispatches one parallel subagent per chunk to emit `{nodes, edges, hyperedges}` with 8 relation types (`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`) and EXTRACTED/INFERRED/AMBIGUOUS confidence; on Claude Code the subagent runs one tier below the host model (Opus→Sonnet, Sonnet→Haiku) so spend stays proportional to corpus size. AST owns code nodes; LLM only contributes `concept`/`document`/`paper` nodes. Existing 0.3.x archives replay through the new schema unchanged.
 
 ---
 
@@ -142,11 +143,14 @@ project-root/
         components/<Name>.md
     obsidian/            ← Obsidian vault (one note per graph node)
     semantic/
-      original.jsonl     ← durable archive of every applied AI-semantic result
-                           (skipped on rescans, never re-emitted as a task)
-    semantic-tasks.jsonl     ← pending AI-semantic batch (present only between
-                               `semantic-prepare` and `semantic-apply`)
-    semantic-results.jsonl   ← agent-written results (same lifecycle as above)
+      pending/           ← prepare writes chunk_NNN.jsonl here (≤ --chunk-size tasks each)
+        chunk_001.jsonl
+        chunk_002.jsonl
+      results/           ← agent writes a matching chunk_NNN.jsonl per pending file
+        chunk_001.jsonl
+      original/          ← apply moves done chunks here (durable archive)
+        chunk_001.jsonl
+        chunk_002.jsonl  ← (older runs accumulate; chunk numbers are monotonic)
 ```
 
 ### Deep Dive Mode
@@ -313,14 +317,21 @@ codebeacon sync --config <file>           # use a specific config file
 codebeacon sync --no-rediscover           # don't auto-append newly added projects (hand-curated yaml mode)
 
 # AI-semantic enrichment (the agent does the LLM work, codebeacon does the bookkeeping)
-codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
-                                          # rehydrate semantic archive onto beacon.json, emit fresh tasks
-                                          # for NEW candidates only (god-node folders + unresolved targets);
-                                          # writes .codebeacon/semantic-tasks.jsonl
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
+                                          # rehydrate archive (.codebeacon/semantic/original/*.jsonl) onto
+                                          # the fresh graph, prune entries pointing at missing nodes,
+                                          # then emit every NEW candidate (god folders + hub files +
+                                          # unresolved targets) into .codebeacon/semantic/pending/
+                                          # chunk_NNN.jsonl (--chunk-size tasks per file, default 10).
+                                          # `--max-tasks` is an optional cap (0 = no cap = emit all).
+                                          # task_id includes a content hash, so a file whose semantic
+                                          # content changes between scans is automatically re-emitted.
 codebeacon semantic-apply   [--dir .codebeacon]
-                                          # read .codebeacon/semantic-results.jsonl, merge as INFERRED
-                                          # references edges, append to .codebeacon/semantic/original.jsonl
-                                          # archive, clear pending files, regenerate wiki/obsidian/context map
+                                          # for each .codebeacon/semantic/results/chunk_NNN.jsonl the
+                                          # agent has written, merge edges (INFERRED references) into
+                                          # beacon.json and MOVE the pending chunk into
+                                          # .codebeacon/semantic/original/chunk_NNN.jsonl (durable
+                                          # archive). Regenerates wiki/obsidian/context map.
 
 # Query the knowledge graph
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # search nodes by label substring
@@ -355,22 +366,23 @@ The CLI itself never makes an LLM API call. The AI-semantic layer is intentional
 When you invoke `/codebeacon` in Claude Code:
 
 1. `scan` / `sync` builds `beacon.json` from the AST (no LLM).
-2. `codebeacon semantic-prepare` re-applies the prior archive to the fresh graph, then writes `.codebeacon/semantic-tasks.jsonl` containing **only new candidates** — files that score high (unresolved-target edges + god-node folders) and have never been processed before.
-3. The skill loops over the tasks file. For each line, the agent (using its current model) reads the `excerpt` field and returns inferred references inline. Results are written to `.codebeacon/semantic-results.jsonl`.
-4. `codebeacon semantic-apply` merges the results as `INFERRED references` edges into `beacon.json`, **appends them to `.codebeacon/semantic/original.jsonl`** (the durable archive), clears the pending tasks/results files, and regenerates wiki + obsidian + context map.
-5. Next scan: `semantic-prepare` rehydrates the archive onto the freshly built graph (so historical inferences don't disappear) and emits a tasks file with **only newly discovered candidates** since the last archive. Already-processed files are skipped via `task_id` (SHA1 of `file_path|node_id`).
+2. `codebeacon semantic-prepare` rehydrates the archive at `.codebeacon/semantic/original/*.jsonl` onto the fresh graph, **prunes** archive entries whose source node no longer exists, and writes new task chunks to `.codebeacon/semantic/pending/chunk_NNN.jsonl` (≤ `--chunk-size` tasks per file, default 10). Chunk numbers continue from where the durable archive left off, so they never collide.
+3. The skill iterates the pending chunks **one chunk at a time**. For each `pending/chunk_NNN.jsonl`, the agent (using its current model) reads each task's `excerpt` and writes a matching `semantic/results/chunk_NNN.jsonl`.
+4. `codebeacon semantic-apply` merges the results as `INFERRED references` edges into `beacon.json` and **moves** each finished `pending/chunk_NNN.jsonl` into `semantic/original/chunk_NNN.jsonl` (with the applied edges spliced in for auditability). Result files are deleted; wiki + obsidian + context map regenerated.
+5. Next scan: `semantic-prepare` reads every chunk under `original/`, applies their edges to the freshly built graph (so historical inferences don't disappear), and skips any task whose `task_id` is already on file. `task_id` is `SHA1(file_path | node_id | excerpt_hash[:8])` — a file whose semantic content changes earns a new id and gets re-analysed automatically.
 
-This gives you incremental, idempotent enrichment: the agent never re-analyzes the same file twice, and accumulated AI signal survives every rescan.
+This gives you incremental, idempotent enrichment: the agent never re-analyses the same `(file, content)` twice, accumulated AI signal survives every rescan, and chunked files keep the agent's working set small.
 
 ### Direct CLI usage
 
-If you're not running through the skill (e.g. CI), you can drive the same two commands manually and supply your own `semantic-results.jsonl`:
+If you're not running through the skill (e.g. CI), you can drive the same two commands manually and supply your own `results/chunk_NNN.jsonl` files:
 
 ```bash
 codebeacon scan .
-codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50 --chunk-size 10
 
-# now write .codebeacon/semantic-results.jsonl yourself; each line is:
+# .codebeacon/semantic/pending/chunk_001.jsonl ... now exist.
+# For each pending chunk, write a matching results/chunk_NNN.jsonl. Each line:
 #   {"task_id":"...", "source_node_id":"...", "edges":[
 #     {"target_name":"UserService","relation":"references","confidence_score":0.7}
 #   ]}

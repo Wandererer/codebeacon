@@ -56,6 +56,7 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 - **제로 설정** — 프레임워크와 언어 자동 감지; 반복 실행을 위한 `codebeacon.yaml` 자동 생성
 - **딥다이브 모드** — `--deep-dive`는 각 서브 프로젝트에 개별 `.codebeacon/` + `CLAUDE.md`를 생성; 어느 서브 프로젝트 폴더에서든 `codebeacon scan . --update`를 실행하면 워크스페이스의 모든 프로젝트가 자동으로 업데이트됨
 - **워크스페이스 자동 재발견** — `scan`/`sync` 실행마다 워크스페이스를 다시 훑어 `codebeacon.yaml`에 없는 신규 프로젝트를 자동으로 yaml에 추가한 뒤 추출 시작 — 새로 추가된 서브 프로젝트가 조용히 누락되지 않음; 수동으로 yaml을 큐레이션 중이라면 `--no-rediscover`로 옵트아웃
+- **Graphify 스타일 semantic 보강** — AST 추출 후 스킬이 청크당 subagent 1개를 병렬로 띄워 `{nodes, edges, hyperedges}` 풀 그래프 단편을 추출. 관계 8종(`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`) + 신뢰도 3단계(EXTRACTED/INFERRED/AMBIGUOUS) 지원. Claude Code에서는 subagent가 호스트 모델보다 한 단계 아래(Opus→Sonnet, Sonnet→Haiku)로 자동 강등되어 코퍼스 크기에 비례한 비용 유지. 코드 노드는 AST 전담, LLM은 `concept`/`document`/`paper` 노드만 기여 가능. 기존 0.3.x 아카이브는 새 스키마로 그대로 replay됨
 
 ---
 
@@ -143,11 +144,14 @@ project-root/
         components/<Name>.md
     obsidian/            ← Obsidian 볼트 (그래프 노드당 노트 1개)
     semantic/
-      original.jsonl     ← 적용된 모든 AI-시맨틱 결과의 영구 아카이브
-                           (재스캔 시 스킵됨, 다시 task 로 발행되지 않음)
-    semantic-tasks.jsonl     ← pending AI-시맨틱 배치
-                               (`semantic-prepare` 와 `semantic-apply` 사이에만 존재)
-    semantic-results.jsonl   ← 에이전트가 작성한 결과 (동일 라이프사이클)
+      pending/           ← prepare 가 chunk_NNN.jsonl 작성 (chunk 당 --chunk-size 개)
+        chunk_001.jsonl
+        chunk_002.jsonl
+      results/           ← 에이전트가 같은 이름의 chunk_NNN.jsonl 작성
+        chunk_001.jsonl
+      original/          ← apply 가 완료 chunk 를 이동 (영구 아카이브)
+        chunk_001.jsonl
+        chunk_002.jsonl  ← (과거 실행 분이 누적; chunk 번호는 monotonic)
 ```
 
 ### 딥다이브 모드
@@ -314,15 +318,20 @@ codebeacon sync --config <file>           # 특정 설정 파일 사용
 codebeacon sync --no-rediscover           # 신규 프로젝트 자동 추가 비활성화 (수동 큐레이션 모드)
 
 # AI-시맨틱 보강 (LLM 작업은 에이전트가, 부기는 codebeacon이 담당)
-codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
-                                          # 시맨틱 아카이브를 fresh beacon.json에 재적용 후,
-                                          # 아카이브에 없는 NEW 후보(god-node 폴더 + unresolved 타겟)
-                                          # 만 골라 .codebeacon/semantic-tasks.jsonl 작성
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
+                                          # .codebeacon/semantic/original/*.jsonl 아카이브를 fresh
+                                          # beacon.json 에 재적용 + 사라진 노드를 가리키는 stale 엔트리
+                                          # prune, 그 후 **모든** NEW 후보 (god 폴더 + hub file +
+                                          # unresolved 타겟) 를 .codebeacon/semantic/pending/
+                                          # chunk_NNN.jsonl 로 작성 (chunk 당 --chunk-size 개, 기본 10).
+                                          # --max-tasks 는 선택적 cap (0 = no cap, 기본 — 모두 emit).
+                                          # task_id 에 콘텐츠 해시가 포함되어 파일 내용이 바뀌면 자동 재발행.
 codebeacon semantic-apply   [--dir .codebeacon]
-                                          # .codebeacon/semantic-results.jsonl 을 읽어
-                                          # INFERRED references 엣지로 beacon.json 에 머지,
-                                          # .codebeacon/semantic/original.jsonl 아카이브에 적재,
-                                          # pending 파일 정리, wiki/obsidian/컨텍스트 맵 재생성
+                                          # 에이전트가 작성한 .codebeacon/semantic/results/
+                                          # chunk_NNN.jsonl 각각을 INFERRED references 엣지로
+                                          # beacon.json 에 머지 + pending/chunk_NNN.jsonl 을
+                                          # original/chunk_NNN.jsonl 로 이동 (영구 아카이브).
+                                          # results 파일 삭제, wiki/obsidian/컨텍스트 맵 재생성.
 
 # 지식 그래프 쿼리
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # 라벨 부분 문자열로 노드 검색
@@ -357,22 +366,23 @@ CLI 자체는 LLM API 호출을 **하지 않습니다**. AI-시맨틱 계층은 
 Claude Code 에서 `/codebeacon` 호출 시:
 
 1. `scan` / `sync` 가 AST 로부터 `beacon.json` 빌드 (LLM 호출 없음).
-2. `codebeacon semantic-prepare` 가 이전 아카이브를 새 그래프에 재적용한 뒤, **신규 후보만** 담긴 `.codebeacon/semantic-tasks.jsonl` 작성 — 점수가 높은 파일 (unresolved 타겟 엣지 + god-node 폴더) 중 한 번도 처리된 적 없는 것.
-3. 스킬이 tasks 파일을 순회합니다. 각 라인마다 에이전트(현재 세션의 모델)가 `excerpt` 필드를 읽고 추론된 references 를 인라인으로 반환. 결과는 `.codebeacon/semantic-results.jsonl` 에 기록.
-4. `codebeacon semantic-apply` 가 결과를 `INFERRED references` 엣지로 `beacon.json` 에 머지하고, **`.codebeacon/semantic/original.jsonl`** (영구 아카이브) 에 append, pending 파일 정리, wiki + obsidian + 컨텍스트 맵 재생성.
-5. 다음 스캔: `semantic-prepare` 가 아카이브를 새 그래프에 재적용 (재스캔으로 인해 과거 추론이 사라지지 않도록) 한 뒤, 마지막 아카이브 이후 **새로 발견된 후보만** tasks 파일에 담음. 이미 처리된 파일은 `task_id` (SHA1(`file_path|node_id`)) 로 스킵.
+2. `codebeacon semantic-prepare` 가 `.codebeacon/semantic/original/*.jsonl` 아카이브를 새 그래프에 재적용하고, 그래프에서 사라진 노드를 가리키는 stale 엔트리를 **prune** 한 뒤, 신규 task 들을 `.codebeacon/semantic/pending/chunk_NNN.jsonl` 로 작성 (`--chunk-size` 당 1 chunk, 기본 10). chunk 번호는 영구 아카이브의 다음 번호부터 시작 — 절대 충돌하지 않음.
+3. 스킬이 pending chunk 들을 **한 번에 하나씩** 처리. 각 `pending/chunk_NNN.jsonl` 에 대해 에이전트(현재 세션의 모델)가 각 task 의 `excerpt` 를 읽고 같은 이름의 `semantic/results/chunk_NNN.jsonl` 을 작성.
+4. `codebeacon semantic-apply` 가 결과를 `INFERRED references` 엣지로 `beacon.json` 에 머지하고, 각 완료된 `pending/chunk_NNN.jsonl` 을 **`semantic/original/chunk_NNN.jsonl`** 로 **이동** (적용된 엣지를 함께 적재, 감사 가능). results 파일은 삭제, wiki + obsidian + 컨텍스트 맵 재생성.
+5. 다음 스캔: `semantic-prepare` 가 `original/` 의 모든 chunk 엣지를 새 그래프에 재적용 (과거 추론 보존) 하고, 이미 처리된 task_id 는 스킵. `task_id` = `SHA1(file_path | node_id | excerpt_hash[:8])` — 파일 시맨틱 내용이 바뀌면 자동으로 새 id 가 되어 재분석.
 
-→ 증분 + 멱등 보강. 같은 파일을 두 번 분석하지 않고, 누적된 AI 시그널은 매 재스캔을 살아남습니다.
+→ 증분 + 멱등 보강. 같은 (파일, 내용) 조합을 두 번 분석하지 않고, 누적된 AI 시그널은 매 재스캔을 살아남으며 chunk 분할로 에이전트의 working set 도 작게 유지됩니다.
 
 ### 직접 CLI 사용
 
-스킬 없이 (예: CI) 같은 두 명령으로 직접 운영하고 `semantic-results.jsonl` 을 본인이 채울 수 있습니다:
+스킬 없이 (예: CI) 같은 두 명령을 직접 운영할 수 있습니다 — `results/chunk_NNN.jsonl` 파일들을 본인이 채우면 됩니다:
 
 ```bash
 codebeacon scan .
-codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50 --chunk-size 10
 
-# 이제 .codebeacon/semantic-results.jsonl 을 직접 작성; 각 라인:
+# .codebeacon/semantic/pending/chunk_001.jsonl ... 이 생성됨.
+# 각 pending chunk 에 대해 같은 이름의 results/chunk_NNN.jsonl 을 작성. 각 라인:
 #   {"task_id":"...", "source_node_id":"...", "edges":[
 #     {"target_name":"UserService","relation":"references","confidence_score":0.7}
 #   ]}

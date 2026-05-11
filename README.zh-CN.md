@@ -56,6 +56,7 @@
 - **零配置** — 自动检测框架和语言；自动生成 `codebeacon.yaml` 供后续运行
 - **深度扫描模式** — `--deep-dive` 为每个子项目生成专属 `.codebeacon/` + `CLAUDE.md`；从**任意**子项目目录执行更新命令，即可自动同步整个工作区的所有项目
 - **工作区自动重新发现** — 每次执行 `scan`/`sync` 时,codebeacon 会重新扫描工作区,并将 `codebeacon.yaml` 中尚未登记的新项目自动追加后再进行抽取,新增子项目不会被静默跳过;若手动维护 yaml,可通过 `--no-rediscover` 退出此行为
+- **Graphify 风格的语义增强** — AST 抽取后,技能会按 chunk 并行派发一个 subagent,各自生成 `{nodes, edges, hyperedges}` 的完整知识图谱片段。支持 8 种关系(`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`)与三级置信度(EXTRACTED/INFERRED/AMBIGUOUS)。在 Claude Code 中,subagent 会自动降级到比宿主模型低一级(Opus→Sonnet、Sonnet→Haiku),让花费与语料规模成比例。代码节点由 AST 独占,LLM 仅可贡献 `concept`/`document`/`paper` 节点。已有的 0.3.x 归档可透明地在新 schema 下重放
 
 ---
 
@@ -284,17 +285,17 @@ codebeacon hook install [path]            # 安装 merge driver + post-commit �
 codebeacon merge-driver <base> <cur> <other>  # `hook install` 后由 git 自动调用；对 beacon.json 做 union 合并
 
 # AI 语义增强 (LLM 由代理执行，codebeacon 仅做记账)
-codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N]
-                                          # 把之前的归档重新应用到 fresh beacon.json，
-                                          # 然后只为档案里没有的 NEW 候选 (god-node 文件夹
-                                          # + unresolved 目标) 生成 .codebeacon/
-                                          # semantic-tasks.jsonl
+codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
+                                          # 把 .codebeacon/semantic/original/*.jsonl 归档重新应用到
+                                          # 新 beacon.json + 清理指向已消失节点的 stale 条目，
+                                          # 然后将新候选写入 .codebeacon/semantic/pending/
+                                          # chunk_NNN.jsonl (每个 chunk 含 --chunk-size 个，默认 10)。
+                                          # task_id 含内容哈希 - 文件内容变化会自动重新发布。
 codebeacon semantic-apply   [--dir .codebeacon]
-                                          # 读取 .codebeacon/semantic-results.jsonl，
-                                          # 作为 INFERRED references 边并入 beacon.json，
-                                          # 追加到 .codebeacon/semantic/original.jsonl 档案，
-                                          # 清理 pending 文件，重新生成
-                                          # wiki/obsidian/上下文映射
+                                          # 把代理写好的 .codebeacon/semantic/results/chunk_NNN.jsonl
+                                          # 每个文件作为 INFERRED references 边合并入 beacon.json，
+                                          # 并把 pending/chunk_NNN.jsonl 移动到 original/chunk_NNN.jsonl
+                                          # (持久归档)。删除 results，重新生成 wiki/obsidian/上下文映射。
 
 # 集成
 codebeacon serve [--dir .codebeacon]      # 启动 MCP 服务器（stdio）
@@ -321,22 +322,23 @@ CLI 自身**绝不**调用任何 LLM API。AI 语义层有意由 `/codebeacon` C
 在 Claude Code 中调用 `/codebeacon` 时：
 
 1. `scan` / `sync` 从 AST 构建 `beacon.json`（不调用 LLM）。
-2. `codebeacon semantic-prepare` 把已有归档重新应用到新图上，然后写出**只包含新候选**的 `.codebeacon/semantic-tasks.jsonl` — 评分高（unresolved 目标边 + god-node 文件夹）且从未被处理过的文件。
-3. 技能遍历 tasks 文件。对每一行，代理（使用当前会话的模型）读取 `excerpt` 字段并内联返回推断的 references。结果写入 `.codebeacon/semantic-results.jsonl`。
-4. `codebeacon semantic-apply` 将结果作为 `INFERRED references` 边并入 `beacon.json`，**追加到 `.codebeacon/semantic/original.jsonl`**（持久归档），清理待处理文件，并重新生成 wiki + obsidian + 上下文映射。
-5. 下次扫描：`semantic-prepare` 把归档重新应用到新构建的图上（以免重扫丢失历史推断），并只把**自上次归档以来新发现的候选**写入 tasks 文件。已处理的文件通过 `task_id`（`file_path|node_id` 的 SHA1）跳过。
+2. `codebeacon semantic-prepare` 把 `.codebeacon/semantic/original/*.jsonl` 归档重新应用到新图，并**清理**指向已消失节点的 stale 条目，然后把新 task 写入 `.codebeacon/semantic/pending/chunk_NNN.jsonl`（每个 chunk ≤ `--chunk-size` 个，默认 10）。chunk 编号从持久归档的下一个开始，绝不冲突。
+3. 技能**一次处理一个 pending chunk**。对每个 `pending/chunk_NNN.jsonl`，代理（使用当前会话的模型）读取每个 task 的 `excerpt`，并写入同名的 `semantic/results/chunk_NNN.jsonl`。
+4. `codebeacon semantic-apply` 把结果作为 `INFERRED references` 边并入 `beacon.json`，并把每个已完成的 `pending/chunk_NNN.jsonl` **移动**到 **`semantic/original/chunk_NNN.jsonl`**（一并写入应用过的边以便审计）。results 文件被删除，重新生成 wiki + obsidian + 上下文映射。
+5. 下次扫描：`semantic-prepare` 把 `original/` 下所有 chunk 的边重新应用到新构建的图（保留历史推断），并跳过已存在的 `task_id`。`task_id` = `SHA1(file_path | node_id | excerpt_hash[:8])` — 文件语义内容变化会自动得到新 id 并被重新分析。
 
-→ 增量、幂等增强。代理不会重复分析同一文件，累积的 AI 信号在每次重扫后依然保留。
+→ 增量、幂等增强。代理不会对同一 (文件, 内容) 重复分析，累积的 AI 信号每次重扫都保留，chunk 切分还让代理的工作集保持小巧。
 
 ### 直接 CLI 使用
 
-不走技能（如 CI 场景）也可以用同样的两条命令手动运行，自己生成 `semantic-results.jsonl`：
+不走技能（如 CI 场景）也可以用同样的两条命令手动运行，自己生成 `results/chunk_NNN.jsonl`：
 
 ```bash
 codebeacon scan .
-codebeacon semantic-prepare --dir .codebeacon --max-tasks 50
+codebeacon semantic-prepare --dir .codebeacon --max-tasks 50 --chunk-size 10
 
-# 自己写 .codebeacon/semantic-results.jsonl；每行：
+# 此时已生成 .codebeacon/semantic/pending/chunk_001.jsonl ...
+# 对每个 pending chunk，写一份同名的 results/chunk_NNN.jsonl。每行：
 #   {"task_id":"...", "source_node_id":"...", "edges":[
 #     {"target_name":"UserService","relation":"references","confidence_score":0.7}
 #   ]}
