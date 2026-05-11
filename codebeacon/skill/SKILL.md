@@ -1,6 +1,6 @@
 ---
 name: codebeacon
-description: Scan a codebase → AST extraction → knowledge graph → wiki + CLAUDE.md context map. Supports 17 frameworks (Spring Boot, NestJS, Django, FastAPI, Rails, Express, React, Vue, Angular, and more).
+description: Scan a codebase → AST extraction → knowledge graph → wiki + CLAUDE.md context map. Supports 27 frameworks (Spring Boot, NestJS, Django, FastAPI, Flask, Rails, Express, Fastify, Koa, React, Next.js, Vue, Nuxt, Angular, SvelteKit, Gin, Echo, Fiber, Laravel, Actix-Web, Axum, Tauri, Rocket, Warp, ASP.NET Core, Vapor, Ktor).
 trigger: /codebeacon
 ---
 

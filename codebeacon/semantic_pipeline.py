@@ -136,13 +136,24 @@ def _is_type_name(token: str) -> bool:
 def _pick_candidates(G: nx.DiGraph) -> list[_Candidate]:
     """Score files and return them ordered by descending score.
 
-    Signal sources:
-      * Files whose nodes point at external/unresolved targets (+2 per edge).
-        Regex misses these because the target lives outside the graph.
-      * Files inside god-node folders (+3 once). High cross-boundary coupling
-        means an inferred reference here is more likely to matter.
+    Signal sources (additive):
+      * +2 per edge from a node in this file to an ``external`` (unresolved)
+        target — regex can't catch these because the target isn't in the AST.
+      * +3 once if the file lives inside a god-node folder.
+      * +min(import_count, 5) hub-file boost — a file imported by many other
+        files often documents architectural references in its comments.
+
+    Well-resolved graphs (no ``external`` nodes at all) still surface
+    candidates via the god-folder and hub signals — this is the common case
+    once symbol resolution has wired everything up.
     """
-    from codebeacon.graph.analyze import god_nodes as _god_nodes
+    from codebeacon.graph.analyze import (
+        god_nodes as _god_nodes,
+        hub_files as _hub_files,
+        _infer_project_paths,
+    )
+
+    project_paths = _infer_project_paths(G)
 
     file_score: dict[str, int] = defaultdict(int)
     file_node: dict[str, str] = {}
@@ -176,30 +187,57 @@ def _pick_candidates(G: nx.DiGraph) -> list[_Candidate]:
             if fw:
                 file_framework[sf] = fw
 
+    # ── God-folder boost. Match by (project, relative folder), which is the
+    # same key shape :func:`god_nodes` uses internally. Before the fix this
+    # compared an abs path against a rel path and silently never matched.
     god_folder_keys: set[str] = set()
     try:
-        for gn in _god_nodes(G):
+        for gn in _god_nodes(G, project_paths=project_paths):
             god_folder_keys.add(f"{gn.project}/{gn.folder_path}")
     except Exception:
         pass
 
+    god_boost_seen: set[str] = set()
     for _node_id, data in G.nodes(data=True):
         sf = data.get("source_file", "")
-        if not sf or data.get("type") == "external":
+        if not sf or data.get("type") == "external" or sf in god_boost_seen:
             continue
         proj = data.get("project", "")
         dirname = os.path.dirname(os.path.abspath(sf))
-        key = f"{proj}/{dirname}"
-        if key in god_folder_keys and file_score[sf] > 0:
+        if proj and proj in project_paths:
+            try:
+                rel = os.path.relpath(dirname, project_paths[proj])
+            except ValueError:
+                rel = dirname
+        else:
+            rel = dirname
+        key = f"{proj}/{rel}"
+        if key in god_folder_keys:
             file_score[sf] += 3
+            god_boost_seen.add(sf)
+
+    # ── Hub-file boost.
+    try:
+        for hf in _hub_files(G):
+            if hf.file_path:
+                file_score[hf.file_path] += min(hf.import_count, 5)
+    except Exception:
+        pass
 
     candidates: list[_Candidate] = []
     for sf, score in file_score.items():
         if score <= 0:
             continue
+        if sf not in file_node:
+            # A hub-only candidate could miss a node mapping if no node lives
+            # inside the file — fall back to the file path as the synthetic
+            # source_node_id so the apply step still has something to attach
+            # the inferred edges to (the agent ultimately writes results
+            # keyed by the task_id we emit).
+            file_node[sf] = sf
         candidates.append(_Candidate(
             file_path=sf,
-            node_id=file_node.get(sf, sf),
+            node_id=file_node[sf],
             framework=file_framework.get(sf, ""),
             score=score,
         ))
