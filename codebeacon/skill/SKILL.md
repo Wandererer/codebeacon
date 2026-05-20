@@ -22,6 +22,7 @@ Scan source code with AST analysis → build a knowledge graph → generate a na
 /codebeacon serve <path>                 # start MCP server pointing at .codebeacon/
 /codebeacon query <term>                 # search the graph
 /codebeacon path <src> <tgt>             # shortest path
+/codebeacon knowledge [<path>]           # scan .md notes (ADRs, meetings, retros, specs) → KNOWLEDGE.md
 /codebeacon init [<path>]                # interactive codebeacon.yaml
 /codebeacon install                      # install/update this skill
 /codebeacon upgrade                      # pip upgrade codebeacon + refresh this SKILL.md (then restart Claude Code)
@@ -54,7 +55,7 @@ PY="$(command -v python3)"
 
 ### Step 2 — Dispatch on subcommand
 
-Inspect the user-supplied arguments. If the first non-flag arg is one of `sync`, `semantic-prepare`, `semantic-apply`, `serve`, `query`, `path`, `init`, `install`, `upgrade`, `hook`, `merge-driver` — forward the entire argv to codebeacon and stop after the command exits (no auto-semantic for these except `sync`, which IS covered below):
+Inspect the user-supplied arguments. If the first non-flag arg is one of `sync`, `semantic-prepare`, `semantic-apply`, `serve`, `query`, `path`, `knowledge`, `init`, `install`, `upgrade`, `hook`, `merge-driver` — forward the entire argv to codebeacon and stop after the command exits (no auto-semantic for these except `sync`, which IS covered below):
 
 ```bash
 python3 -m codebeacon <args...>

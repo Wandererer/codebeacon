@@ -57,6 +57,10 @@ AI コーディングセッションを新しく開くたびに、アシスタ�
 - **ディープダイブモード** — `--deep-dive` で各サブプロジェクトに専用の `.codebeacon/` + `CLAUDE.md` を生成；**どのサブプロジェクトからでも**更新コマンドを実行するだけでワークスペース全体が自動同期
 - **ワークスペース自動再検出** — `scan`/`sync` 実行のたびにワークスペースを再スキャンし、`codebeacon.yaml` に未登録の新規プロジェクトを自動追加してから抽出を開始するため、新しく追加されたサブプロジェクトが見落とされることがない；yaml を手動で管理している場合は `--no-rediscover` でオプトアウト可能
 - **Graphify 風のセマンティック強化** — AST 抽出後、スキルがチャンクごとに 1 つのサブエージェントを並列でディスパッチし、`{nodes, edges, hyperedges}` のフル知識グラフ断片を抽出。関係 8 種（`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`）+ 信頼度 3 段階（EXTRACTED/INFERRED/AMBIGUOUS）をサポート。Claude Code ではサブエージェントがホストモデルより 1 段階下（Opus→Sonnet、Sonnet→Haiku）に自動ダウングレードされ、コーパスサイズに比例したコストを維持。コードノードは AST が担当し、LLM は `concept`/`document`/`paper` ノードのみ寄与可能。既存の 0.3.x アーカイブは新スキーマで透過的にリプレイされる
+- **ナレッジモード (`codebeacon knowledge`)** — マークダウンノート（ADR、議事録、ふりかえり、仕様、リサーチ）をスキャンし、`.codebeacon/` の隣に単一の `KNOWLEDGE.md` を生成。ファイル名・見出しパターンで自動分類、Obsidian の YAML frontmatter と `[[backlinks]]` をパースし、最上部に「Key Decisions」+「Open Questions」のロールアップを提示することで、コードベースが*なぜ*このような形になっているのかをエージェントに伝える。ヒューリスティックのみで LLM 呼び出しなし
+- **パス省略形** — `codebeacon ./src` が `codebeacon scan ./src` と等価に。先頭引数が登録済みサブコマンドでない場合は `scan` が自動注入されるため、`graphify <path>` / `codesight <path>` の操作感もそのまま使える
+- **強化された semantic パイプライン** — `semantic-apply` がエージェント JSONL の不正行（null/リスト/code-fence/必須フィールド欠落）をガードし、壊れた `confidence_score`（None/NaN/文字列/範囲外）を安全なデフォルトに coerce、merge 直前に `beacon.json` → `beacon.json.bak` をスナップショットして AST ベースラインを常に復元可能にし、`beacon.html`/`callflow.html` も再生成して新たに推論されたエッジが可視化に反映される
+- **機密ファイル・ディレクトリのガード** — `secrets/`、`credentials/`、`.ssh/`、`.aws/`、`.gnupg/` を常にスキップ。credential パターン（`api_token`、`oauth_token`、`private_key`、`client_secret`; アンダースコア*と*ハイフン両方の変種）に一致するファイル名は、抽出器に到達する前にコレクタ段階で除外
 
 ---
 

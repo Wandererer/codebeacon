@@ -166,15 +166,37 @@ def _is_type_name(token: str) -> bool:
 
 
 def _iter_jsonl(path: Path) -> Iterator[dict]:
-    with open(path, encoding="utf-8") as fh:
+    """Yield dict records from a JSONL file, skipping anything malformed.
+
+    Hardened against the same hazards graphify guards on the LLM side
+    (graphify 0.8.11 / #924): an agent can write blank lines, ``null``,
+    a bare array, a string, or trailing markdown fences when its API
+    backend returns an empty ``choices`` list or ``choices[0].message =
+    None`` — without this guard, downstream ``obj.get("task_id")``
+    raises ``AttributeError`` on the first non-dict record and the
+    whole apply step bails out.
+    """
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        return
+    with fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
+            # Strip stray code-fence wrappers some models emit despite
+            # the JSON-only instruction (```json … ``` blocks).
+            if line.startswith("```"):
+                continue
             try:
-                yield json.loads(line)
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                # null, list, str, number — all valid JSON but unusable.
+                continue
+            yield obj
 
 
 def _read_archive(beacon_dir: Path) -> list[dict]:
@@ -349,6 +371,29 @@ def _normalize_confidence(raw: Optional[str]) -> str:
     if conf in ALLOWED_CONFIDENCE:
         return conf
     return "INFERRED"
+
+
+def _coerce_score(raw: object, default: float = 0.7) -> float:
+    """Coerce ``raw`` into a [0.0, 1.0] confidence_score.
+
+    Agents occasionally emit ``null``, strings (``"0.9"``), or out-of-range
+    values; calling ``float(None)`` would raise ``TypeError`` and abort the
+    whole apply step. This helper falls back to ``default`` whenever the
+    value is unusable.
+    """
+    if raw is None:
+        return default
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if score != score:  # NaN guard
+        return default
+    if score < 0.0:
+        return 0.0
+    if score > 1.0:
+        return 1.0
+    return score
 
 
 def _merge_edge(
@@ -629,6 +674,30 @@ def prepare(
     )
 
 
+def _snapshot_beacon(beacon_path: Path) -> Optional[Path]:
+    """Copy ``beacon.json`` to ``beacon.json.bak`` before semantic overwrite.
+
+    Mirrors graphify's ``backup_if_protected`` behaviour (graphify 0.8.13
+    #834): semantic and curated edges represent work the user can't easily
+    reconstruct, so we keep one rolling backup in case the merged graph
+    ends up worse than the AST-only baseline. The shrink guard in
+    :func:`graph.write.write_beacon` already catches a strictly smaller
+    graph, but the snapshot covers same-size graphs whose edges changed
+    semantically.
+
+    Returns the snapshot path, or ``None`` if the source doesn't exist or
+    the copy itself failed (best-effort — never block the apply pipeline).
+    """
+    if not beacon_path.exists():
+        return None
+    snapshot = beacon_path.with_suffix(beacon_path.suffix + ".bak")
+    try:
+        shutil.copy2(beacon_path, snapshot)
+        return snapshot
+    except OSError:
+        return None
+
+
 def apply(beacon_dir: str | Path) -> ApplyResult:
     """Merge every ``results/chunk_*.jsonl`` into ``beacon.json``.
 
@@ -661,6 +730,11 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
             f"No result chunks under {rdir} — the skill must write "
             f"semantic/results/chunk_NNN.jsonl files first."
         )
+
+    # One-shot backup of the pre-semantic beacon. Cheap (single file copy),
+    # gives the user something to diff against if the merged graph turns
+    # out worse than the AST baseline.
+    _snapshot_beacon(beacon_path)
 
     G, _meta = load_beacon(beacon_path)
     label_idx = _label_index(G)
@@ -695,6 +769,8 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
         for tid, obj in results_by_tid.items():
             kept_nodes: list[dict] = []
             for node in obj.get("nodes") or []:
+                if not isinstance(node, dict):
+                    continue
                 nid = node.get("id", "")
                 if _merge_node(
                     G, label_idx,
@@ -720,21 +796,25 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
             task_spec = pending_tasks.get(tid) or {}
             kept_edges: list[dict] = []
             for edge in obj.get("edges") or []:
-                target = (edge or {}).get("target_name")
-                if not target:
+                if not isinstance(edge, dict):
                     skipped += 1
                     continue
+                target = edge.get("target_name")
+                if not target or not isinstance(target, str):
+                    skipped += 1
+                    continue
+                score = _coerce_score(edge.get("confidence_score"), default=0.7)
                 if _merge_edge(
                     G, label_idx, source, target,
                     relation=edge.get("relation") or "references",
-                    score=float(edge.get("confidence_score", 0.7)),
+                    score=score,
                     confidence=edge.get("confidence") or "INFERRED",
                 ):
                     kept_edges.append({
                         "target_name": target,
                         "relation": _normalize_relation(edge.get("relation")),
                         "confidence": _normalize_confidence(edge.get("confidence")),
-                        "confidence_score": float(edge.get("confidence_score", 0.7)),
+                        "confidence_score": score,
                     })
                     applied += 1
                 else:
@@ -749,10 +829,10 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
                     "nodes": [n for n in (he.get("nodes") or []) if isinstance(n, str)],
                     "relation": he.get("relation", "participate_in"),
                     "confidence": _normalize_confidence(he.get("confidence")),
-                    "confidence_score": float(he.get("confidence_score", 0.7)),
+                    "confidence_score": _coerce_score(he.get("confidence_score"), default=0.7),
                 }
                 for he in (obj.get("hyperedges") or [])
-                if he.get("nodes")
+                if isinstance(he, dict) and he.get("nodes")
             ]
             archive_lines.append({
                 "task_id": tid,
@@ -797,6 +877,8 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
     from codebeacon.wiki.generator import generate_wiki
     from codebeacon.export.obsidian import generate_obsidian_vault
     from codebeacon.contextmap.generator import generate_context_map
+    from codebeacon.export.callflow_html import write_callflow_html
+    from codebeacon.export.tree_html import write_tree_html
 
     generate_wiki(G, communities, str(beacon_dir))
     try:
@@ -806,6 +888,21 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
     try:
         generate_context_map(G=G, output_dir=str(beacon_dir), projects=[], obsidian_dir=None)
     except Exception:
+        pass
+    # Regenerate the visual exports so callflow.html's cross-community table
+    # and beacon.html's tree pick up the freshly-inferred edges. Without this,
+    # the HTML on disk still reflects the AST-only graph and misses the new
+    # `references`, `cites`, `conceptually_related_to`, etc. edges the agent
+    # just produced — analogous to graphify 0.8.12 #925 (Relationships
+    # section stayed empty when downstream readers used stale community
+    # state).
+    try:
+        write_callflow_html(G, beacon_dir)
+    except (OSError, ValueError):
+        pass
+    try:
+        write_tree_html(G, beacon_dir)
+    except (OSError, ValueError):
         pass
 
     return ApplyResult(

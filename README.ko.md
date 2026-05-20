@@ -57,6 +57,10 @@ AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 
 - **딥다이브 모드** — `--deep-dive`는 각 서브 프로젝트에 개별 `.codebeacon/` + `CLAUDE.md`를 생성; 어느 서브 프로젝트 폴더에서든 `codebeacon scan . --update`를 실행하면 워크스페이스의 모든 프로젝트가 자동으로 업데이트됨
 - **워크스페이스 자동 재발견** — `scan`/`sync` 실행마다 워크스페이스를 다시 훑어 `codebeacon.yaml`에 없는 신규 프로젝트를 자동으로 yaml에 추가한 뒤 추출 시작 — 새로 추가된 서브 프로젝트가 조용히 누락되지 않음; 수동으로 yaml을 큐레이션 중이라면 `--no-rediscover`로 옵트아웃
 - **Graphify 스타일 semantic 보강** — AST 추출 후 스킬이 청크당 subagent 1개를 병렬로 띄워 `{nodes, edges, hyperedges}` 풀 그래프 단편을 추출. 관계 8종(`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`) + 신뢰도 3단계(EXTRACTED/INFERRED/AMBIGUOUS) 지원. Claude Code에서는 subagent가 호스트 모델보다 한 단계 아래(Opus→Sonnet, Sonnet→Haiku)로 자동 강등되어 코퍼스 크기에 비례한 비용 유지. 코드 노드는 AST 전담, LLM은 `concept`/`document`/`paper` 노드만 기여 가능. 기존 0.3.x 아카이브는 새 스키마로 그대로 replay됨
+- **지식 모드 (`codebeacon knowledge`)** — 마크다운 노트(ADR, 회의록, 회고, 스펙, 리서치)를 스캔해서 `.codebeacon/` 옆에 단일 `KNOWLEDGE.md` 생성. 파일명·제목 패턴으로 자동 분류, Obsidian YAML frontmatter와 `[[backlinks]]` 파싱, 최상단에 "Key Decisions" + "Open Questions" 롤업을 제공해 코드베이스가 *왜* 이런 모습인지 에이전트에게 전달. 휴리스틱만 사용 — LLM 호출 없음
+- **경로 단축 입력** — `codebeacon ./src`가 이제 `codebeacon scan ./src`와 동일. 첫 인자가 등록된 서브커맨드가 아니면 `scan`이 자동 주입되어, `graphify <path>` / `codesight <path>` 머슬 메모리도 그대로 동작
+- **강화된 semantic 파이프라인** — `semantic-apply`가 agent JSONL의 비정상 라인(null/리스트/code-fence/필수 필드 누락)을 가드, 잘못된 `confidence_score`(None/NaN/문자열/범위 초과)를 안전 기본값으로 coerce, merge 직전 `beacon.json` → `beacon.json.bak` 스냅샷으로 AST 베이스라인 복구 가능 보장, `beacon.html`/`callflow.html`도 재생성해서 새 inferred 엣지가 시각화에 반영됨
+- **민감 파일·디렉토리 가드** — `secrets/`, `credentials/`, `.ssh/`, `.aws/`, `.gnupg/` 디렉토리는 항상 스킵. credential 패턴(`api_token`, `oauth_token`, `private_key`, `client_secret`; 언더스코어 *및* 하이픈 변형) 파일명은 추출기에 도달하기 전 수집 단계에서 제외
 
 ---
 

@@ -46,7 +46,58 @@ IGNORE_DIRS: set[str] = {
     ".bundle",          # Ruby bundler
     "public",           # usually static assets
     ".terraform",
+    # Sensitive credential / secret directories — always skip even when they
+    # don't start with `.` (so the hidden-dir rule below doesn't cover them).
+    # Mirrors graphify's _SENSITIVE_DIRS hardening (graphify 0.8.12).
+    "secrets",
+    "credentials",
+    ".ssh",
+    ".aws",
+    ".gnupg",
 }
+
+# File basenames that should never be indexed even if their extension matches
+# CODE_EXTENSIONS — they almost certainly hold credentials. Underscore-prefixed
+# variants (api_token.txt, oauth_token.json) are also caught by the regex in
+# ``_is_sensitive_filename`` so we don't need to enumerate every spelling.
+_SENSITIVE_BASENAMES: set[str] = {
+    "credentials",
+    "credentials.json",
+    "credentials.yaml",
+    "credentials.yml",
+    "service-account.json",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+}
+
+# Substring (with word-boundary or underscore boundary) match for sensitive
+# tokens in file basenames: ``api_token.txt``, ``OAuth_Token.json``,
+# ``slack-secret.yml``, ``private_key.pem`` — anything that mentions a
+# credential keyword should be skipped even if the extension is otherwise a
+# code one (e.g. ``.json`` for Cargo manifests). The pattern is intentionally
+# narrow: it must be at the start of the basename or follow ``[-_.]`` so we
+# don't match e.g. ``token_bucket.ts`` or ``mysecretweapon.ts``.
+import re as _re
+_SENSITIVE_NAME_RE = _re.compile(
+    r"(?:^|[-_.])(?:api[-_]?key|api[-_]?token|oauth[-_]?token|"
+    r"access[-_]?token|refresh[-_]?token|secret[-_]?key|"
+    r"private[-_]?key|client[-_]?secret)"
+    r"(?=[-_.]|$)",
+    _re.IGNORECASE,
+)
+
+
+def _is_sensitive_filename(name: str) -> bool:
+    """Return True if ``name`` looks like a credential file.
+
+    Used at file-collection time to skip secrets that happen to share an
+    extension with code (e.g. ``service-account.json``, ``api_token.txt``).
+    """
+    lower = name.lower()
+    if lower in _SENSITIVE_BASENAMES:
+        return True
+    return _SENSITIVE_NAME_RE.search(lower) is not None
 
 CODE_EXTENSIONS: set[str] = {
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
@@ -150,6 +201,8 @@ def _walk(
             _walk(base, entry, depth + 1, max_depth, matcher, has_negation, result)
         elif entry.is_file():
             if entry.suffix not in CODE_EXTENSIONS:
+                continue
+            if _is_sensitive_filename(entry.name):
                 continue
             if matcher.is_ignored(rel, is_dir=False):
                 continue

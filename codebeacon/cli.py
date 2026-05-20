@@ -709,6 +709,39 @@ def _cmd_hook(args: argparse.Namespace) -> int:
     return install_hooks(target)
 
 
+def _cmd_knowledge(args: argparse.Namespace) -> int:
+    """``codebeacon knowledge`` — scan markdown notes → ``KNOWLEDGE.md``.
+
+    Pairs with the existing ``codebeacon scan`` (code → graph). The two
+    outputs together give an agent both *what* the code does and *why*
+    the team decided to build it this way (see codesight 1.9.3
+    ``--mode knowledge`` for the original framing).
+    """
+    from codebeacon.knowledge import build_knowledge_map
+
+    root = Path(args.path or ".").resolve()
+    if not root.exists():
+        print(f"  Error: path not found: {root}", file=sys.stderr)
+        return 1
+    if not root.is_dir():
+        print(f"  Error: not a directory: {root}", file=sys.stderr)
+        return 1
+
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else root
+
+    print(f"  Scanning markdown notes under {root} ...")
+    result = build_knowledge_map(root, output_dir)
+    counts = result.counts()
+    total = len(result.notes)
+    print(f"    {total} notes found")
+    if counts:
+        bits = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+        print(f"    Categories: {bits}")
+    if result.output_path:
+        print(f"  Wrote {result.output_path}")
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from pathlib import Path
     from codebeacon.export.mcp import serve
@@ -985,6 +1018,21 @@ def build_parser() -> argparse.ArgumentParser:
     md_p.add_argument("other", help="Path to other branch's version")
     md_p.set_defaults(func=_cmd_merge_driver)
 
+    # knowledge — map .md notes (ADRs, meetings, retros, specs) into KNOWLEDGE.md
+    knowledge_p = sub.add_parser(
+        "knowledge",
+        help="Scan markdown notes (ADRs, meetings, retros, specs) → KNOWLEDGE.md",
+    )
+    knowledge_p.add_argument(
+        "path", nargs="?", default=".",
+        help="Directory to scan recursively (default: cwd)",
+    )
+    knowledge_p.add_argument(
+        "--output-dir", metavar="DIR", default=None,
+        help="Where to write KNOWLEDGE.md (default: scanned path)",
+    )
+    knowledge_p.set_defaults(func=_cmd_knowledge)
+
     # hook install
     hook_p = sub.add_parser("hook", help="Install git hooks + merge driver in the current repo")
     hook_sub = hook_p.add_subparsers(dest="hook_action", metavar="<action>")
@@ -996,7 +1044,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Known subcommands — used by main() to decide whether a bare first arg should
+# be auto-dispatched to ``scan``. Keep this in sync with ``build_parser()``.
+_KNOWN_SUBCOMMANDS: set[str] = {
+    "scan", "sync", "init", "query", "path", "serve", "install", "upgrade",
+    "semantic-prepare", "semantic-apply", "merge-driver", "hook", "knowledge",
+}
+
+
+def _maybe_inject_scan(argv: list[str]) -> list[str]:
+    """If the first positional arg is a path-like value, prepend ``scan``.
+
+    Mirrors graphify's ``graphify <path>`` shortcut. Anything starting with
+    ``-`` is a flag, anything in ``_KNOWN_SUBCOMMANDS`` is a real subcommand,
+    and ``--version``/``--help`` are left alone. Everything else (a path, a
+    URL, or a typo) becomes ``scan <arg>`` so users don't see an unfriendly
+    ``unknown command`` error for the most common invocation.
+    """
+    if not argv:
+        return argv
+    first = argv[0]
+    if first in _KNOWN_SUBCOMMANDS:
+        return argv
+    if first.startswith("-"):
+        return argv
+    return ["scan", *argv]
+
+
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = _maybe_inject_scan(sys.argv[1:])
+    args = parser.parse_args(argv)
     sys.exit(args.func(args))

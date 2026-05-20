@@ -57,6 +57,10 @@
 - **深度扫描模式** — `--deep-dive` 为每个子项目生成专属 `.codebeacon/` + `CLAUDE.md`；从**任意**子项目目录执行更新命令，即可自动同步整个工作区的所有项目
 - **工作区自动重新发现** — 每次执行 `scan`/`sync` 时,codebeacon 会重新扫描工作区,并将 `codebeacon.yaml` 中尚未登记的新项目自动追加后再进行抽取,新增子项目不会被静默跳过;若手动维护 yaml,可通过 `--no-rediscover` 退出此行为
 - **Graphify 风格的语义增强** — AST 抽取后,技能会按 chunk 并行派发一个 subagent,各自生成 `{nodes, edges, hyperedges}` 的完整知识图谱片段。支持 8 种关系(`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`)与三级置信度(EXTRACTED/INFERRED/AMBIGUOUS)。在 Claude Code 中,subagent 会自动降级到比宿主模型低一级(Opus→Sonnet、Sonnet→Haiku),让花费与语料规模成比例。代码节点由 AST 独占,LLM 仅可贡献 `concept`/`document`/`paper` 节点。已有的 0.3.x 归档可透明地在新 schema 下重放
+- **知识模式 (`codebeacon knowledge`)** — 扫描 Markdown 笔记(ADR、会议记录、复盘、规格、调研)在 `.codebeacon/` 旁生成单一 `KNOWLEDGE.md`。按文件名 / 标题模式自动分类,解析 Obsidian YAML frontmatter 与 `[[backlinks]]`,顶部提供 "Key Decisions" + "Open Questions" 汇总,让 agent 了解代码库*为什么*长成这样。纯启发式,不调用 LLM
+- **路径简写** — `codebeacon ./src` 现等价于 `codebeacon scan ./src`;首参数不是已注册子命令时会自动注入 `scan`,沿用 `graphify <path>` / `codesight <path>` 的手感
+- **加固的 semantic 流水线** — `semantic-apply` 会拦截 agent JSONL 中的异常行(null / 数组 / code-fence / 缺少必要字段),将损坏的 `confidence_score`(None / NaN / 字符串 / 越界)coerce 为安全默认值,在合并前对 `beacon.json` → `beacon.json.bak` 做快照确保 AST 基线始终可恢复,并重新生成 `beacon.html` / `callflow.html`,让新推断的边在可视化中体现
+- **敏感文件 / 目录护栏** — `secrets/`、`credentials/`、`.ssh/`、`.aws/`、`.gnupg/` 始终跳过;符合凭证模式(`api_token`、`oauth_token`、`private_key`、`client_secret`;下划线*与*连字符变体)的文件名在到达抽取器之前就在收集阶段排除
 
 ---
 
