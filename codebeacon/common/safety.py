@@ -80,6 +80,11 @@ def git_head(repo_path: str | Path) -> str:
             cwd=str(repo_path),
             capture_output=True,
             text=True,
+            # Pin UTF-8 so a non-ASCII branch name in `git symbolic-ref` /
+            # `git rev-parse --abbrev-ref` doesn't crash with cp1252 on
+            # Windows. Mirrors graphify #906.
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )

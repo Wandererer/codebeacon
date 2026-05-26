@@ -65,6 +65,7 @@ def write_beacon(
     *,
     repo_path: str | Path | None = None,
     force: bool = False,
+    had_explicit_deletions: bool = False,
 ) -> WriteResult:
     """Atomically write ``beacon.json`` with shrink and desync guards.
 
@@ -77,6 +78,10 @@ def write_beacon(
                     ``codebeacon``.
         force:      bypass the shrink guard. Use only when a legitimate refactor
                     has shrunk the graph (e.g. mass deletion).
+        had_explicit_deletions: caller (e.g. post-commit hook with ``git diff``)
+                    has already accounted for deleted files; a smaller graph is
+                    expected, so skip the shrink guard without disabling it
+                    for other failure modes. Mirrors graphify #6fba4e4.
 
     Returns:
         WriteResult describing what was written. When the shrink guard fires,
@@ -90,7 +95,7 @@ def write_beacon(
     new_edge_count = G.number_of_edges()
     prior = _prior_node_count(beacon_path)
 
-    if prior > new_node_count and not force:
+    if prior > new_node_count and not force and not had_explicit_deletions:
         print(
             f"Warning: refusing to shrink beacon.json from {prior} → {new_node_count} nodes "
             f"(pass force=True or delete {beacon_path} to overwrite).",

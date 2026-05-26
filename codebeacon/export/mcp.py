@@ -53,17 +53,29 @@ class BeaconIndex:
         data = json.loads(beacon_json.read_text(encoding="utf-8"))
         self.G = nxjson.node_link_graph(data, directed=True, multigraph=False)
 
-        # Build label → [node_ids] lookup (case-insensitive key)
+        # Build label → [node_ids] lookup (case-insensitive key).
+        # casefold() — not lower() — so non-ASCII labels (CJK, Cyrillic,
+        # German ß, Turkish i/İ, Greek σ/ς) round-trip correctly and
+        # users searching in their own language get hits. Mirrors
+        # graphify's #020cca2 / #c7a05d6 query-term hardening.
         for node_id, node_data in self.G.nodes(data=True):
-            label = node_data.get("label", node_id).lower()
+            label = node_data.get("label", node_id).casefold()
             self._label_to_ids.setdefault(label, []).append(node_id)
 
     def find_node_ids(self, name: str) -> list[str]:
-        """Return node IDs whose label contains `name` (case-insensitive)."""
-        name_lower = name.lower()
+        """Return node IDs whose label contains `name` (case-insensitive).
+
+        Trailing/leading punctuation is stripped from the search term so
+        natural queries like ``User?``, ``getUser()``, ``OrderService:``
+        still match labels that don't carry the punctuation. Mirrors
+        graphify #978.
+        """
+        # ``"`'`` are intentionally included so quoted queries (which agents
+        # often generate by reflex) hit the same label.
+        name_cf = name.casefold().strip(".,?!:;()[]{}<>\"'`")
         results: list[str] = []
         for label, ids in self._label_to_ids.items():
-            if name_lower in label:
+            if name_cf in label:
                 results.extend(ids)
         return results
 
@@ -422,7 +434,83 @@ TOOLS = {
             "required": [],
         },
     },
+    "beacon_pr_context": {
+        "fn": "PLACEHOLDER",  # patched below to avoid forward-reference issues
+        "description": (
+            "Given a set of changed files (e.g. from a git diff), return the wiki article "
+            "paths covering the affected slice of the knowledge graph. Use this at the start "
+            "of a PR review to read just the docs that matter."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Changed file paths (repo-relative).",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Optional: git ref to diff against (e.g. main). If set, paths are augmented with `git diff --name-only base...HEAD`.",
+                },
+                "depth": {"type": "integer", "description": "Upstream walk depth (default 3)"},
+                "limit": {"type": "integer", "description": "Max wiki paths (default 50)"},
+            },
+            "required": [],
+        },
+    },
 }
+
+
+def tool_beacon_pr_context(idx: BeaconIndex, args: dict) -> str:
+    """Given changed files, return the wiki articles in their blast radius.
+
+    Same engine as ``codebeacon affected --as wiki``, but invoked via MCP
+    so a PR-reviewing agent can call it directly at the start of a turn.
+    Returns a markdown list (so the agent can show it back to the user)
+    plus the raw paths separated for easy copy-paste.
+    """
+    from codebeacon.affected import affected_from_paths, git_changed_files
+
+    if idx.G is None:
+        return "Graph not loaded."
+
+    paths = list(args.get("paths") or [])
+    base = (args.get("base") or "").strip()
+    if base:
+        paths.extend(git_changed_files(base, "HEAD", repo=idx.beacon_dir.parent))
+    if not paths:
+        return "No changed paths supplied. Pass `paths` or `base`."
+
+    depth = int(args.get("depth", 3))
+    limit = int(args.get("limit", 50))
+
+    try:
+        result = affected_from_paths(
+            idx.beacon_dir,
+            paths,
+            depth=depth,
+            limit=limit,
+            include_wiki_paths=True,
+        )
+    except FileNotFoundError as exc:
+        return f"Error: {exc}"
+
+    if not result.wiki_paths:
+        return (
+            f"No wiki articles in the blast radius of {len(paths)} changed file(s). "
+            f"(matched {len(result.seed_node_ids)} seed node(s), "
+            f"{len(result.affected_node_ids)} upstream node(s) — but none had wiki articles)"
+        )
+
+    lines = [f"## PR context ({len(result.wiki_paths)} article(s))\n"]
+    for wp in result.wiki_paths:
+        lines.append(f"- `wiki/{wp}`")
+    return "\n".join(lines)
+
+
+# Patch in the function reference now that it's defined.
+TOOLS["beacon_pr_context"]["fn"] = tool_beacon_pr_context
 
 
 # ── JSON-RPC 2.0 / MCP protocol ───────────────────────────────────────────────

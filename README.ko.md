@@ -27,6 +27,23 @@
 
 ---
 
+## 0.6.0 새 소식
+
+- **`codebeacon affected`** — 변경된 파일 목록(또는 `--base <ref>`로 git diff)을 받아 그 영향권에 있는 그래프 노드를 모두 출력. CI 리스크 스코어링·PR 리뷰용.
+- **`.NET` 프로젝트 파일** — `.sln`, `.csproj`, `.fsproj`, `.vbproj`, `.razor`, `.cshtml`가 이제 파싱됩니다. `<ProjectReference>` / `<PackageReference>`가 그래프 엣지로, Razor `@inherits` / `@inject` / `@using`이 Blazor 페이지를 백엔드 타입으로 연결합니다.
+- **JS/TS 배럴 re-export** — `export { X } from './mod'`, `export * from './mod'`가 명시적 `re_exports` 엣지가 됩니다. Next.js·모노레포 배럴이 더 이상 import 0으로 표시되지 않습니다.
+- **`--exclude PATTERN` 플래그** (`scan` / `sync`) + `.codebeaconignore`가 없을 때 자동 `.gitignore` 폴백.
+- **`codebeacon install --project [PATH]`** — `~/.claude/` 대신 `<PATH>/.claude/`에 `/codebeacon` 스킬 설치. 팀이 SKILL.md 버전을 레포에 핀할 수 있습니다.
+- **wiki 자동 정리** — `--update` 실행 시 더 이상 그래프에 없는 `wiki/<project>/{controllers,services,entities,components}/*.md` 파일을 자동 삭제.
+- **명시 삭제 시 shrink-guard 우회** — `--update` 모드에서 캐시가 이미 삭제된 파일을 추적했다면 더 작은 `beacon.json` 쓰기를 거부하지 않습니다. silent corruption에 대한 가드는 그대로.
+- **Cross-file 선언 union 머지** — Swift `extension Foo`, C# partial class, Ruby reopened class가 `fields` / `methods`를 마지막 파일에 덮어쓰지 않고 단일 canonical 노드로 합쳐집니다.
+- **query 강화** — `BeaconIndex`가 `casefold()`를 사용해 독일어 `ß`, 터키어 `i/İ`, 그리스어 `σ/ς`, CJK 라벨 매칭이 올바르게 동작합니다.
+- **시맨틱 컨텍스트 강화** — 각 task chunk에 그래프 caller·callee가 `neighbors`로 동봉되어 LLM이 실제 노드 라벨에서 벗어나기 어렵습니다. `SKILL.md`에 **Step 0 — Constrained query expansion** 추가로 `/codebeacon query` 흐름이 phantom 토큰을 만들지 못하도록 명시.
+- **`semantic-apply` zero-yield 가드** — 모든 chunk가 0 엣지로 archive되면 CLI가 exit 1로 종료해 CI가 LLM의 silent 실패를 잡습니다.
+- **ArkTS (`.ets`) + worktree 안전** — `.ets` 수집, 중첩 `worktrees/` 디렉토리는 스킵해 linked worktree가 중복 인덱싱되지 않습니다.
+
+---
+
 ## 왜 codebeacon인가?
 
 AI 코딩 세션을 새로 열 때마다 어시스턴트는 백지 상태에서 시작합니다. 라우트 구조도, 서비스 레이어도, 엔티티 모델도, 마이크로서비스 간 호출 관계도 모릅니다. 결국 세션마다 파일을 붙여넣고, 구조를 설명하고, 컨텍스트를 다시 세팅하는 데 상당한 시간을 씁니다.
@@ -94,8 +111,9 @@ codebeacon sync                      # 이후 실행은 설정 파일 기반
 | Ruby | Rails |
 | PHP | Laravel |
 | Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
-| C# | ASP.NET Core |
+| C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`); `.sln` / `.csproj` / `.fsproj` / `.vbproj`에서 `ProjectReference` + `PackageReference` 파싱 |
 | Swift | Vapor |
+| ArkTS | `.ets` (HarmonyOS) 수집 — extractor는 framework-agnostic |
 
 ---
 
@@ -314,12 +332,21 @@ codebeacon scan . --obsidian-dir <path>   # Obsidian 볼트를 커스텀 위치�
 codebeacon scan . --semantic              # 구조화 주석 시맨틱 추출 활성화 (Javadoc/JSDoc/docstring 참조)
 codebeacon scan . --list-only             # 프레임워크 감지만, 추출 제외
 codebeacon scan /workspace --deep-dive    # 프로젝트별 + 통합 워크스페이스 출력
+codebeacon scan . --exclude 'docs/**' --exclude '*.gen.ts'
+                                          # gitignore-스타일 패턴, 반복 가능
+                                          # .codebeaconignore / .gitignore 와 병합
 
 # 설정 기반 모드
 codebeacon init [path]                    # codebeacon.yaml 자동 생성
 codebeacon sync                           # codebeacon.yaml 기반 실행 (신규 워크스페이스 프로젝트 자동 추가)
 codebeacon sync --config <file>           # 특정 설정 파일 사용
 codebeacon sync --no-rediscover           # 신규 프로젝트 자동 추가 비활성화 (수동 큐레이션 모드)
+codebeacon sync --exclude PATTERN         # 동일 플래그 동일 의미
+
+# PR / CI: 이 diff 가 실제로 무엇을 깰까?
+codebeacon affected --base main           # 변경 파일들의 업스트림 호출자 walk
+codebeacon affected --base origin/main --head HEAD --depth 4 --limit 200
+codebeacon affected src/foo.py src/bar.py  # 명시 경로 — git 없이도 동작
 
 # AI-시맨틱 보강 (LLM 작업은 에이전트가, 부기는 codebeacon이 담당)
 codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
@@ -347,7 +374,8 @@ codebeacon merge-driver <base> <cur> <other>  # `hook install` 후 git이 자동
 
 # 통합
 codebeacon serve [--dir .codebeacon]      # MCP 서버 시작 (stdio)
-codebeacon install                        # Claude Code 스킬 설치
+codebeacon install                        # Claude Code 스킬 설치 (user 스코프: ~/.claude/)
+codebeacon install --project [PATH]       # <PATH>/.claude/ 에 설치 (팀 공유, 레포 핀)
 codebeacon upgrade                        # pip 으로 업그레이드 + ~/.claude/skills/codebeacon/SKILL.md 갱신
                                           # (`--force` 로 editable 설치 환경에서도 강제 업그레이드)
 ```

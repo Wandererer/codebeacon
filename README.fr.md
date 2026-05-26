@@ -27,6 +27,23 @@
 
 ---
 
+## Nouveautés en 0.6.0
+
+- **`codebeacon affected`** — prend une liste de fichiers modifiés (ou via `--base <ref>` un git diff) et imprime tous les nœuds du graphe en aval. Pensé pour le scoring de risque en CI et la revue de PR.
+- **Fichiers projet `.NET`** — `.sln`, `.csproj`, `.fsproj`, `.vbproj`, `.razor`, `.cshtml` sont désormais analysés : les balises `<ProjectReference>` / `<PackageReference>` deviennent des arêtes du graphe, et les directives Razor `@inherits` / `@inject` / `@using` relient les pages Blazor à leurs types sous-jacents.
+- **Re-exports barrel JS/TS** — `export { X } from './mod'` et `export * from './mod'` produisent maintenant des arêtes explicites `re_exports`, pour que les barrels Next.js / monorepo ne s'affichent plus avec 0 import.
+- **Drapeau `--exclude PATTERN`** pour `scan` / `sync`, plus repli automatique sur `.gitignore` lorsque `.codebeaconignore` est absent.
+- **`codebeacon install --project [PATH]`** — installe le skill `/codebeacon` dans `<PATH>/.claude/` plutôt que `~/.claude/`, pour permettre aux équipes de figer la version du SKILL.md par dépôt.
+- **Le wiki s'auto-répare** — les exécutions `--update` suppriment maintenant les fichiers `wiki/<project>/{controllers,services,entities,components}/*.md` dont le nœud de graphe n'existe plus.
+- **Garde anti-rétrécissement relâchée pour les suppressions explicites** — en mode `--update`, l'écriture d'un `beacon.json` plus petit n'est plus refusée si le cache a déjà tenu compte des fichiers supprimés ; la garde s'applique toujours en cas de corruption silencieuse.
+- **Fusion union des déclarations multi-fichiers** — les `extension Foo` Swift, les `partial class` C# et les classes Ruby réouvertes voient leurs `fields` / `methods` fusionnés dans un unique nœud canonique au lieu d'être écrasés.
+- **Recherche renforcée** — `BeaconIndex` utilise `casefold()`, ainsi l'allemand `ß`, le turc `i/İ`, le grec `σ/ς` et les libellés CJK matchent correctement.
+- **Contexte sémantique enrichi** — chaque chunk de tâche transporte désormais les appelants / appelés du graphe via `neighbors`, ce qui garde le LLM ancré sur de vrais libellés. `SKILL.md` ajoute **Step 0 — Constrained query expansion** pour que les flux `/codebeacon query` n'inventent pas de tokens fantômes.
+- **Garde « zéro rendement » de `semantic-apply`** — si tous les chunks ont archivé 0 arête, la CLI termine avec exit 1 pour que la CI détecte les échecs silencieux du LLM.
+- **ArkTS (`.ets`) et sécurité worktree** — `.ets` est collecté ; les dossiers `worktrees/` imbriqués sont ignorés pour éviter l'indexation en double des worktrees liées.
+
+---
+
 ## Pourquoi codebeacon ?
 
 À chaque nouvelle session de développement assisté par IA, l'assistant repart de zéro. Il ne connaît ni vos routes, ni votre couche de services, ni votre modèle d'entités, ni les relations entre vos microservices. Vous passez le début de chaque session à coller des fichiers, expliquer la structure et rétablir le contexte.
@@ -94,8 +111,9 @@ codebeacon sync                     # exécutions suivantes via la configuration
 | Ruby | Rails |
 | PHP | Laravel |
 | Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
-| C# | ASP.NET Core |
+| C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`) ; `.sln` / `.csproj` / `.fsproj` / `.vbproj` analysés pour `ProjectReference` + `PackageReference` |
 | Swift | Vapor |
+| ArkTS | `.ets` (HarmonyOS) collecté — les extracteurs sont framework-agnostiques |
 
 ---
 
@@ -369,10 +387,19 @@ codebeacon scan . --wiki-only             # ignorer la ré-extraction, régéné
 codebeacon scan . --semantic              # extraction des références dans commentaires structurés (Javadoc/JSDoc/docstring)
 codebeacon scan . --list-only             # détecter les frameworks uniquement
 codebeacon scan /workspace --deep-dive    # sortie par projet + workspace combiné
+codebeacon scan . --exclude 'docs/**' --exclude '*.gen.ts'
+                                          # motifs gitignore répétables
+                                          # fusionnés avec .codebeaconignore / .gitignore
 
 codebeacon init [chemin]                  # générer codebeacon.yaml
 codebeacon sync                           # exécuter depuis codebeacon.yaml (ajoute automatiquement les nouveaux projets du workspace)
 codebeacon sync --no-rediscover           # ne pas ajouter automatiquement les nouveaux projets (mode yaml géré manuellement)
+codebeacon sync --exclude PATTERN         # même drapeau, même sémantique
+
+# PR / CI : qu'est-ce que ce diff casse vraiment ?
+codebeacon affected --base main           # remonter les appelants des fichiers modifiés
+codebeacon affected --base origin/main --head HEAD --depth 4 --limit 200
+codebeacon affected src/foo.py src/bar.py  # chemins explicites — pas besoin de git
 
 codebeacon query <terme> [--dir .codebeacon] [--limit N]   # rechercher des nœuds par sous-chaîne de label
 codebeacon path <source> <cible> [--dir .codebeacon]       # chemin de dépendances le plus court
@@ -397,7 +424,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
                                           # durable). Supprime les résultats, régénère tout.
 
 codebeacon serve [--dir .codebeacon]      # serveur MCP (stdio)
-codebeacon install                        # installer le skill Claude Code
+codebeacon install                        # installer le skill Claude Code (portée utilisateur : ~/.claude/)
+codebeacon install --project [PATH]       # installer dans <PATH>/.claude/ (partagé en équipe, épinglé au dépôt)
 codebeacon upgrade                        # pip upgrade + rafraîchir ~/.claude/skills/codebeacon/SKILL.md
                                           # (`--force` si installé en mode éditable)
 ```

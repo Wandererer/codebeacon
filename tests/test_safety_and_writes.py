@@ -118,6 +118,41 @@ class TestWriteBeacon:
         on_disk, _ = load_beacon(tmp_path / "beacon.json")
         assert on_disk.number_of_nodes() == 1
 
+    def test_had_explicit_deletions_bypasses_shrink_guard(self, tmp_path):
+        """Mirrors graphify #6fba4e4.
+
+        ``--update`` mode informs the cache of deleted files, so a smaller
+        post-update graph is the expected outcome — not silent corruption.
+        Without this bypass, every delete-heavy commit would leave stale
+        nodes on disk and force the user to pass --force (which disables
+        the guard for legitimate failure modes too)."""
+        G_big = nx.DiGraph()
+        for i in range(5):
+            G_big.add_node(f"n{i}")
+        write_beacon(G_big, tmp_path)
+
+        # Caller explicitly knows 4 files were deleted → smaller graph OK
+        G_small = nx.DiGraph()
+        G_small.add_node("n0")
+        wr = write_beacon(G_small, tmp_path, had_explicit_deletions=True)
+        assert wr.skipped_shrink is False
+        on_disk, _ = load_beacon(tmp_path / "beacon.json")
+        assert on_disk.number_of_nodes() == 1
+
+    def test_shrink_guard_still_fires_without_explicit_deletions(self, tmp_path):
+        """Regression bookend: ``had_explicit_deletions=False`` (default) MUST
+        still refuse silent shrinkage. Otherwise the new flag would have
+        effectively disabled the guard for every caller."""
+        G_big = nx.DiGraph()
+        for i in range(5):
+            G_big.add_node(f"n{i}")
+        write_beacon(G_big, tmp_path)
+
+        G_small = nx.DiGraph()
+        G_small.add_node("only")
+        wr = write_beacon(G_small, tmp_path, had_explicit_deletions=False)
+        assert wr.skipped_shrink is True
+
     def test_load_strips_meta(self, tmp_path):
         G = nx.DiGraph()
         G.add_node("a", label="A")

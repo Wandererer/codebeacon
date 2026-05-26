@@ -58,6 +58,41 @@ def _safe_filename(label: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
 
 
+def node_to_wiki_path(G: nx.DiGraph, node_id: str) -> str | None:
+    """Map a graph node to its wiki article path (relative to ``wiki/``).
+
+    Used by ``codebeacon affected --as wiki`` to translate a PR's blast
+    radius into the exact wiki documents a reviewer / AI agent should
+    consult. Returns ``None`` for node types that wiki generation skips
+    (route nodes, external nodes, LLM concept nodes) — callers should
+    drop those silently so the output list stays clean.
+
+    The path layout mirrors ``_write_project``:
+        <project>/controllers/<Name>.md
+        <project>/services/<Name>.md
+        <project>/entities/<Name>.md
+        <project>/components/<Name>.md
+    """
+    if node_id not in G:
+        return None
+    data = G.nodes[node_id]
+    ntype = data.get("type", "")
+    project = data.get("project", "") or "_"
+    label = data.get("label", node_id)
+    filename = f"{_safe_filename(label)}.md"
+
+    if ntype == "class":
+        annotations = data.get("annotations", []) or []
+        bucket = "controllers" if _is_controller(label, annotations) else "services"
+        return f"{project}/{bucket}/{filename}"
+    if ntype == "entity":
+        return f"{project}/entities/{filename}"
+    if ntype == "component":
+        return f"{project}/components/{filename}"
+    # route, external, concept, document, paper — no dedicated wiki article
+    return None
+
+
 # ── Node neighbour helpers ────────────────────────────────────────────────────
 
 _CALL_RELATIONS = frozenset({"calls", "injects", "depends"})
@@ -157,6 +192,10 @@ def generate_wiki(
         project = data.get("project", "_unknown")
         ntype = data.get("type", "unknown")
         projects.setdefault(project, {}).setdefault(ntype, []).append((node_id, data))
+
+    # Drop any wiki files for nodes that are no longer in the graph (incremental
+    # rebuilds otherwise leak stale articles forever). Mirrors graphify #936.
+    _prune_stale_articles(wiki_dir, projects)
 
     # Collect routes for routes.md (all projects)
     routes_by_project = _collect_routes(G)
@@ -374,3 +413,70 @@ def _write_project(
 def _write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+# ── Stale article pruning ─────────────────────────────────────────────────────
+
+_WIKI_TYPE_DIRS = {
+    "class": ("controllers", "services"),   # class nodes split across both
+    "entity": ("entities",),
+    "component": ("components",),
+}
+
+
+def _prune_stale_articles(
+    wiki_dir: Path,
+    projects: dict[str, dict[str, list[tuple[str, dict]]]],
+) -> None:
+    """Delete per-node .md files whose underlying graph node no longer exists.
+
+    Without this, ``--update`` runs accumulate stale articles forever: a
+    renamed or deleted controller keeps its old file because the rewrite path
+    only writes the new name and never touches the old one.
+
+    Scope is intentionally narrow — only the per-node subdirectories
+    (``controllers/`` / ``services/`` / ``entities/`` / ``components/``) are
+    pruned. Global files (``index.md``, ``routes.md``, ``overview.md``) are
+    always fully rewritten, so they self-heal.
+    """
+    if not wiki_dir.exists():
+        return
+
+    for project_name, type_map in projects.items():
+        proj_dir = wiki_dir / project_name
+        if not proj_dir.exists():
+            continue
+
+        # Build the set of filenames we expect to write for each subdirectory.
+        expected: dict[str, set[str]] = {
+            "controllers": set(),
+            "services": set(),
+            "entities": set(),
+            "components": set(),
+        }
+        for node_id, data in type_map.get("class", []):
+            label = data.get("label", "")
+            if not label:
+                continue
+            fname = f"{_safe_filename(label)}.md"
+            bucket = "controllers" if _is_controller(label, data.get("annotations", [])) else "services"
+            expected[bucket].add(fname)
+        for node_id, data in type_map.get("entity", []):
+            label = data.get("label", "")
+            if label:
+                expected["entities"].add(f"{_safe_filename(label)}.md")
+        for node_id, data in type_map.get("component", []):
+            label = data.get("label", "")
+            if label:
+                expected["components"].add(f"{_safe_filename(label)}.md")
+
+        for subdir_name, keep in expected.items():
+            subdir = proj_dir / subdir_name
+            if not subdir.exists():
+                continue
+            for md in subdir.glob("*.md"):
+                if md.name not in keep:
+                    try:
+                        md.unlink()
+                    except OSError:
+                        pass

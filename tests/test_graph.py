@@ -125,6 +125,173 @@ class TestBuildGraph:
         assert G.is_directed()
 
 
+class TestCrossFileDeclarationMerge:
+    """Mirrors graphify #406bea4 (Swift extension dedup).
+
+    Generalised to every language where a single logical type can be
+    declared across multiple files (Swift extensions, C# partial classes,
+    Ruby reopened classes, Python class re-declarations). Before 0.6.0,
+    NetworkX collapsed same-id nodes but the last writer's metadata
+    overwrote earlier metadata, silently losing fields/methods from
+    other files.
+    """
+
+    def test_fields_union_across_two_files(self):
+        """Two `User` entities — one per file, each with different fields —
+        must merge into a single canonical node carrying ALL fields."""
+        e_a = EntityInfo(
+            name="User", table_name="users",
+            source_file="/proj/User.swift", line=1, framework="fluent",
+            fields=[{"name": "id", "type": "Int", "annotations": ["@ID"]}],
+        )
+        e_b = EntityInfo(
+            name="User", table_name="users",
+            source_file="/proj/User+Profile.swift", line=1, framework="fluent",
+            fields=[{"name": "name", "type": "String", "annotations": []}],
+        )
+        wave = WaveResult(project=_project(), entities=[e_a, e_b])
+        G = build_graph([wave], apply_filters=False)
+
+        user_node = G.nodes["api::User"]
+        field_names = [f["name"] for f in user_node.get("fields", [])]
+        assert "id" in field_names and "name" in field_names, (
+            "cross-file extension fields were lost — last-writer-wins regression"
+        )
+
+    def test_dedup_collapses_duplicates_within_union(self):
+        """If both files declare the same `id` field, the merge keeps one,
+        not two — order preserved by first occurrence."""
+        e_a = EntityInfo(
+            name="Order", table_name="orders",
+            source_file="/proj/Order.cs", line=1, framework="ef",
+            fields=[{"name": "id", "type": "int", "annotations": []}],
+        )
+        e_b = EntityInfo(
+            name="Order", table_name="orders",
+            source_file="/proj/Order.Partial.cs", line=1, framework="ef",
+            fields=[
+                {"name": "id", "type": "int", "annotations": []},  # duplicate
+                {"name": "total", "type": "decimal", "annotations": []},
+            ],
+        )
+        wave = WaveResult(project=_project(), entities=[e_a, e_b])
+        G = build_graph([wave], apply_filters=False)
+        fields = G.nodes["api::Order"].get("fields", [])
+        names = [f["name"] for f in fields]
+        assert names == ["id", "total"]
+
+
+class TestCasefoldAndPhantomGuard:
+    """Mirrors graphify #86109e9 (CJK/Unicode dedup) and #4dce16f
+    (phantom cross-language matches). The import-edge remap uses
+    casefold() so non-ASCII labels match, but it also refuses to fall
+    back to case-insensitive matching for tokens shorter than 3 chars,
+    which were the main source of phantom cross-language edges.
+    """
+
+    def test_casefold_matches_eszett_to_ss(self):
+        """A path-alias import `@/Strasse` from a *different* file must
+        resolve to the class labelled `Straße` via casefold — lower()
+        would not handle the ß→ss equivalence."""
+        target_entity = EntityInfo(
+            name="Straße", table_name="strassen",
+            source_file="/proj/Strasse.py", line=1, framework="sqlalchemy",
+        )
+        caller = ServiceInfo(
+            name="Caller", class_name="Caller",
+            source_file="/proj/caller.py", line=1, framework="fastapi",
+        )
+        wave = WaveResult(
+            project=_project(),
+            services=[caller],
+            entities=[target_entity],
+            import_edges=[Edge(
+                source="/proj/caller.py",
+                target="@/Strasse",  # different case + romanised
+                relation="imports_from",
+                confidence="EXTRACTED",
+                confidence_score=1.0,
+                source_file="/proj/caller.py",
+            )],
+        )
+        G = build_graph([wave], apply_filters=False)
+        # The edge should resolve and end up pointing at the Straße node.
+        edges = [(s, t, d.get("relation")) for s, t, d in G.edges(data=True)]
+        assert any(t == "api::Straße" and r == "imports_from" for _, t, r in edges)
+
+    def test_short_label_no_case_fold_phantom(self):
+        """A two-char label like `Db` must NOT case-fold-match `DB`. In
+        mixed-language repos these short tokens are usually unrelated
+        types that happen to spell the same letters; the old `.lower()`
+        fallback was a major source of phantom cross-project edges."""
+        target_entity = EntityInfo(
+            name="Db", table_name="db",
+            source_file="/proj/Db.py", line=1, framework="sqlalchemy",
+        )
+        caller = ServiceInfo(
+            name="Caller", class_name="Caller",
+            source_file="/proj/caller.py", line=1, framework="fastapi",
+        )
+        wave = WaveResult(
+            project=_project(),
+            services=[caller],
+            entities=[target_entity],
+            import_edges=[Edge(
+                source="/proj/caller.py",
+                target="@/DB",  # short, different case
+                relation="imports_from",
+                confidence="EXTRACTED",
+                confidence_score=1.0,
+                source_file="/proj/caller.py",
+            )],
+        )
+        G = build_graph([wave], apply_filters=False)
+        # The case-insensitive fallback must be suppressed for short tokens.
+        edges = [(s, t, d.get("relation")) for s, t, d in G.edges(data=True)]
+        assert not any(
+            r == "imports_from" and t == "api::Db" for _, t, r in edges
+        ), "short-label case-fold produced a phantom import edge"
+
+
+class TestReExportEdges:
+    """Mirrors graphify #1494874. JS/TS barrel re-exports
+    (``export { X } from './m'``) become explicit `re_exports` edges,
+    routed through the same file→label resolver as `imports_from`."""
+
+    def test_re_exports_edge_resolves_to_label(self):
+        button = ComponentInfo(
+            name="Button", source_file="/proj/Button.tsx", line=1,
+            framework="react",
+        )
+        # Barrel index.ts is itself a graph node (e.g. extractor emits a
+        # placeholder for the file). Otherwise the file→node resolver has
+        # no source to remap from.
+        barrel = ComponentInfo(
+            name="Barrel", source_file="/proj/index.ts", line=1,
+            framework="react",
+        )
+        wave = WaveResult(
+            project=_project("ui", "react"),
+            components=[button, barrel],
+            import_edges=[Edge(
+                source="/proj/index.ts",
+                target="./Button",
+                relation="re_exports",
+                confidence="EXTRACTED",
+                confidence_score=1.0,
+                source_file="/proj/index.ts",
+            )],
+        )
+        G = build_graph([wave], apply_filters=False)
+        re_exports = [
+            (s, t) for s, t, d in G.edges(data=True)
+            if d.get("relation") == "re_exports"
+        ]
+        # Barrel re-exports Button — the edge survives remapping AND
+        # preserves the distinct `re_exports` relation (not `imports_from`).
+        assert ("ui::Barrel", "ui::Button") in re_exports
+
+
 class TestCluster:
     def test_empty_graph(self):
         """cluster() on empty graph returns empty dict."""

@@ -83,6 +83,17 @@ class ApplyResult:
     skipped: int
     chunks_archived: int
     archive_size: int
+    # Hallucination accounting (since 0.6.0). See codebeacon.diagnostics.
+    # ``stats`` is None for legacy callers (tests) that don't pass an
+    # accumulator; the CLI always populates it.
+    stats: Optional["object"] = None  # diagnostics.SemanticApplyStats
+
+
+# Edges with confidence_score below this threshold are dropped during apply().
+# An LLM that emits ``confidence_score: 0.3`` is admitting it doesn't know —
+# letting that into the graph contradicts the "deterministic graph" promise
+# that downstream wiki/MCP consumers rely on. Override with --min-confidence.
+DEFAULT_MIN_CONFIDENCE_SCORE = 0.5
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -150,6 +161,60 @@ def _read_excerpt(file_path: str) -> Optional[str]:
     except OSError:
         return None
     return text[:MAX_EXCERPT_CHARS]
+
+
+_NEIGHBOR_CAP = 12  # avoid blowing chunk size on god-nodes
+
+
+def _neighbor_context(G: nx.DiGraph, node_id: str) -> dict:
+    """Return a compact (callers, callees) label snapshot for ``node_id``.
+
+    Callers come from inbound edges (who depends on me), callees from
+    outbound edges (what do I depend on). Both are deduped, capped, and
+    annotated with the source-file basename so cross-language matches
+    are easier for the LLM to reason about ("Foo.java" vs "foo.py").
+    """
+    if node_id not in G:
+        return {"callers": [], "callees": []}
+
+    def _summarise(other_id: str) -> dict:
+        data = G.nodes[other_id]
+        sf = data.get("source_file", "") or ""
+        return {
+            "label": data.get("label", other_id),
+            "type": data.get("type", ""),
+            "source_file": Path(sf).name if sf else "",
+            "language": _infer_language(sf),
+        }
+
+    callers, callees = [], []
+    seen_in: set[str] = set()
+    seen_out: set[str] = set()
+    for pred in G.predecessors(node_id):
+        if pred in seen_in or len(callers) >= _NEIGHBOR_CAP:
+            continue
+        seen_in.add(pred)
+        callers.append(_summarise(pred))
+    for succ in G.successors(node_id):
+        if succ in seen_out or len(callees) >= _NEIGHBOR_CAP:
+            continue
+        seen_out.add(succ)
+        callees.append(_summarise(succ))
+    return {"callers": callers, "callees": callees}
+
+
+_EXT_TO_LANG = {
+    ".py": "python", ".java": "java", ".kt": "kotlin", ".swift": "swift",
+    ".cs": "csharp", ".go": "go", ".rs": "rust", ".rb": "ruby", ".php": "php",
+    ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
+    ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".vue": "vue", ".svelte": "svelte",
+}
+
+
+def _infer_language(source_file: str) -> str:
+    ext = Path(source_file).suffix.lower()
+    return _EXT_TO_LANG.get(ext, "")
 
 
 def _is_type_name(token: str) -> bool:
@@ -364,6 +429,20 @@ def _normalize_relation(raw: Optional[str]) -> str:
     if rel in ALLOWED_RELATIONS:
         return rel
     return "references"
+
+
+def _classify_relation(raw: Optional[str]) -> tuple[str, bool]:
+    """Return ``(normalized_label, was_known)`` for one LLM-emitted relation.
+
+    ``was_known`` is True when the raw label matched ``ALLOWED_RELATIONS``
+    exactly (after strip+lower). False means the LLM hallucinated a label
+    and we coerced it to ``references`` — callers should count these so
+    apply() can surface a hallucination spike instead of silently absorbing it.
+    """
+    rel = (raw or "").strip().lower()
+    if rel in ALLOWED_RELATIONS:
+        return rel, True
+    return "references", False
 
 
 def _normalize_confidence(raw: Optional[str]) -> str:
@@ -646,15 +725,26 @@ def prepare(
         tid = _task_id(cand.file_path, cand.node_id, excerpt)
         if tid in done_task_ids:
             continue
+        neighbors = _neighbor_context(G, cand.node_id)
         task = {
             "task_id": tid,
             "source_node_id": cand.node_id,
             "file_path": cand.file_path,
             "framework": cand.framework,
             "excerpt": excerpt,
+            # Cross-language semantic context: the LLM gets the immediate
+            # callers and callees as label hints so it can name references
+            # that exist in the graph instead of inventing them. Mirrors
+            # graphify #ab4e542. Both lists are capped to keep the chunk
+            # payload predictable.
+            "neighbors": neighbors,
             "hint": (
                 "List explicit class/type/service references that appear in "
-                "comments, docstrings, or annotations — not in code logic."
+                "comments, docstrings, annotations, or are clearly implied "
+                "by the surrounding excerpt. Prefer names that already "
+                "appear under `neighbors.callers` or `neighbors.callees` — "
+                "those are confirmed graph nodes; inventing new names that "
+                "aren't in the graph adds noise."
             ),
         }
         current_chunk.append(task)
@@ -698,7 +788,10 @@ def _snapshot_beacon(beacon_path: Path) -> Optional[Path]:
         return None
 
 
-def apply(beacon_dir: str | Path) -> ApplyResult:
+def apply(
+    beacon_dir: str | Path,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE_SCORE,
+) -> ApplyResult:
     """Merge every ``results/chunk_*.jsonl`` into ``beacon.json``.
 
     For each chunk that yielded at least one valid result row, the
@@ -708,10 +801,18 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
     no matching pending file are still archived from their result data
     alone (defensive — covers manual editing).
 
+    ``min_confidence`` drops any LLM-emitted edge whose ``confidence_score``
+    falls below this threshold (default 0.5). The dropped edges are still
+    counted in ``ApplyResult.stats`` so a hallucination spike is visible to
+    CI without having to diff beacon.json manually.
+
     Returns counts and the resulting archive size.
     """
     from codebeacon.graph.write import load_beacon, write_beacon
     from codebeacon.graph.cluster import cluster, apply_communities
+    from codebeacon.diagnostics import SemanticApplyStats, write_semantic_stats
+
+    stats = SemanticApplyStats()
 
     beacon_dir = Path(beacon_dir)
     beacon_path = beacon_dir / "beacon.json"
@@ -796,6 +897,7 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
             task_spec = pending_tasks.get(tid) or {}
             kept_edges: list[dict] = []
             for edge in obj.get("edges") or []:
+                stats.edges_total += 1
                 if not isinstance(edge, dict):
                     skipped += 1
                     continue
@@ -803,20 +905,47 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
                 if not target or not isinstance(target, str):
                     skipped += 1
                     continue
-                score = _coerce_score(edge.get("confidence_score"), default=0.7)
+
+                raw_score = edge.get("confidence_score")
+                score = _coerce_score(raw_score, default=0.7)
+                # _coerce_score returns the clamped/defaulted value silently.
+                # We track "had to coerce" so a flood of None/NaN scores is
+                # visible — those usually signal an LLM prompt regression.
+                if raw_score is None or (
+                    isinstance(raw_score, (int, float))
+                    and (raw_score != raw_score or raw_score < 0.0 or raw_score > 1.0)
+                ):
+                    stats.confidence_score_coerced += 1
+
+                rel_label, was_known = _classify_relation(edge.get("relation"))
+                if not was_known:
+                    raw_rel = (edge.get("relation") or "").strip().lower() or "<empty>"
+                    stats.unknown_relation_labels[raw_rel] = (
+                        stats.unknown_relation_labels.get(raw_rel, 0) + 1
+                    )
+                    stats.relations_coerced += 1
+
+                # Threshold drop. Counted separately from "merge returned False"
+                # so the stats file can tell low-confidence from dedup-collision.
+                if score < min_confidence:
+                    stats.edges_dropped_low_confidence += 1
+                    skipped += 1
+                    continue
+
                 if _merge_edge(
                     G, label_idx, source, target,
-                    relation=edge.get("relation") or "references",
+                    relation=rel_label,
                     score=score,
                     confidence=edge.get("confidence") or "INFERRED",
                 ):
                     kept_edges.append({
                         "target_name": target,
-                        "relation": _normalize_relation(edge.get("relation")),
+                        "relation": rel_label,
                         "confidence": _normalize_confidence(edge.get("confidence")),
                         "confidence_score": score,
                     })
                     applied += 1
+                    stats.edges_accepted += 1
                 else:
                     skipped += 1
             # Hyperedges: archive but do NOT project into the graph yet.
@@ -863,11 +992,17 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
 
     archive_size = len(_read_archive(beacon_dir))
 
+    # Persist hallucination stats whether or not any edge was applied — a run
+    # that drops 100% of edges due to low confidence is exactly the case CI
+    # needs to flag, and that information lives only in the stats file.
+    write_semantic_stats(stats, beacon_dir)
+
     if applied == 0:
         return ApplyResult(
             applied=0, skipped=skipped,
             chunks_archived=chunks_archived,
             archive_size=archive_size,
+            stats=stats,
         )
 
     communities = cluster(G)
@@ -910,4 +1045,5 @@ def apply(beacon_dir: str | Path) -> ApplyResult:
         skipped=skipped,
         chunks_archived=chunks_archived,
         archive_size=archive_size,
+        stats=stats,
     )

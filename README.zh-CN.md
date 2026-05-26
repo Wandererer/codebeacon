@@ -27,6 +27,23 @@
 
 ---
 
+## 0.6.0 新功能
+
+- **`codebeacon affected`** — 接收变更文件列表（或通过 `--base <ref>` 读取 git diff），输出受影响的所有图节点。面向 CI 风险评分与 PR 审查。
+- **`.NET` 项目文件** — 现已解析 `.sln`、`.csproj`、`.fsproj`、`.vbproj`、`.razor`、`.cshtml`。`<ProjectReference>` / `<PackageReference>` 成为图的边；Razor 的 `@inherits` / `@inject` / `@using` 将 Blazor 页面与其后端类型链接。
+- **JS/TS barrel re-export** — `export { X } from './mod'` 与 `export * from './mod'` 会生成显式的 `re_exports` 边，Next.js / monorepo 的 barrel 不再被显示为 0 个 import。
+- **`--exclude PATTERN` 选项**（`scan` / `sync` 通用）+ 当 `.codebeaconignore` 不存在时自动回退读取 `.gitignore`。
+- **`codebeacon install --project [PATH]`** — 将 `/codebeacon` skill 安装到 `<PATH>/.claude/` 而不是 `~/.claude/`，便于团队按仓库锁定 SKILL.md 版本。
+- **wiki 自我修复** — `--update` 运行会自动删除 `wiki/<project>/{controllers,services,entities,components}/` 下对应图节点已经不存在的 `.md` 文件。
+- **明确删除时绕过 shrink-guard** — `--update` 模式下，若缓存已记录文件删除，更小的 `beacon.json` 写入不再被拒绝；针对 silent corruption 的守护仍然生效。
+- **跨文件声明 union 合并** — Swift `extension Foo`、C# partial class、Ruby reopened class 的 `fields` / `methods` 不再被最后一个写入覆盖，而是合并为唯一的规范节点。
+- **query 强化** — `BeaconIndex` 改用 `casefold()`，德语 `ß`、土耳其语 `i/İ`、希腊语 `σ/ς` 和 CJK 标签匹配均正确。
+- **更丰富的语义上下文** — 每个 task chunk 现在附带图的 caller / callee 作为 `neighbors`，让 LLM 紧贴真实节点标签。`SKILL.md` 新增 **Step 0 — Constrained query expansion**，明确禁止 `/codebeacon query` 流程发明 phantom token。
+- **`semantic-apply` zero-yield 守护** — 若所有 chunk 都以 0 边归档，CLI 以 exit 1 退出，便于 CI 捕获 LLM 的静默失败。
+- **ArkTS (`.ets`) 与 worktree 安全性** — 收集 `.ets`，跳过嵌套的 `worktrees/` 目录，避免 linked worktree 被重复索引。
+
+---
+
 ## 为什么选择 codebeacon？
 
 每次打开新的 AI 编码会话时，助手都从零开始。它不了解你的路由结构、服务层、实体模型，也不知道微服务之间的调用关系。每次会话都要花大量时间粘贴文件、解释结构、重建上下文。
@@ -94,8 +111,9 @@ codebeacon sync                      # 后续运行通过配置文件驱动
 | Ruby | Rails |
 | PHP | Laravel |
 | Rust | Actix-Web、Axum、Tauri、Rocket、Warp |
-| C# | ASP.NET Core |
+| C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`)；`.sln` / `.csproj` / `.fsproj` / `.vbproj` 解析 `ProjectReference` + `PackageReference` |
 | Swift | Vapor |
+| ArkTS | `.ets` (HarmonyOS) 收集 — extractor 与 framework 无关 |
 
 ---
 
@@ -273,12 +291,21 @@ codebeacon scan . --obsidian-dir <path>   # 将 Obsidian Vault 写入自定义�
 codebeacon scan . --semantic              # 启用结构化注释引用提取 (Javadoc/JSDoc/docstring)
 codebeacon scan . --list-only             # 仅检测框架，不提取
 codebeacon scan /workspace --deep-dive    # 各项目独立输出 + 工作区合并输出
+codebeacon scan . --exclude 'docs/**' --exclude '*.gen.ts'
+                                          # 可重复的 gitignore 风格模式
+                                          # 与 .codebeaconignore / .gitignore 合并
 
 # 配置驱动模式
 codebeacon init [path]                    # 自动生成 codebeacon.yaml
 codebeacon sync                           # 基于 codebeacon.yaml 运行(自动追加工作区中的新项目)
 codebeacon sync --config <file>           # 使用指定配置文件
 codebeacon sync --no-rediscover           # 不自动追加新项目(手动维护 yaml 模式)
+codebeacon sync --exclude PATTERN         # 同一选项,同一语义
+
+# PR / CI: 这个 diff 实际会影响什么?
+codebeacon affected --base main           # 沿上游 walk 变更文件的调用者
+codebeacon affected --base origin/main --head HEAD --depth 4 --limit 200
+codebeacon affected src/foo.py src/bar.py  # 显式路径 — 不依赖 git
 
 # 查询知识图谱
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # 通过标签子串搜索节点
@@ -303,7 +330,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
 
 # 集成
 codebeacon serve [--dir .codebeacon]      # 启动 MCP 服务器（stdio）
-codebeacon install                        # 安装 Claude Code 技能
+codebeacon install                        # 安装 Claude Code 技能 (user 作用域: ~/.claude/)
+codebeacon install --project [PATH]       # 安装到 <PATH>/.claude/ (团队共享、仓库锁定)
 codebeacon upgrade                        # pip 升级 + 刷新 ~/.claude/skills/codebeacon/SKILL.md
                                           # （editable 安装下用 `--force` 强制升级）
 ```

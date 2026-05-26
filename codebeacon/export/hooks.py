@@ -25,13 +25,36 @@ import sys
 from pathlib import Path
 
 
-_POST_COMMIT_HOOK = """#!/usr/bin/env bash
+_POST_COMMIT_HOOK = r"""#!/usr/bin/env bash
 # codebeacon: incremental rebuild after each commit.
 # Detaches so `git commit` returns immediately; output goes to the log below.
+#
+# Skip the rebuild when the commit didn't touch any source files — common
+# cases: docs-only commits, version bumps, and (importantly) the codebeacon
+# output dir itself. Without this guard a user who tracks `.codebeacon/` in
+# git triggers a rebuild on every commit, which rewrites `.codebeacon/` and
+# can feed itself indefinitely. Mirrors graphify #1018.
 LOG="${HOME}/.cache/codebeacon-rebuild.log"
 mkdir -p "$(dirname "$LOG")"
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$REPO_ROOT" || exit 0
+
+# Files touched by the new commit. Falls back to "everything staged" when
+# HEAD~1 doesn't exist (initial commit).
+CHANGED="$(git diff --name-only HEAD~1 HEAD 2>/dev/null \
+  || git diff --name-only --cached 2>/dev/null \
+  || true)"
+
+# Exit if no changed files OR if every changed file is under the codebeacon
+# output dir / non-source extension. Keep this list in sync with
+# scanner.CODE_EXTENSIONS.
+CODE_RE='\.(ts|tsx|js|jsx|mjs|cjs|py|go|vue|svelte|rb|java|kt|rs|php|swift|cs|razor|cshtml|sln|csproj|fsproj|vbproj|ex|exs|dart|scala|clj|hs|ets|graphql|gql|proto|sql)$'
+if [ -z "$CHANGED" ] || ! echo "$CHANGED" | grep -v '^\.codebeacon/' | grep -E "$CODE_RE" >/dev/null 2>&1; then
+  exit 0
+fi
+
 (
-  cd "$(git rev-parse --show-toplevel)"
   nohup codebeacon scan . --update >>"$LOG" 2>&1 &
 ) >/dev/null 2>&1 &
 disown 2>/dev/null || true
@@ -67,6 +90,11 @@ def _is_git_repo(repo: Path) -> bool:
             cwd=str(repo),
             capture_output=True,
             text=True,
+            # All git invocations pin UTF-8 + replace so non-ASCII repo
+            # paths / branch names don't blow up on Windows cp1252.
+            # Mirrors graphify #906.
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
@@ -113,19 +141,35 @@ def _install_post_commit(repo: Path) -> None:
 
 
 def _hooks_dir(repo: Path) -> Path:
-    """Return the hooks directory, honouring ``core.hooksPath``."""
+    """Return the hooks directory, honouring ``core.hooksPath``.
+
+    ``core.hooksPath`` may be:
+
+    * an absolute path (``/home/x/.husky``) — returned as-is,
+    * a tilde-prefixed path (``~/.husky``) — expanded against ``$HOME``,
+    * relative (``.husky``) — joined to the repo root.
+
+    Mirrors graphify #554: without the tilde expansion, installing the
+    hook into a Husky-managed repo writes the file at
+    ``<repo>/~/.husky/post-commit``, which git never executes.
+    """
     try:
         out = subprocess.run(
             ["git", "config", "--get", "core.hooksPath"],
             cwd=str(repo),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
         configured = out.stdout.strip()
         if configured:
-            return (repo / configured).resolve() if not Path(configured).is_absolute() else Path(configured)
+            # Expand ~ and ${VAR} so user-set hooks paths actually resolve.
+            expanded = os.path.expandvars(os.path.expanduser(configured))
+            p = Path(expanded)
+            return p.resolve() if p.is_absolute() else (repo / p).resolve()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     return repo / ".git" / "hooks"

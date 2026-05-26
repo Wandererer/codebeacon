@@ -39,11 +39,24 @@ from typing import Any, Optional
 
 
 class Cache:
-    """Manages SHA-256 based incremental file extraction cache."""
+    """Manages SHA-256 based incremental file extraction cache.
 
-    def __init__(self, output_dir: str) -> None:
+    Cache keys are stored *repo-relative* whenever ``project_root`` is
+    supplied at construction time. Without that, a developer who commits
+    ``.codebeacon/cache/cache.json`` ends up with a cache full of paths
+    like ``/Users/alice/proj/src/foo.py`` — every other contributor sees
+    100 % cache miss because their absolute paths differ. Mirrors
+    graphify #777.
+
+    Existing absolute-path caches are migrated transparently on
+    ``load()``: any key that lies inside ``project_root`` is rewritten
+    to its relative form before the first read.
+    """
+
+    def __init__(self, output_dir: str, *, project_root: str | Path | None = None) -> None:
         self._cache_dir = Path(output_dir) / "cache"
         self._cache_file = self._cache_dir / "cache.json"
+        self._root: Optional[Path] = Path(project_root).resolve() if project_root else None
         self._data: dict[str, dict] = {}
         self._dirty = False
         # Memoize hashes within a single run to avoid double-reading files
@@ -51,13 +64,45 @@ class Cache:
         # Memoize stat() results within a single run as well
         self._stat_memo: dict[str, tuple[int, int]] = {}
 
+    def _key(self, file_path: str) -> str:
+        """Map a (possibly absolute) ``file_path`` to its on-disk cache key.
+
+        Returns a repo-relative POSIX path when ``project_root`` is set
+        and the file lies inside it; otherwise the path is returned
+        verbatim (legacy / out-of-tree files keep their original keying).
+        """
+        if self._root is None:
+            return file_path
+        try:
+            rel = Path(file_path).resolve().relative_to(self._root)
+        except (ValueError, OSError):
+            return file_path
+        return rel.as_posix()
+
     def load(self) -> None:
-        """Load cache from disk. Safe to call even if the cache file doesn't exist."""
+        """Load cache from disk. Safe to call even if the cache file doesn't exist.
+
+        When ``project_root`` is set, any legacy absolute-path keys that
+        sit inside the project are rewritten to relative form. The first
+        save afterwards persists the migration.
+        """
         try:
             if self._cache_file.exists():
                 self._data = json.loads(self._cache_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             self._data = {}
+        if self._root is None or not self._data:
+            return
+        migrated: dict[str, dict] = {}
+        changed = False
+        for k, v in self._data.items():
+            new_key = self._key(k) if Path(k).is_absolute() else k
+            if new_key != k:
+                changed = True
+            migrated[new_key] = v
+        if changed:
+            self._data = migrated
+            self._dirty = True
 
     def save(self) -> None:
         """Persist cache to disk. No-op if nothing has changed."""
@@ -112,7 +157,7 @@ class Cache:
         full content hash so a true content change is detected, but a mtime-only
         bump (sync tools, ``touch``) is treated as unchanged.
         """
-        entry = self._data.get(file_path)
+        entry = self._data.get(self._key(file_path))
         if not entry:
             return False
         mtime_ns, size = self._file_stat(file_path)
@@ -122,7 +167,8 @@ class Cache:
 
     def get(self, file_path: str) -> Optional[dict]:
         """Return the cached extraction result dict, or None if stale/missing."""
-        entry = self._data.get(file_path)
+        key = self._key(file_path)
+        entry = self._data.get(key)
         if not entry:
             return None
         mtime_ns, size = self._file_stat(file_path)
@@ -154,7 +200,7 @@ class Cache:
                 result = {"_raw": str(result)}
 
         mtime_ns, size = self._file_stat(file_path)
-        self._data[file_path] = {
+        self._data[self._key(file_path)] = {
             "hash": h,
             "result": result,
             "ts": time.time(),
@@ -166,6 +212,11 @@ class Cache:
 
     def invalidate(self, file_path: str) -> None:
         """Remove a specific file's cache entry."""
+        key = self._key(file_path)
+        if key in self._data:
+            del self._data[key]
+            self._dirty = True
+        # Fall through to legacy absolute-key lookup for backwards compat
         if file_path in self._data:
             del self._data[file_path]
             self._dirty = True

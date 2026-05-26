@@ -137,3 +137,58 @@ class TestGenerateWiki:
             content = routes_files[0].read_text()
             # Should mention GET or /users
             assert "GET" in content or "/users" in content
+
+
+def _service_graph(*labels: str) -> nx.DiGraph:
+    """Tiny graph: one project, one service node per label."""
+    G = nx.DiGraph()
+    for lbl in labels:
+        G.add_node(
+            f"api::{lbl}",
+            label=lbl,
+            type="class",
+            project="api",
+            framework="fastapi",
+            source_file=f"/projects/api/{lbl}.py",
+            line=1,
+            methods=[],
+            dependencies=[],
+            annotations=[],
+            community=0,
+        )
+    return G
+
+
+class TestStaleArticlePrune:
+    """Mirrors graphify #9e6192a (stale wiki nodes).
+
+    `--update` rewrites the wiki under the same directory as a previous
+    run. Before 0.6.0, an article for a removed/renamed node lingered
+    forever because the writer only touched live nodes. The prune step
+    deletes per-node `.md` files whose graph node no longer exists.
+    """
+
+    def test_removed_service_article_is_deleted_on_rebuild(self, tmp_path):
+        # Round 1: Foo and Bar both exist → both articles written.
+        generate_wiki(_service_graph("Foo", "Bar"), {}, str(tmp_path))
+        services_dir = tmp_path / "wiki" / "api" / "services"
+        round1 = sorted(p.name for p in services_dir.glob("*.md"))
+        assert round1 == ["Bar.md", "Foo.md"]
+
+        # Round 2: Foo is gone (renamed / deleted) → its .md must be pruned.
+        generate_wiki(_service_graph("Bar"), {}, str(tmp_path))
+        round2 = sorted(p.name for p in services_dir.glob("*.md"))
+        assert round2 == ["Bar.md"], (
+            "Foo.md leaked across rebuilds — stale-article prune regressed"
+        )
+
+    def test_prune_only_touches_per_node_subdirs(self, tmp_path):
+        """Global files (index.md, overview.md, routes.md) are always
+        rewritten by the wiki layer, so the pruner must not delete them
+        even when no per-node article matches."""
+        generate_wiki(_service_graph("Foo"), {}, str(tmp_path))
+        # Rebuild with the same set so the prune step has nothing per-node
+        # to delete, then confirm globals are still present.
+        generate_wiki(_service_graph("Foo"), {}, str(tmp_path))
+        assert (tmp_path / "wiki" / "index.md").exists()
+        assert (tmp_path / "wiki" / "api" / "index.md").exists()

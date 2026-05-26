@@ -59,25 +59,49 @@ class IgnoreMatcher:
     def is_ignored(self, rel_path: str, is_dir: bool = False) -> bool:
         """Return True if ``rel_path`` is ignored.
 
-        Last-match-wins. A negation rule (``!pattern``) flips a prior ignore
-        back to "not ignored". Two ways a rule can fire for ``rel_path``:
+        Semantics (closer to gitignore than naive last-match-wins):
 
-        - it matches ``rel_path`` directly (respecting ``dir_only``), or
-        - it matches any ancestor directory of ``rel_path`` — gitignore's
-          implicit "everything beneath an ignored directory is ignored too"
-          semantics. Ancestors are always treated as directories, so
-          ``dir_only`` does not block the ancestor check.
+        - A *self* match — the rule's pattern matches ``rel_path`` directly —
+          can flip the verdict either way (positive ignores, ``!`` un-ignores).
+        - A *positive ancestor* match — the rule matches an ancestor directory
+          of ``rel_path`` — implicitly ignores the descendant (gitignore's
+          "everything under an ignored directory is ignored too" rule).
+        - A *negation* matching only via an ancestor does **not** re-include
+          the descendant. Mirrors gitignore's rule that a child cannot be
+          re-included once its parent is excluded, and prevents parent-level
+          negations from silently overriding explicit positive ignores at
+          deeper paths (see codesight #42 / 0bedd0d). To opt into recursive
+          re-inclusion, write an explicit ``!path/**`` rule that self-matches
+          the descendants you want back.
         """
         ancestors = _ancestor_dirs(rel_path)
         result = False
         for rule in self._rules:
-            # Match the path itself if dir_only allows it.
             self_match = _matches(rule, rel_path) and (not rule.dir_only or is_dir)
-            # Match any ancestor (always as a directory).
             anc_match = any(_matches(rule, anc) for anc in ancestors)
-            if self_match or anc_match:
+            if self_match:
                 result = not rule.negate
+            elif anc_match and not rule.negate:
+                # Positive ancestor match is sticky; descendants stay ignored.
+                # Negation-via-ancestor deliberately does nothing here.
+                result = True
         return result
+
+    def is_explicitly_included(self, rel_path: str, is_dir: bool = False) -> bool:
+        """Return True if the last *self*-matching rule for ``rel_path`` is a negation.
+
+        Used by the scanner to let users opt back into entries that the
+        default heuristics (hidden dirs, ``IGNORE_DIRS``) would otherwise
+        skip — e.g. ``!.source`` in ``.codebeaconignore`` re-includes the
+        ``.source`` directory itself. Ancestor matches are intentionally
+        ignored: a parent-level ``!.source`` must not silently re-include
+        nested dot-folders like ``.source/.vs``.
+        """
+        last: _Rule | None = None
+        for rule in self._rules:
+            if _matches(rule, rel_path) and (not rule.dir_only or is_dir):
+                last = rule
+        return last is not None and last.negate
 
 
 # ── Internals ────────────────────────────────────────────────────────────────
@@ -156,7 +180,12 @@ def _glob_match(pattern: str, path: str) -> bool:
     regex_parts: list[str] = []
     for i, part in enumerate(parts):
         if part == "**":
-            regex_parts.append(r"(?:.*/)?")
+            if i == len(parts) - 1:
+                # Trailing `**` matches one-or-more descendant segments. The
+                # preceding part already emitted a `/`, so consume the rest.
+                regex_parts.append(r".+")
+            else:
+                regex_parts.append(r"(?:.*/)?")
         else:
             seg = fnmatch.translate(part)
             # fnmatch.translate wraps with (?s:...) and trailing \Z. Strip them.

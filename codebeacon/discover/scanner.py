@@ -46,6 +46,10 @@ IGNORE_DIRS: set[str] = {
     ".bundle",          # Ruby bundler
     "public",           # usually static assets
     ".terraform",
+    # Linked git worktrees created with ``git worktree add ../foo`` may live
+    # inside the project root. Their files are duplicates of branches we are
+    # not analysing, so they double-count nodes and slow incremental rebuilds.
+    "worktrees",
     # Sensitive credential / secret directories — always skip even when they
     # don't start with `.` (so the hidden-dir rule below doesn't cover them).
     # Mirrors graphify's _SENSITIVE_DIRS hardening (graphify 0.8.12).
@@ -109,31 +113,50 @@ CODE_EXTENSIONS: set[str] = {
     ".rs",
     ".php",
     ".swift",
-    ".cs",
+    ".cs", ".razor", ".cshtml",
+    ".sln", ".csproj", ".fsproj", ".vbproj",
     ".ex", ".exs",
     ".dart",
     ".scala",
     ".clj",
     ".hs",
+    ".ets",
     ".graphql", ".gql",
     ".proto",
     ".sql",
 }
 
 
-def read_ignore_file(root: str | Path, filename: str = ".codebeaconignore") -> list[str]:
-    """Return the raw lines of ``.codebeaconignore`` (no filtering).
+def read_ignore_file(
+    root: str | Path,
+    filename: str = ".codebeaconignore",
+    *,
+    gitignore_fallback: bool = True,
+) -> list[str]:
+    """Return the raw lines of the project's ignore file (no filtering).
+
+    Looks for ``.codebeaconignore`` first; if absent and ``gitignore_fallback``
+    is True, falls back to the repo's ``.gitignore`` so users don't have to
+    duplicate already-curated patterns.
 
     Pattern parsing is delegated to :class:`codebeacon.discover.ignore.IgnoreMatcher`,
     which implements gitignore semantics (negation, dir-only, anchored, trailing
-    whitespace handling). Returning raw lines here keeps that responsibility in
-    one place.
+    whitespace handling).
     """
-    ignore_path = Path(root) / filename
+    root_path = Path(root)
+    primary = root_path / filename
     try:
-        return ignore_path.read_text(encoding="utf-8").splitlines()
+        return primary.read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):
-        return []
+        pass
+
+    if gitignore_fallback:
+        gi = root_path / ".gitignore"
+        try:
+            return gi.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            pass
+    return []
 
 
 def _should_ignore_dir(name: str) -> bool:
@@ -191,13 +214,20 @@ def _walk(
             continue
         rel = entry.relative_to(base).as_posix()
         if entry.is_dir():
-            if _should_ignore_dir(entry.name):
-                continue
-            # Skip the descent only when no negation rules could un-ignore a
-            # nested file. When `!pattern` exists, we must descend so that
-            # negated files inside ignored directories are still reachable.
-            if not has_negation and matcher.is_ignored(rel, is_dir=True):
-                continue
+            # `!pattern` in .codebeaconignore can opt a directory back in that
+            # the default skips (hidden dirs, IGNORE_DIRS) would otherwise drop.
+            # Only an explicit *self* match counts — a parent-level negation
+            # does not auto-re-include nested dot-folders (mirrors codesight
+            # #42 / 0bedd0d).
+            explicitly_included = matcher.is_explicitly_included(rel, is_dir=True)
+            if not explicitly_included:
+                if _should_ignore_dir(entry.name):
+                    continue
+                # Skip descent only when no negation rules could un-ignore a
+                # nested file. When `!pattern` exists, we must descend so that
+                # negated files inside ignored directories are still reachable.
+                if not has_negation and matcher.is_ignored(rel, is_dir=True):
+                    continue
             _walk(base, entry, depth + 1, max_depth, matcher, has_negation, result)
         elif entry.is_file():
             if entry.suffix not in CODE_EXTENSIONS:

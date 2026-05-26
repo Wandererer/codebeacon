@@ -12,9 +12,8 @@ all waves complete.
 from __future__ import annotations
 
 import concurrent.futures
-import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from codebeacon.common.types import (
     ComponentInfo,
@@ -25,6 +24,27 @@ from codebeacon.common.types import (
     ServiceInfo,
     UnresolvedRef,
 )
+
+
+@dataclass
+class ExtractionFailure:
+    """A single file that the wave pipeline failed to extract.
+
+    Promoted from a silent ``warnings.warn`` to a first-class result so that
+    callers (CLI, MCP, tests) can detect partial graphs deterministically.
+    """
+    file_path: str
+    framework: str
+    error: str
+    error_type: str  # exception class name, e.g. "UnicodeDecodeError"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "file_path": self.file_path,
+            "framework": self.framework,
+            "error": self.error,
+            "error_type": self.error_type,
+        }
 
 
 @dataclass
@@ -39,6 +59,15 @@ class WaveResult:
     unresolved: list[UnresolvedRef] = field(default_factory=list)
     file_count: int = 0
     skipped_count: int = 0   # cache hits
+    failures: list[ExtractionFailure] = field(default_factory=list)
+
+    @property
+    def failure_rate(self) -> float:
+        """Failure rate over attempted (non-cache-hit) files."""
+        attempted = self.file_count - self.skipped_count
+        if attempted <= 0:
+            return 0.0
+        return len(self.failures) / attempted
 
 
 # ── Single-file extraction ────────────────────────────────────────────────────
@@ -49,11 +78,14 @@ def _extract_file(
     project_path: str,
     cache=None,
     semantic: bool = False,
-) -> Optional[dict]:
+) -> Union[dict, ExtractionFailure]:
     """Run all extractors on a single file.
 
-    Returns a plain dict (JSON-serializable) or None on hard failure.
+    Returns either a result dict (JSON-serializable) or an ``ExtractionFailure``.
     The dict has a '_cache_hit' key if the result came from cache.
+    Callers must check ``isinstance(r, ExtractionFailure)`` to separate the
+    two paths — the function never returns None so partial graphs cannot be
+    masked by silent drops.
     """
     # Check cache before parsing
     if cache is not None:
@@ -96,8 +128,12 @@ def _extract_file(
         return result
 
     except Exception as exc:
-        warnings.warn(f"Extraction failed [{framework}] {file_path}: {exc}", stacklevel=2)
-        return None
+        return ExtractionFailure(
+            file_path=file_path,
+            framework=framework,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 # ── Main public function ──────────────────────────────────────────────────────
@@ -136,7 +172,8 @@ def auto_wave(
     for chunk in chunks:
         chunk_results = _process_chunk(chunk, project.framework, project.path, cache, max_parallel, semantic)
         for file_result in chunk_results:
-            if file_result is None:
+            if isinstance(file_result, ExtractionFailure):
+                wave_result.failures.append(file_result)
                 continue
             if file_result.get("_cache_hit"):
                 wave_result.skipped_count += 1
@@ -156,20 +193,27 @@ def _process_chunk(
     cache,
     max_workers: int,
     semantic: bool = False,
-) -> list[Optional[dict]]:
+) -> list[Union[dict, ExtractionFailure]]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_extract_file, fp, framework, project_path, cache, semantic): fp
             for fp in chunk
         }
-        results: list[Optional[dict]] = []
+        results: list[Union[dict, ExtractionFailure]] = []
         for future in concurrent.futures.as_completed(futures):
+            fp = futures[future]
             try:
                 results.append(future.result())
             except Exception as exc:
-                fp = futures[future]
-                warnings.warn(f"Chunk worker failed for {fp}: {exc}", stacklevel=2)
-                results.append(None)
+                # Thread worker itself crashed (e.g. interpreter-level error).
+                # Wrap as ExtractionFailure so it surfaces in the same channel
+                # as expected extractor errors instead of being lost.
+                results.append(ExtractionFailure(
+                    file_path=fp,
+                    framework=framework,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                ))
     return results
 
 

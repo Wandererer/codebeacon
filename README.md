@@ -25,6 +25,23 @@
 
 ---
 
+## What's new in 0.6.0
+
+- **`codebeacon affected`** — given a list of changed files (or a `--base <ref>` git diff), prints every graph node downstream of the change. Built for CI risk-scoring and PR review.
+- **`.NET` project files** — `.sln`, `.csproj`, `.fsproj`, `.vbproj`, `.razor`, `.cshtml` are now parsed: `<ProjectReference>` / `<PackageReference>` become graph edges, Razor `@inherits` / `@inject` / `@using` link Blazor pages to their backing types.
+- **JS/TS barrel re-exports** — `export { X } from './mod'` and `export * from './mod'` now produce explicit `re_exports` edges so Next.js / monorepo barrels stop showing zero imports.
+- **`--exclude PATTERN` flag** for `scan` / `sync`, plus automatic fallback to `.gitignore` when `.codebeaconignore` is absent.
+- **`codebeacon install --project [PATH]`** — install the `/codebeacon` skill into `<PATH>/.claude/` instead of `~/.claude/`, so teams can pin a SKILL.md version per repo.
+- **Wiki self-heals** — `--update` runs now prune `wiki/<project>/{controllers,services,entities,components}/*.md` files whose graph node no longer exists.
+- **Shrink-guard relaxed for explicit deletions** — `--update` mode no longer refuses to write a smaller `beacon.json` when the cache already accounted for deleted files; the guard still fires on silent corruption.
+- **Cross-file declaration merge** — Swift `extension Foo`, C# partial classes, Ruby reopened classes union their `fields` / `methods` into one canonical node instead of the last writer winning.
+- **Hardened query** — `BeaconIndex` uses `casefold()` so German `ß`, Turkish `i/İ`, Greek `σ/ς`, and CJK labels round-trip correctly.
+- **Richer semantic context** — each task chunk now ships graph callers + callees as `neighbors` so the LLM stays grounded in real node labels; `SKILL.md` adds **Step 0 — Constrained query expansion** so `/codebeacon query` flows can't invent phantom tokens.
+- **`semantic-apply` zero-yield guard** — if every chunk archived 0 edges, the CLI exits 1 so CI catches silent LLM failures.
+- **ArkTS (`.ets`) and worktree-safety** — `.ets` is collected; nested `worktrees/` dirs are skipped to stop double-counting linked worktrees.
+
+---
+
 ## Why codebeacon?
 
 Every time you open a new AI coding session, your assistant starts blind. It doesn't know your routes, your service layer, your entity model, or how your microservices call each other. You spend the first chunk of every session just getting the AI back up to speed — pasting files, explaining structure, re-establishing context.
@@ -92,8 +109,9 @@ codebeacon sync                      # subsequent runs via config
 | Ruby | Rails |
 | PHP | Laravel |
 | Rust | Actix-Web, Axum, Tauri, Rocket, Warp |
-| C# | ASP.NET Core |
+| C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`); `.sln` / `.csproj` / `.fsproj` / `.vbproj` parsed for `ProjectReference` + `PackageReference` |
 | Swift | Vapor |
+| ArkTS | `.ets` (HarmonyOS) collected — extractors framework-agnostic |
 
 ---
 
@@ -313,12 +331,21 @@ codebeacon scan . --obsidian-dir <path>   # write Obsidian vault to custom locat
 codebeacon scan . --semantic              # enable structured-comment semantic extraction (Javadoc/JSDoc/docstring refs)
 codebeacon scan . --list-only             # detect frameworks only, don't extract
 codebeacon scan /workspace --deep-dive    # per-project + combined workspace outputs
+codebeacon scan . --exclude 'docs/**' --exclude '*.gen.ts'
+                                          # repeatable gitignore-style patterns merged with
+                                          # .codebeaconignore / .gitignore
 
 # Config-driven mode
 codebeacon init [path]                    # auto-generate codebeacon.yaml
 codebeacon sync                           # run from codebeacon.yaml (auto-appends new workspace projects)
 codebeacon sync --config <file>           # use a specific config file
 codebeacon sync --no-rediscover           # don't auto-append newly added projects (hand-curated yaml mode)
+codebeacon sync --exclude PATTERN         # same flag, same semantics
+
+# PR / CI: what does this diff actually break?
+codebeacon affected --base main           # walk upstream callers of every changed file
+codebeacon affected --base origin/main --head HEAD --depth 4 --limit 200
+codebeacon affected src/foo.py src/bar.py  # explicit paths, no git needed
 
 # AI-semantic enrichment (the agent does the LLM work, codebeacon does the bookkeeping)
 codebeacon semantic-prepare [--dir .codebeacon] [--max-tasks N] [--chunk-size N]
@@ -347,7 +374,8 @@ codebeacon merge-driver <base> <cur> <other>  # invoked by git after `hook insta
 
 # Integrations
 codebeacon serve [--dir .codebeacon]      # start MCP server (stdio)
-codebeacon install                        # install Claude Code skill
+codebeacon install                        # install Claude Code skill (user scope: ~/.claude/)
+codebeacon install --project [PATH]       # install into <PATH>/.claude/ (team-shared, repo-pinned)
 codebeacon upgrade                        # pip install --upgrade + refresh ~/.claude/skills/codebeacon/SKILL.md
                                           # (`--force` to upgrade even when installed in editable mode)
 ```

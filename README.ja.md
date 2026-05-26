@@ -27,6 +27,23 @@
 
 ---
 
+## 0.6.0 の新機能
+
+- **`codebeacon affected`** — 変更されたファイル一覧（または `--base <ref>` で git diff）を受け取り、その影響範囲にあるグラフノードをすべて出力。CI のリスクスコアリングや PR レビュー向け。
+- **`.NET` プロジェクトファイル** — `.sln`, `.csproj`, `.fsproj`, `.vbproj`, `.razor`, `.cshtml` を解析。`<ProjectReference>` / `<PackageReference>` がグラフエッジとなり、Razor `@inherits` / `@inject` / `@using` が Blazor ページを背後の型に接続。
+- **JS/TS バレル re-export** — `export { X } from './mod'`, `export * from './mod'` が明示的な `re_exports` エッジを生成。Next.js / モノレポのバレルが import 0 と表示されなくなりました。
+- **`--exclude PATTERN` フラグ**（`scan` / `sync` 両方）+ `.codebeaconignore` がない場合は `.gitignore` を自動フォールバック。
+- **`codebeacon install --project [PATH]`** — `~/.claude/` ではなく `<PATH>/.claude/` に `/codebeacon` スキルをインストール。チームが SKILL.md のバージョンをリポジトリに固定できます。
+- **wiki の自動クリーンアップ** — `--update` 実行時、グラフに存在しなくなった `wiki/<project>/{controllers,services,entities,components}/*.md` を自動削除。
+- **明示的削除時は shrink-guard をバイパス** — `--update` モードでキャッシュが既に削除を反映している場合、より小さい `beacon.json` の書き込みを拒否しなくなりました。silent corruption へのガードは維持。
+- **Cross-file 宣言の union マージ** — Swift `extension Foo`, C# partial class, Ruby reopened class の `fields` / `methods` が最後の書き込みで上書きされず、単一の canonical ノードにマージされます。
+- **query の強化** — `BeaconIndex` が `casefold()` を使うので、ドイツ語 `ß`、トルコ語 `i/İ`、ギリシャ語 `σ/ς`、CJK ラベルのマッチが正しく動作。
+- **セマンティックコンテキストの強化** — 各タスクチャンクにグラフの caller / callee が `neighbors` として同梱され、LLM が実在ノードラベルから離れにくくなりました。`SKILL.md` に **Step 0 — Constrained query expansion** を追加し、`/codebeacon query` フローが phantom トークンを発明できないよう明示。
+- **`semantic-apply` zero-yield ガード** — すべてのチャンクが 0 エッジでアーカイブされた場合、CLI が exit 1 で終了し、CI が LLM のサイレント失敗を検出できます。
+- **ArkTS (`.ets`) と worktree 安全性** — `.ets` を収集、ネストされた `worktrees/` ディレクトリをスキップし、linked worktree の重複インデックスを防止。
+
+---
+
 ## なぜ codebeacon なのか
 
 AI コーディングセッションを新しく開くたびに、アシスタントは白紙の状態から始まります。ルート構造も、サービス層も、エンティティモデルも、マイクロサービス間の呼び出し関係も把握していません。毎回のセッションでファイルを貼り付け、構造を説明し、コンテキストを再設定するために多くの時間を費やすことになります。
@@ -94,8 +111,9 @@ codebeacon sync                      # 以降の実行は設定ファイルベ�
 | Ruby | Rails |
 | PHP | Laravel |
 | Rust | Actix-Web、Axum、Tauri、Rocket、Warp |
-| C# | ASP.NET Core |
+| C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`); `.sln` / `.csproj` / `.fsproj` / `.vbproj` から `ProjectReference` + `PackageReference` を解析 |
 | Swift | Vapor |
+| ArkTS | `.ets` (HarmonyOS) を収集 — extractor は framework-agnostic |
 
 ---
 
@@ -274,12 +292,21 @@ codebeacon scan . --obsidian-dir <path>   # Obsidian Vault をカスタム場所
 codebeacon scan . --semantic              # 構造化コメント参照（Javadoc/JSDoc/docstring）の抽出を有効化
 codebeacon scan . --list-only             # フレームワーク検出のみ、抽出なし
 codebeacon scan /workspace --deep-dive    # プロジェクト別 + 統合ワークスペース出力
+codebeacon scan . --exclude 'docs/**' --exclude '*.gen.ts'
+                                          # 繰り返し可能な gitignore スタイルパターン
+                                          # .codebeaconignore / .gitignore とマージ
 
 # 設定ベースモード
 codebeacon init [path]                    # codebeacon.yaml を自動生成
 codebeacon sync                           # codebeacon.yaml ベースで実行 (新規ワークスペースプロジェクトを自動追加)
 codebeacon sync --config <file>           # 特定の設定ファイルを使用
 codebeacon sync --no-rediscover           # 新規プロジェクトの自動追加を無効化 (手動キュレーションモード)
+codebeacon sync --exclude PATTERN         # 同じフラグ、同じ意味
+
+# PR / CI: この diff は実際に何を壊すのか?
+codebeacon affected --base main           # 変更ファイルの上流呼び出し元を walk
+codebeacon affected --base origin/main --head HEAD --depth 4 --limit 200
+codebeacon affected src/foo.py src/bar.py  # 明示パス — git なしでも動作
 
 # ナレッジグラフのクエリ
 codebeacon query <term> [--dir .codebeacon] [--limit N]   # ラベル部分文字列でノード検索
@@ -306,7 +333,8 @@ codebeacon semantic-apply   [--dir .codebeacon]
 
 # インテグレーション
 codebeacon serve [--dir .codebeacon]      # MCP サーバー起動 (stdio)
-codebeacon install                        # Claude Code スキルをインストール
+codebeacon install                        # Claude Code スキルをインストール (user スコープ: ~/.claude/)
+codebeacon install --project [PATH]       # <PATH>/.claude/ にインストール (チーム共有・リポジトリ固定)
 codebeacon upgrade                        # pip で更新 + ~/.claude/skills/codebeacon/SKILL.md を再生成
                                           # (`--force` で editable インストール時も強制実行)
 ```

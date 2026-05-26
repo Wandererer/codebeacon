@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 
 from codebeacon import __version__
+from codebeacon.pipeline import (
+    run_deep_dive_pipeline,
+    run_pipeline,
+)
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -83,481 +87,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 0
 
     if deep_dive:
-        return _run_deep_dive_pipeline(projects, output_dir, args)
-    return _run_pipeline(projects, output_dir, args)
-
-
-def _run_pipeline(projects, output_dir: str, args) -> int:
-    """Run the full extraction pipeline for a list of projects."""
-    from codebeacon.graph.analyze import analyze, report_to_markdown
-    import json
-    from pathlib import Path
-
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    wiki_only = getattr(args, "wiki_only", False)
-
-    if wiki_only:
-        # --wiki-only: skip extraction, load existing graph and regenerate outputs
-        beacon_path = output_path / "beacon.json"
-        if not beacon_path.exists():
-            print(
-                f"Error: {beacon_path} not found. Run a full scan first before using --wiki-only.",
-                file=sys.stderr,
-            )
-            return 1
-
-        from codebeacon.graph.write import load_beacon
-        G, meta = load_beacon(beacon_path)
-        print(f"  Loaded graph from {beacon_path}")
-        print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
-
-        # Reconstruct communities from node attributes set by a prior scan
-        communities: dict = {}
-        for node_id, node_data in G.nodes(data=True):
-            if "community" in node_data:
-                communities[node_id] = node_data["community"]
-        n_communities = len(set(communities.values())) if communities else 0
-
-        report = analyze(G, communities, {})
-        report.built_at_commit = meta.get("built_at_commit", "")
-        from codebeacon.common.safety import git_head
-        report.current_commit = git_head(output_path)
-    else:
-        from codebeacon.discover.scanner import collect_files
-        from codebeacon.cache import Cache
-        from codebeacon.wave import auto_wave
-        from codebeacon.graph.build import build_graph
-        from codebeacon.graph.enrich import (
-            enrich_http_api, enrich_shared_db, enrich_ipc_invoke,
-            promote_confirmed_calls,
-        )
-        from codebeacon.graph.cluster import cluster, apply_communities, score_all
-        from codebeacon.graph.write import write_beacon
-        from codebeacon.export.tree_html import write_tree_html
-        from codebeacon.export.callflow_html import write_callflow_html
-
-        # Always carry a cache so each scan populates it for the next run.
-        # `--update` controls whether we *load* the existing cache to skip
-        # unchanged files; a fresh scan starts with an empty in-memory cache
-        # (so every file is re-extracted from scratch) but still writes the
-        # cache out, so the next `--update` invocation has something to hit.
-        cache = Cache(output_dir)
-        if getattr(args, "update", False):
-            cache.load()
-
-        wave_results = []
-        for project in projects:
-            print(f"\n  Extracting {project.name} ({project.framework}) ...")
-            files = collect_files(project.path)
-            print(f"    {len(files)} source files found")
-
-            def progress(done, total, _name=project.name):
-                pct = int(done / total * 100) if total else 100
-                print(f"    [{pct:3d}%] {done}/{total} files processed", end="\r")
-
-            wave = auto_wave(
-                project=project,
-                files=files,
-                chunk_size=300,
-                max_parallel=5,
-                cache=cache,
-                progress_callback=progress,
-                semantic=getattr(args, "semantic", False),
-            )
-            print()  # newline after progress
-
-            stats = (
-                f"    Routes: {len(wave.routes)}, Services: {len(wave.services)}, "
-                f"Entities: {len(wave.entities)}, Components: {len(wave.components)}"
-            )
-            if wave.skipped_count:
-                stats += f" (cache hits: {wave.skipped_count})"
-            print(stats)
-            wave_results.append(wave)
-
-        cache.save()
-
-        print("\n  Building knowledge graph ...")
-        G = build_graph(wave_results)
-        print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
-
-        # Enrichment
-        api_edges = enrich_http_api(G)
-        db_edges = enrich_shared_db(G)
-        ipc_edges = enrich_ipc_invoke(G)
-        promoted = promote_confirmed_calls(G)
-        enriched_parts = []
-        if api_edges: enriched_parts.append(f"+{api_edges} calls_api")
-        if db_edges: enriched_parts.append(f"+{db_edges} shares_db_entity")
-        if ipc_edges: enriched_parts.append(f"+{ipc_edges} invokes_command")
-        if promoted: enriched_parts.append(f"{promoted} calls promoted to EXTRACTED")
-        if enriched_parts:
-            print(f"    Enriched: {', '.join(enriched_parts)}")
-
-        # Community detection
-        print("  Detecting communities ...")
-        communities = cluster(G)
-        apply_communities(G, communities)
-        cohesion = score_all(G, communities)
-        n_communities = len(set(communities.values())) if communities else 0
-        print(f"    {n_communities} communities detected")
-
-        # Persist beacon.json first; shrink/desync guard refuses to overwrite a
-        # larger prior graph and prevents the report from racing ahead of a
-        # half-written graph.
-        wr = write_beacon(G, output_path, repo_path=projects[0].path if projects else output_path)
-        if wr.skipped_shrink:
-            print(
-                "  Aborting outputs because the new graph is smaller than the existing one.",
-                file=sys.stderr,
-            )
-            return 1
-
-        # Analysis (after write, so the report can quote the stamped commit)
-        report = analyze(G, communities, cohesion, project_paths={p.name: p.path for p in projects})
-        report.built_at_commit = wr.built_at_commit
-        report.current_commit = wr.built_at_commit  # same run; not stale yet
-        report_path = output_path / "REPORT.md"
-        report_path.write_text(report_to_markdown(report), encoding="utf-8")
-
-        # Visual exports — best-effort, never block the pipeline.
-        try:
-            tree_path = write_tree_html(G, output_path)
-            print(f"    Wrote {tree_path.name}")
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: tree HTML failed: {exc}", file=sys.stderr)
-        try:
-            flow_path = write_callflow_html(G, output_path)
-            print(f"    Wrote {flow_path.name}")
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: callflow HTML failed: {exc}", file=sys.stderr)
-
-    # Wiki generation (always runs — whether full scan or --wiki-only)
-    print("  Generating wiki ...")
-    from codebeacon.wiki.generator import generate_wiki
-    generate_wiki(G, communities, output_dir)
-    print(f"    Wiki written to {output_dir}/wiki/")
-
-    # Obsidian vault generation
-    obsidian_dir = getattr(args, "obsidian_dir", None)
-    print("  Generating Obsidian vault ...")
-    from codebeacon.export.obsidian import generate_obsidian_vault
-    n_notes = generate_obsidian_vault(G, communities, output_dir, obsidian_dir=obsidian_dir)
-    print(f"    {n_notes} notes written to {obsidian_dir or output_dir + '/obsidian'}/")
-
-    # Context Map generation (CLAUDE.md / .cursorrules / AGENTS.md)
-    print("  Generating context map ...")
-    from codebeacon.contextmap.generator import generate_context_map
-    written = generate_context_map(
-        G=G,
-        output_dir=output_dir,
-        projects=projects,
-        obsidian_dir=obsidian_dir,
-    )
-    for path in written:
-        print(f"    {path}")
-
-    print(f"\n  Output: {output_dir}")
-    if wiki_only:
-        print(f"    wiki/, obsidian/, CLAUDE.md regenerated from existing graph")
-    else:
-        print(f"    beacon.json, REPORT.md, wiki/, obsidian/, CLAUDE.md written")
-    print(f"  Done. {report.node_count} nodes, {report.edge_count} edges, {n_communities} communities.")
-    return 0
-
-
-def _run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
-    """Run deep-dive pipeline: per-project outputs + combined workspace output.
-
-    Phase 1 — Extract each project with its own per-project cache.
-    Phase 2 — Build a per-project graph and write outputs under project/.codebeacon/.
-    Phase 3 — Build a combined workspace graph and write outputs under workspace/.codebeacon/.
-
-    Claude Code loads CLAUDE.md hierarchically, so opening a session in a sub-project
-    directory loads both the parent workspace overview AND the project-specific details.
-    """
-    import json
-    from pathlib import Path
-    from codebeacon.graph.analyze import analyze, report_to_markdown
-    from codebeacon.graph.build import build_graph
-    from codebeacon.graph.enrich import (
-        enrich_http_api, enrich_shared_db, enrich_ipc_invoke,
-        promote_confirmed_calls,
-    )
-    from codebeacon.graph.cluster import cluster, apply_communities, score_all
-    from codebeacon.graph.write import write_beacon, load_beacon
-    from codebeacon.wiki.generator import generate_wiki
-    from codebeacon.export.obsidian import generate_obsidian_vault
-    from codebeacon.export.tree_html import write_tree_html
-    from codebeacon.export.callflow_html import write_callflow_html
-    from codebeacon.contextmap.generator import generate_context_map
-    from codebeacon.common.safety import git_head
-    import networkx.readwrite.json_graph as nxjson
-
-    workspace_path = Path(workspace_output_dir)
-    wiki_only = getattr(args, "wiki_only", False)
-    obsidian_dir = getattr(args, "obsidian_dir", None)
-
-    if len(projects) <= 1:
-        print(
-            "Warning: --deep-dive with a single project produces identical per-project "
-            "and workspace outputs. Running standard pipeline instead.",
-            file=sys.stderr,
-        )
-        return _run_pipeline(projects, workspace_output_dir, args)
-
-    # ── Phase 1: Extract all projects ──────────────────────────────────────────
-    # project_waves tracks (project, wave_result) pairs explicitly so that index
-    # alignment never diverges even if one project's extraction is skipped.
-    project_waves: list[tuple] = []
-
-    if not wiki_only:
-        from codebeacon.discover.scanner import collect_files
-        from codebeacon.cache import Cache
-        from codebeacon.wave import auto_wave
-
-        for project in projects:
-            proj_output_dir = str(Path(project.path) / ".codebeacon")
-
-            # Same rule as the single-project pipeline: always create + save the
-            # cache so a fresh scan primes it for the next `--update`.
-            cache = Cache(proj_output_dir)
-            if getattr(args, "update", False):
-                cache.load()
-
-            print(f"\n  Extracting {project.name} ({project.framework}) ...")
-            files = collect_files(project.path)
-            print(f"    {len(files)} source files found")
-
-            def progress(done, total, _name=project.name):
-                pct = int(done / total * 100) if total else 100
-                print(f"    [{pct:3d}%] {done}/{total} files processed", end="\r")
-
-            wave = auto_wave(
-                project=project,
-                files=files,
-                chunk_size=300,
-                max_parallel=5,
-                cache=cache,
-                progress_callback=progress,
-                semantic=getattr(args, "semantic", False),
-            )
-            print()  # newline after progress
-
-            stats_str = (
-                f"    Routes: {len(wave.routes)}, Services: {len(wave.services)}, "
-                f"Entities: {len(wave.entities)}, Components: {len(wave.components)}"
-            )
-            if wave.skipped_count:
-                stats_str += f" (cache hits: {wave.skipped_count})"
-            print(stats_str)
-
-            cache.save()
-
-            project_waves.append((project, wave))
-
-    # ── Phase 2: Per-project graph + outputs ───────────────────────────────────
-    print("\n  Generating per-project outputs ...")
-
-    if wiki_only:
-        for project in projects:
-            proj_output_dir = str(Path(project.path) / ".codebeacon")
-            beacon_path = Path(proj_output_dir) / "beacon.json"
-            if not beacon_path.exists():
-                print(
-                    f"  Warning: {beacon_path} not found — skipping {project.name}.",
-                    file=sys.stderr,
-                )
-                continue
-
-            G, meta = load_beacon(beacon_path)
-            communities: dict = {}
-            for node_id, node_data in G.nodes(data=True):
-                if "community" in node_data:
-                    communities[node_id] = node_data["community"]
-            report = analyze(G, communities, {})
-            report.built_at_commit = meta.get("built_at_commit", "")
-            report.current_commit = git_head(project.path)
-            n_communities = len(set(communities.values())) if communities else 0
-
-            _write_project_artifact_outputs(
-                G, communities, project, proj_output_dir,
-            )
-    else:
-        for project, wave in project_waves:
-            proj_output_dir = str(Path(project.path) / ".codebeacon")
-            Path(proj_output_dir).mkdir(parents=True, exist_ok=True)
-
-            print(f"\n  Building graph for {project.name} ...")
-            G = build_graph([wave])
-            print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
-
-            api_edges = enrich_http_api(G)
-            db_edges = enrich_shared_db(G)
-            promoted = promote_confirmed_calls(G)
-            parts = []
-            if api_edges: parts.append(f"+{api_edges} calls_api")
-            if db_edges: parts.append(f"+{db_edges} shares_db_entity")
-            if promoted: parts.append(f"{promoted} calls promoted")
-            if parts:
-                print(f"    Enriched: {', '.join(parts)}")
-
-            communities = cluster(G)
-            apply_communities(G, communities)
-            cohesion = score_all(G, communities)
-            n_communities = len(set(communities.values())) if communities else 0
-            print(f"    {n_communities} communities")
-
-            wr = write_beacon(G, proj_output_dir, repo_path=project.path)
-            if wr.skipped_shrink:
-                print(
-                    f"    Warning: refused to shrink {project.name} graph; keeping prior beacon.json.",
-                    file=sys.stderr,
-                )
-
-            report = analyze(G, communities, cohesion, project_paths={project.name: project.path})
-            report.built_at_commit = wr.built_at_commit
-            report.current_commit = wr.built_at_commit
-            (Path(proj_output_dir) / "REPORT.md").write_text(
-                report_to_markdown(report), encoding="utf-8"
-            )
-
-            try:
-                write_tree_html(G, proj_output_dir)
-                write_callflow_html(G, proj_output_dir)
-            except (OSError, ValueError) as exc:
-                print(f"    Warning: HTML export failed for {project.name}: {exc}", file=sys.stderr)
-
-            _write_project_artifact_outputs(
-                G, communities, project, proj_output_dir,
-            )
-
-    # ── Phase 3: Combined workspace graph + outputs ────────────────────────────
-    print("\n  Building combined workspace graph ...")
-    workspace_path.mkdir(parents=True, exist_ok=True)
-
-    if wiki_only:
-        beacon_path = workspace_path / "beacon.json"
-        if not beacon_path.exists():
-            print(
-                f"  Error: {beacon_path} not found. Run a full scan first before using --wiki-only.",
-                file=sys.stderr,
-            )
-            return 1
-        G_all, meta_all = load_beacon(beacon_path)
-        print(f"  Loaded combined graph from {beacon_path}")
-        print(f"    Nodes: {G_all.number_of_nodes()}, Edges: {G_all.number_of_edges()}")
-        communities_all: dict = {}
-        for node_id, node_data in G_all.nodes(data=True):
-            if "community" in node_data:
-                communities_all[node_id] = node_data["community"]
-        n_communities_all = len(set(communities_all.values())) if communities_all else 0
-        report_all = analyze(G_all, communities_all, {})
-        report_all.built_at_commit = meta_all.get("built_at_commit", "")
-        report_all.current_commit = git_head(workspace_output_dir)
-    else:
-        all_waves = [w for _, w in project_waves]
-        G_all = build_graph(all_waves)
-        print(f"    Nodes: {G_all.number_of_nodes()}, Edges: {G_all.number_of_edges()}")
-
-        api_edges = enrich_http_api(G_all)
-        db_edges = enrich_shared_db(G_all)
-        promoted = promote_confirmed_calls(G_all)
-        parts = []
-        if api_edges: parts.append(f"+{api_edges} calls_api")
-        if db_edges: parts.append(f"+{db_edges} shares_db_entity")
-        if promoted: parts.append(f"{promoted} calls promoted")
-        if parts:
-            print(f"    Enriched: {', '.join(parts)}")
-
-        print("  Detecting communities ...")
-        communities_all = cluster(G_all)
-        apply_communities(G_all, communities_all)
-        cohesion_all = score_all(G_all, communities_all)
-        n_communities_all = len(set(communities_all.values())) if communities_all else 0
-        print(f"    {n_communities_all} communities detected")
-
-        wr_all = write_beacon(G_all, workspace_path, repo_path=workspace_output_dir)
-        if wr_all.skipped_shrink:
-            print(
-                "  Aborting workspace outputs because the combined graph is smaller than the existing one.",
-                file=sys.stderr,
-            )
-            return 1
-
-        report_all = analyze(G_all, communities_all, cohesion_all, project_paths={p.name: p.path for p in projects})
-        report_all.built_at_commit = wr_all.built_at_commit
-        report_all.current_commit = wr_all.built_at_commit
-        (workspace_path / "REPORT.md").write_text(
-            report_to_markdown(report_all), encoding="utf-8"
-        )
-
-        try:
-            write_tree_html(G_all, workspace_path)
-            write_callflow_html(G_all, workspace_path)
-        except (OSError, ValueError) as exc:
-            print(f"    Warning: workspace HTML export failed: {exc}", file=sys.stderr)
-
-    print("  Generating combined wiki ...")
-    generate_wiki(G_all, communities_all, workspace_output_dir)
-    print(f"    Wiki written to {workspace_output_dir}/wiki/")
-
-    print("  Generating combined Obsidian vault ...")
-    n_notes = generate_obsidian_vault(
-        G_all, communities_all, workspace_output_dir, obsidian_dir=obsidian_dir
-    )
-    print(f"    {n_notes} notes written to {obsidian_dir or workspace_output_dir + '/obsidian'}/")
-
-    print("  Generating combined context map ...")
-    written = generate_context_map(
-        G=G_all,
-        output_dir=workspace_output_dir,
-        projects=projects,
-        obsidian_dir=obsidian_dir,
-    )
-    for path in written:
-        print(f"    {path}")
-
-    print(f"\n  Output: {workspace_output_dir}")
-    if wiki_only:
-        print(f"    Combined wiki/, obsidian/, CLAUDE.md regenerated from existing graphs.")
-        print(f"    Per-project wiki/, obsidian/, CLAUDE.md also regenerated.")
-    else:
-        print(f"    beacon.json, REPORT.md, wiki/, obsidian/, CLAUDE.md written (workspace + per-project).")
-    print(
-        f"  Done. {report_all.node_count} nodes, {report_all.edge_count} edges, "
-        f"{n_communities_all} communities (combined workspace)."
-    )
-    return 0
-
-
-def _write_project_artifact_outputs(G, communities, project, proj_output_dir: str) -> None:
-    """Write wiki, obsidian, and context map for a single project's output directory.
-
-    Per-project obsidian always lands inside proj_output_dir/obsidian/ (no custom path),
-    keeping each project self-contained under its own .codebeacon/ directory.
-    """
-    from codebeacon.wiki.generator import generate_wiki
-    from codebeacon.export.obsidian import generate_obsidian_vault
-    from codebeacon.contextmap.generator import generate_context_map
-
-    print(f"  [{project.name}] Generating wiki ...")
-    generate_wiki(G, communities, proj_output_dir)
-
-    print(f"  [{project.name}] Generating Obsidian vault ...")
-    generate_obsidian_vault(G, communities, proj_output_dir, obsidian_dir=None)
-
-    print(f"  [{project.name}] Generating context map ...")
-    written = generate_context_map(
-        G=G,
-        output_dir=proj_output_dir,
-        projects=[project],
-        obsidian_dir=None,
-    )
-    for path in written:
-        print(f"    {path}")
+        return run_deep_dive_pipeline(projects, output_dir, args)
+    return run_pipeline(projects, output_dir, args)
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
@@ -626,8 +157,8 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 
     deep_dive = config.deep_dive or getattr(args, "deep_dive", False)
     if deep_dive:
-        return _run_deep_dive_pipeline(projects_info, output_dir, args)
-    return _run_pipeline(projects_info, output_dir, args)
+        return run_deep_dive_pipeline(projects_info, output_dir, args)
+    return run_pipeline(projects_info, output_dir, args)
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -764,10 +295,23 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(f"Error: SKILL.md not found at {skill_src}", file=sys.stderr)
         return 1
 
-    claude_dir = Path.home() / ".claude"
-    skills_dir = claude_dir / "skills" / "codebeacon"
+    # Project scope: ``codebeacon install --project [PATH]`` writes into
+    # ``<PATH>/.claude/`` so teams can pin a SKILL.md version per repo
+    # instead of mutating every collaborator's ~/.claude. Mirrors graphify
+    # #b347492.
+    project = getattr(args, "project", None)
+    if project is not None:
+        scope_root = Path(project or ".").resolve() / ".claude"
+        trigger_path_label = ".claude/skills/codebeacon/SKILL.md"
+        scope_kind = "project"
+    else:
+        scope_root = Path.home() / ".claude"
+        trigger_path_label = "~/.claude/skills/codebeacon/SKILL.md"
+        scope_kind = "user"
+
+    skills_dir = scope_root / "skills" / "codebeacon"
     skill_dest = skills_dir / "SKILL.md"
-    claude_md = claude_dir / "CLAUDE.md"
+    claude_md = scope_root / "CLAUDE.md"
 
     skills_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(skill_src, skill_dest)
@@ -775,8 +319,10 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     trigger_block = (
         "\n# codebeacon\n"
-        "- **codebeacon** (`~/.claude/skills/codebeacon/SKILL.md`) - scan source code → knowledge graph + wiki. Trigger: `/codebeacon`\n"
-        "When the user types `/codebeacon`, invoke the Skill tool with `skill: \"codebeacon\"` before doing anything else.\n"
+        f"- **codebeacon** (`{trigger_path_label}`) - scan source code "
+        "→ knowledge graph + wiki. Trigger: `/codebeacon`\n"
+        'When the user types `/codebeacon`, invoke the Skill tool with '
+        '`skill: "codebeacon"` before doing anything else.\n'
     )
     existing = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
     if "# codebeacon" in existing:
@@ -786,7 +332,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         claude_md.write_text(existing + separator + trigger_block, encoding="utf-8")
         print(f"  Added codebeacon trigger to {claude_md}")
 
-    print("\ncodebeacon skill installed.")
+    print(f"\ncodebeacon skill installed ({scope_kind} scope).")
     print("Start a new Claude Code session and type /codebeacon to use it.")
     return 0
 
@@ -867,12 +413,65 @@ def _cmd_semantic_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_affected(args: argparse.Namespace) -> int:
+    """``codebeacon affected`` — list graph nodes downstream of a diff."""
+    from codebeacon.affected import affected_from_paths, git_changed_files
+
+    beacon_dir = Path(getattr(args, "dir", ".codebeacon"))
+    if not beacon_dir.is_absolute():
+        beacon_dir = Path.cwd() / beacon_dir
+
+    paths = list(getattr(args, "paths", []) or [])
+    base = getattr(args, "base", None)
+    if base:
+        head = getattr(args, "head", "HEAD") or "HEAD"
+        paths.extend(git_changed_files(base, head))
+
+    if not paths:
+        print(
+            "Error: no changed paths supplied. Pass file paths positionally or "
+            "use --base <ref> [--head <ref>] to derive them from git.",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_format = (getattr(args, "as_format", None) or "markdown").lower()
+    try:
+        result = affected_from_paths(
+            beacon_dir,
+            paths,
+            depth=int(getattr(args, "depth", 3)),
+            limit=int(getattr(args, "limit", 100)),
+            include_wiki_paths=(output_format == "wiki"),
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if output_format == "wiki":
+        # The output is intentionally machine-readable: one wiki path per
+        # line, no banner, no markdown — pipe directly into ``cat`` or
+        # feed to an agent prompt without parsing. Empty stdout (no wiki
+        # paths) means "no affected article" — exit 0 still, the diff
+        # itself is informative.
+        rendered = result.as_wiki_paths(base=str(beacon_dir / "wiki"))
+        if rendered:
+            print(rendered)
+        return 0
+
+    print(result.as_markdown())
+    return 0
+
+
 def _cmd_semantic_apply(args: argparse.Namespace) -> int:
-    from codebeacon.semantic_pipeline import apply
+    from codebeacon.semantic_pipeline import DEFAULT_MIN_CONFIDENCE_SCORE, apply
 
     beacon_dir = Path(args.dir).resolve()
+    min_conf = getattr(args, "min_confidence", None)
+    if min_conf is None:
+        min_conf = DEFAULT_MIN_CONFIDENCE_SCORE
     try:
-        result = apply(beacon_dir)
+        result = apply(beacon_dir, min_confidence=min_conf)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -881,6 +480,37 @@ def _cmd_semantic_apply(args: argparse.Namespace) -> int:
         f"skipped {result.skipped}; archived {result.chunks_archived} chunk(s); "
         f"archive size: {result.archive_size}"
     )
+
+    # Surface hallucination/coercion stats so a regression in the LLM step
+    # is visible without diffing beacon.json. The full breakdown lives in
+    # .codebeacon/semantic-stats.json.
+    stats = result.stats
+    if stats is not None and stats.edges_total:
+        drop_pct = (stats.edges_dropped_low_confidence / stats.edges_total) * 100
+        coerce_pct = (stats.relations_coerced / stats.edges_total) * 100
+        print(
+            f"  edges seen: {stats.edges_total} | "
+            f"low-confidence dropped: {stats.edges_dropped_low_confidence} ({drop_pct:.1f}%) | "
+            f"unknown relations coerced: {stats.relations_coerced} ({coerce_pct:.1f}%) | "
+            f"min_confidence={min_conf}"
+        )
+        if stats.unknown_relation_labels:
+            top = sorted(stats.unknown_relation_labels.items(), key=lambda kv: -kv[1])[:5]
+            top_str = ", ".join(f"{k}={v}" for k, v in top)
+            print(f"  top unknown labels: {top_str}")
+    # Zero-yield guard: if the agent processed at least one chunk but produced
+    # zero usable edges, the LLM step almost certainly silently failed (bad
+    # JSON, empty completions, wrong schema). CI relies on the exit code to
+    # catch this — printing a friendly message and returning 0 would hide it.
+    # Mirrors graphify #3238b32.
+    if result.chunks_archived > 0 and result.applied == 0:
+        print(
+            "semantic-apply: every chunk archived 0 edges. The skill output "
+            "is likely malformed (bad JSON, empty completions, or wrong "
+            "schema). Inspect semantic/results/*.jsonl before re-running.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -913,6 +543,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="When auto-switching to sync mode, do NOT scan the workspace for newly added projects",
     )
+    scan_p.add_argument(
+        "--exclude",
+        metavar="PATTERN",
+        action="append",
+        default=[],
+        help="Extra gitignore-style pattern to skip (repeatable). Merged with .codebeaconignore/.gitignore.",
+    )
+    scan_p.add_argument(
+        "--max-failure-rate", type=float, default=None,
+        metavar="RATE",
+        help="Fail (non-zero exit) when extraction failure rate exceeds RATE (0.0-1.0). Default 0.01 = 1%%.",
+    )
     scan_p.set_defaults(func=_cmd_scan)
 
     # sync
@@ -929,6 +571,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-rediscover",
         action="store_true",
         help="Skip scanning the workspace for newly added projects",
+    )
+    sync_p.add_argument(
+        "--exclude",
+        metavar="PATTERN",
+        action="append",
+        default=[],
+        help="Extra gitignore-style pattern to skip (repeatable). Merged with .codebeaconignore/.gitignore.",
+    )
+    sync_p.add_argument(
+        "--max-failure-rate", type=float, default=None,
+        metavar="RATE",
+        help="Fail (non-zero exit) when extraction failure rate exceeds RATE (0.0-1.0). Default 0.01 = 1%%.",
     )
     sync_p.set_defaults(func=_cmd_sync)
 
@@ -965,6 +619,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # install (Claude Code skill)
     install_p = sub.add_parser("install", help="Install Claude Code skill")
+    install_p.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="PATH",
+        help="Install into <PATH>/.claude/ instead of ~/.claude/ (default: cwd)",
+    )
     install_p.set_defaults(func=_cmd_install)
 
     # upgrade (pip upgrade + refresh skill)
@@ -1006,7 +668,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--dir", metavar="DIR", default=".codebeacon",
         help="Path to .codebeacon output directory (default: .codebeacon)",
     )
+    sem_apply.add_argument(
+        "--min-confidence", type=float, default=None,
+        metavar="SCORE",
+        help="Drop LLM edges with confidence_score below this threshold (0.0-1.0). Default: 0.5.",
+    )
     sem_apply.set_defaults(func=_cmd_semantic_apply)
+
+    # affected — graph blast radius for a set of changed files / a git diff
+    aff_p = sub.add_parser(
+        "affected",
+        help="List graph nodes affected by changed files or a git diff",
+    )
+    aff_p.add_argument("paths", nargs="*", metavar="PATH", help="Changed file paths")
+    aff_p.add_argument(
+        "--base", metavar="REF",
+        help="Git ref to diff against (e.g. main, origin/main, HEAD~5)",
+    )
+    aff_p.add_argument(
+        "--head", metavar="REF", default="HEAD",
+        help="Git ref for the new side of the diff (default: HEAD)",
+    )
+    aff_p.add_argument(
+        "--depth", type=int, default=3,
+        help="Max upstream hops to walk (default 3)",
+    )
+    aff_p.add_argument(
+        "--limit", type=int, default=100,
+        help="Max nodes to print (default 100)",
+    )
+    aff_p.add_argument(
+        "--dir", metavar="DIR", default=".codebeacon",
+        help="Path to .codebeacon output directory (default: .codebeacon)",
+    )
+    aff_p.add_argument(
+        "--as", dest="as_format", metavar="FORMAT",
+        choices=["markdown", "wiki"], default="markdown",
+        help="Output format: 'markdown' (default, human-readable) or 'wiki' (one wiki article path per line).",
+    )
+    aff_p.set_defaults(func=_cmd_affected)
 
     # merge-driver (git plumbing — invoked by git, not directly by humans)
     md_p = sub.add_parser(
@@ -1048,7 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
 # be auto-dispatched to ``scan``. Keep this in sync with ``build_parser()``.
 _KNOWN_SUBCOMMANDS: set[str] = {
     "scan", "sync", "init", "query", "path", "serve", "install", "upgrade",
-    "semantic-prepare", "semantic-apply", "merge-driver", "hook", "knowledge",
+    "semantic-prepare", "semantic-apply", "affected", "merge-driver",
+    "hook", "knowledge",
 }
 
 

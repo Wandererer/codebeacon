@@ -30,6 +30,19 @@ Scan source code with AST analysis → build a knowledge graph → generate a na
 
 If no path was given, use `.` (current directory). Do not ask the user for a path.
 
+## Step 0 — Constrained query expansion (for `/codebeacon query` flows)
+
+When the user's question doesn't literally match graph labels (e.g. they ask in Korean about a Java codebase, or use a synonym), do NOT invent extra search terms from memory. Phantom expansion ("auth" → `{passport, sso, saml, oauth, jwt, scim, …}`) returns ungrounded results.
+
+Instead, before running `codebeacon query`:
+
+1. Read `.codebeacon/beacon.json` and collect every node `label` into a vocabulary set. Split CamelCase / snake_case into their parts; keep tokens of length ≥ 2.
+2. From the user's question, pick **only** tokens that already exist in that vocabulary (case-insensitive, casefold). You are explicitly forbidden from adding tokens that are not in the vocab, even if you "know" they are related to the topic.
+3. If the intersection is empty, tell the user the corpus has no matching vocabulary instead of fabricating a query. Quote a few sample labels from the graph so they can refine.
+4. Run `codebeacon query <token>` once per surviving token and merge results.
+
+This keeps query expansion grounded in what the graph actually contains, gives an honest negative signal when the corpus doesn't cover a topic, and is auditable — print the chosen tokens to the user before searching. Mirrors graphify's "constrained query expansion" pattern.
+
 ## What You Must Do When Invoked
 
 Follow the steps in order. Do not skip Step 4 unless `--no-semantic` is set or the user explicitly asked for `--wiki-only`.

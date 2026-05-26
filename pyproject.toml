@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.5.0"
+version = "0.6.0"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,11 +25,60 @@ dependencies = [
     "pyyaml>=6.0",
     "networkx>=3.0",
     "tree-sitter>=0.23",
-    "tree-sitter-java>=0.23",
-    "tree-sitter-kotlin>=0.23",
+    # Default grammars cover the most common mixed-team stack
+    # (Python + JS/TS). Other languages live in extras — see below.
+    # Rationale: pre-0.7.0 the default install pulled all 14 grammars
+    # (~150MB) even for users who only scanned a Python repo.
     "tree-sitter-python>=0.23",
     "tree-sitter-javascript>=0.23",
     "tree-sitter-typescript>=0.23",
+]
+
+[project.scripts]
+codebeacon = "codebeacon.cli:main"
+
+[project.optional-dependencies]
+# ── Per-language grammars (slug matches codebeacon.extract.base._pip_extra) ──
+java    = ["tree-sitter-java>=0.23"]
+kotlin  = ["tree-sitter-kotlin>=0.23"]
+go      = ["tree-sitter-go>=0.23"]
+ruby    = ["tree-sitter-ruby>=0.23"]
+php     = ["tree-sitter-php>=0.23"]
+csharp  = ["tree-sitter-c-sharp>=0.23"]
+rust    = ["tree-sitter-rust>=0.23"]
+swift   = ["tree-sitter-swift>=0.0.1"]
+html    = ["tree-sitter-html>=0.23"]
+svelte  = ["tree-sitter-svelte>=0.23"]
+
+# ── Stack bundles ────────────────────────────────────────────────────────────
+# Pick the one that matches your team's primary stack. Default install
+# already covers Python + JS/TS; bundles fill in the gaps without forcing
+# every extra grammar onto every install.
+web     = [
+    "tree-sitter-html>=0.23",
+    "tree-sitter-svelte>=0.23",
+]
+jvm     = [
+    "tree-sitter-java>=0.23",
+    "tree-sitter-kotlin>=0.23",
+]
+mobile  = [
+    "tree-sitter-kotlin>=0.23",
+    "tree-sitter-swift>=0.0.1",
+]
+dotnet  = ["tree-sitter-c-sharp>=0.23"]
+backend = [
+    "tree-sitter-java>=0.23",
+    "tree-sitter-kotlin>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-ruby>=0.23",
+    "tree-sitter-php>=0.23",
+    "tree-sitter-c-sharp>=0.23",
+    "tree-sitter-rust>=0.23",
+]
+full    = [
+    "tree-sitter-java>=0.23",
+    "tree-sitter-kotlin>=0.23",
     "tree-sitter-go>=0.23",
     "tree-sitter-ruby>=0.23",
     "tree-sitter-php>=0.23",
@@ -40,14 +89,22 @@ dependencies = [
     "tree-sitter-svelte>=0.23",
 ]
 
-[project.scripts]
-codebeacon = "codebeacon.cli:main"
-
-[project.optional-dependencies]
 cluster = ["graspologic>=1.0"]
 dev     = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    # Dev installs pull `[full]` so the test suite can exercise every
+    # extractor without needing a separate "pip install codebeacon[full]".
+    "tree-sitter-java>=0.23",
+    "tree-sitter-kotlin>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-ruby>=0.23",
+    "tree-sitter-php>=0.23",
+    "tree-sitter-c-sharp>=0.23",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-swift>=0.0.1",
+    "tree-sitter-html>=0.23",
+    "tree-sitter-svelte>=0.23",
 ]
 
 [project.urls]

@@ -49,10 +49,25 @@ def build_graph(
     all_unresolved: list[UnresolvedRef] = []
     # node_id → project name, used by cross-service filter
     service_roots: dict[str, str] = {}
+    # raw_id → first source_file that claimed it. Used to disambiguate
+    # same-name-different-directory collisions (graphify #952 / #949).
+    # Shared across all waves so a name colliding between projects still
+    # produces stable distinct ids.
+    claimed_ids: dict[str, str] = {}
 
     for wave in wave_results:
         project_name = wave.project.name
-        _ingest_wave(wave, project_name, all_nodes, all_edges, all_unresolved, service_roots)
+        _ingest_wave(
+            wave, project_name, all_nodes, all_edges, all_unresolved,
+            service_roots, claimed_ids,
+        )
+
+    # Cross-file declaration merge. When the same symbol appears in multiple
+    # files (Swift `extension Foo`, C# partial classes, Ruby reopened classes),
+    # the per-file extractor emits one Node per file. NetworkX collapses them
+    # by id but the LAST attrs win, losing fields/methods declared in sibling
+    # files. Union them deterministically. Mirrors graphify #406bea4.
+    all_nodes = _merge_cross_file_decls(all_nodes)
 
     # Remap import edges: file_path → raw_import  ➜  node_id → node_id
     all_edges = _remap_import_edges(all_nodes, all_edges)
@@ -86,10 +101,12 @@ def _ingest_wave(
     all_edges: list[Edge],
     all_unresolved: list[UnresolvedRef],
     service_roots: dict[str, str],
+    claimed_ids: dict[str, str],
 ) -> None:
     """Convert one WaveResult's extraction data into Node/Edge/UnresolvedRef objects."""
 
-    # Routes → route nodes
+    # Routes → route nodes (method+path already make the id unique; no
+    # disambiguation needed)
     for route in wave.routes:
         node_id = f"{project_name}::{route.handler}::route::{route.method}::{route.path}"
         node = Node(
@@ -112,10 +129,12 @@ def _ingest_wave(
 
     # Services → class nodes + unresolved DI refs
     for svc in wave.services:
-        node_id = f"{project_name}::{svc.class_name}"
+        node_id, label = _disambiguate_decl(
+            project_name, svc.class_name, svc.source_file, claimed_ids,
+        )
         node = Node(
             id=node_id,
-            label=svc.class_name,
+            label=label,
             type="class",
             source_file=svc.source_file,
             line=svc.line,
@@ -141,10 +160,12 @@ def _ingest_wave(
 
     # Entities → entity nodes
     for ent in wave.entities:
-        node_id = f"{project_name}::{ent.name}"
+        node_id, label = _disambiguate_decl(
+            project_name, ent.name, ent.source_file, claimed_ids,
+        )
         node = Node(
             id=node_id,
-            label=ent.name,
+            label=label,
             type="entity",
             source_file=ent.source_file,
             line=ent.line,
@@ -161,10 +182,12 @@ def _ingest_wave(
 
     # Components → component nodes
     for comp in wave.components:
-        node_id = f"{project_name}::{comp.name}"
+        node_id, label = _disambiguate_decl(
+            project_name, comp.name, comp.source_file, claimed_ids,
+        )
         node = Node(
             id=node_id,
-            label=comp.name,
+            label=label,
             type="component",
             source_file=comp.source_file,
             line=comp.line,
@@ -186,6 +209,106 @@ def _ingest_wave(
     all_unresolved.extend(wave.unresolved)
 
 
+def _disambiguate_decl(
+    project_name: str,
+    name: str,
+    source_file: str,
+    claimed: dict[str, str],
+) -> tuple[str, str]:
+    """Return ``(node_id, label)`` for a declaration, disambiguating same-name
+    collisions across different directories.
+
+    Mirrors graphify #952 / #949: before this guard, ``auth/User.py`` and
+    ``admin/User.py`` both produced ``project::User`` so NetworkX silently
+    collapsed them into a single node — and the 0.6.0 cross-file merge
+    then union-merged their unrelated methods and fields.
+
+    Rule:
+      * first declaration claims ``project::Name`` and keeps the bare label.
+      * a second declaration in the **same directory** is allowed to share
+        the id — this is the genuine cross-file declaration case (Swift
+        ``extension Foo``, C# ``partial class``, Ruby reopened classes).
+        The merge step will union their list-valued metadata.
+      * a declaration in a **different directory** gets a directory-hinted
+        id (``project::auth/User``) and a label suffixed with the parent
+        dir (``"User (auth)"``) so the wiki / query / MCP layers can tell
+        the two classes apart.
+    """
+    raw_id = f"{project_name}::{name}"
+    new_parent = Path(source_file).parent
+    if raw_id not in claimed:
+        claimed[raw_id] = source_file
+        return raw_id, name
+
+    existing_parent = Path(claimed[raw_id]).parent
+    if existing_parent == new_parent:
+        # same dir → genuine cross-file declaration; merge step will union
+        return raw_id, name
+
+    # Different directory — distinct symbol that just happens to share a name.
+    hint = new_parent.name or "root"
+    disambiguated = f"{project_name}::{hint}/{name}"
+    # Rare double collision: same parent-name but in a different ancestry.
+    # Fall back to a short content-stable hash of the full directory path.
+    if disambiguated in claimed and Path(claimed[disambiguated]).parent != new_parent:
+        import hashlib
+        h = hashlib.sha1(str(new_parent).encode("utf-8")).hexdigest()[:6]
+        disambiguated = f"{project_name}::{hint}@{h}/{name}"
+    claimed[disambiguated] = source_file
+    return disambiguated, f"{name} ({hint})"
+
+
+# ── Cross-file declaration merge ──────────────────────────────────────────────
+
+def _merge_cross_file_decls(nodes: list[Node]) -> list[Node]:
+    """Union metadata for nodes that share an id across files.
+
+    The first occurrence wins for scalar attrs (source_file, line) so the
+    "canonical" declaration is whichever extractor saw the symbol first.
+    List-valued metadata (fields, methods, dependencies, annotations,
+    relations, props, hooks) is union-merged while preserving order and
+    deduping by stable identity.
+    """
+    _LIST_KEYS = (
+        "fields", "methods", "dependencies", "annotations",
+        "relations", "props", "hooks",
+    )
+    first: dict[str, Node] = {}
+    for node in nodes:
+        existing = first.get(node.id)
+        if existing is None:
+            first[node.id] = node
+            continue
+        # union list-valued metadata into the first node
+        for key in _LIST_KEYS:
+            extra = node.metadata.get(key)
+            if not extra:
+                continue
+            current = existing.metadata.setdefault(key, [])
+            seen_keys = {_dedupe_key(item) for item in current}
+            for item in extra:
+                k = _dedupe_key(item)
+                if k not in seen_keys:
+                    current.append(item)
+                    seen_keys.add(k)
+    return list(first.values())
+
+
+def _dedupe_key(item: Any) -> Any:
+    """Stable hash key for list-valued metadata items.
+
+    Items are either plain strings or dicts (``{"name": ..., "type": ...}``);
+    dicts get the ``name`` field used as the dedupe key when present, else a
+    sorted-tuple of items.
+    """
+    if isinstance(item, dict):
+        name = item.get("name")
+        if name is not None:
+            return ("d", name)
+        return ("d", tuple(sorted(item.items())))
+    return ("s", item)
+
+
 # ── Import edge remapping ────────────────────────────────────────────────────
 
 def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Edge]:
@@ -199,20 +322,24 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
     file_to_nodes: dict[str, list[str]] = {}
     # label (class/component name) → [node_id, ...]
     label_to_nodes: dict[str, list[str]] = {}
-    # lower(label) → [node_id, ...] for case-insensitive fallback
-    # Handles @/components/ui/card → "card" matching node label "Card"
-    label_lower_to_nodes: dict[str, list[str]] = {}
+    # casefold(label) → [node_id, ...] for case-insensitive fallback.
+    # casefold() (not lower()) is used so non-ASCII labels — CJK, Cyrillic,
+    # German ß — round-trip correctly. Mirrors graphify #86109e9.
+    label_cf_to_nodes: dict[str, list[str]] = {}
 
     for node in all_nodes:
         file_to_nodes.setdefault(node.source_file, []).append(node.id)
         label_to_nodes.setdefault(node.label, []).append(node.id)
-        label_lower_to_nodes.setdefault(node.label.lower(), []).append(node.id)
+        label_cf_to_nodes.setdefault(node.label.casefold(), []).append(node.id)
 
     remapped: list[Edge] = []
     non_import: list[Edge] = []
 
     for edge in all_edges:
-        if edge.relation != "imports_from":
+        # Treat re_exports the same as imports_from for resolution purposes:
+        # both go from a file_path to a raw module string, but we want to
+        # preserve the distinct relation in the final graph.
+        if edge.relation not in ("imports_from", "re_exports"):
             non_import.append(edge)
             continue
 
@@ -224,8 +351,14 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
         # Resolve target: raw import string → node_id via label matching.
         # Try exact match first, then case-insensitive fallback so that
         # path aliases like @/components/ui/card → "card" resolve to "Card".
+        # The fallback is skipped for very short labels (≤ 2 chars) — two
+        # different one-character names are almost always coincidence, not
+        # the same symbol, and matching them produced phantom cross-language
+        # edges in mixed-language repos. Mirrors graphify #4dce16f.
         target_label = _import_to_label(edge.target)
-        target_ids = label_to_nodes.get(target_label) or label_lower_to_nodes.get(target_label.lower(), [])
+        target_ids = label_to_nodes.get(target_label)
+        if not target_ids and len(target_label) > 2:
+            target_ids = label_cf_to_nodes.get(target_label.casefold(), [])
         if not target_ids:
             continue
 
