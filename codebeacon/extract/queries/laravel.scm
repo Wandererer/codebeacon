@@ -30,8 +30,8 @@
 
 (expression_statement
   (scoped_call_expression
-    name: (name) @_class (#eq? @_class "Route")
-    (name) @route.method
+    scope: (name) @_class (#eq? @_class "Route")
+    name: (name) @route.method
     (#match? @route.method "^(get|post|put|patch|delete|options|any|match)$")
     (arguments
       (argument
@@ -61,8 +61,8 @@
 
 (expression_statement
   (scoped_call_expression
-    name: (name) @_class (#eq? @_class "Route")
-    (name) @_res (#match? @_res "^(resource|apiResource|resources|apiResources)$")
+    scope: (name) @_class (#eq? @_class "Route")
+    name: (name) @_res (#match? @_res "^(resource|apiResource|resources|apiResources)$")
     (arguments
       (argument
         [
@@ -85,8 +85,8 @@
 (expression_statement
   (member_call_expression
     object: (scoped_call_expression
-      name: (name) @_class (#eq? @_class "Route")
-      (name) @_prefix (#eq? @_prefix "prefix")
+      scope: (name) @_class (#eq? @_class "Route")
+      name: (name) @_prefix (#eq? @_prefix "prefix")
       (arguments
         (argument
           [

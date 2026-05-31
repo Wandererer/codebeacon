@@ -27,6 +27,22 @@
 
 ---
 
+## 0.6.1 新功能
+
+补丁版本 — 提取正确性与可复现输出。
+
+- **修复六个框架提取器** — `laravel`、`angular`、`aspnet`、`actix`、`ktor`、`vapor` 的 tree-sitter 查询与当前文法版本脱节，**提取不到任何内容**：查询无法编译，错误被当作警告吞掉。现已让六者都能针对随附文法编译并提取（Laravel 的 `scope:`/`name:` 字段、Angular 的 `export class` 装饰器、ASP.NET 的 `invocation_expression` 字段、Actix 的兄弟节点锚定、Kotlin 1.x 节点改名、Swift 0.0.1 节点集），并为每个添加回归测试，防止再次悄然失效。
+- **可复现的 `beacon.json`** — 序列化前将节点的 `source_file` 路径改写为相对各项目根目录，因此在两台机器上扫描同一提交会生成逐字节相同的图，而不再在 diff 中翻搅绝对路径。
+- **`affected` 不再过度报告** — 变更文件的种子匹配按路径段对齐，因此 `src/user.py` 不再拉入 `foosrc/user.py` 之类无关节点。
+- **`semantic-apply` 崩溃修复** — 归档/迁移的 JSONL 边中的 `confidence_score: null` 不再以 `TypeError` 中断运行，而是像管线其余部分一样归一到安全默认值。
+- **NetworkX 3.6 前向兼容** — `beacon.json` 以显式 `edges="links"` 键写出，使上游默认值变化不会悄悄改变磁盘格式；MCP 服务器也经由同一兼容层加载。
+- **Obsidian 库整理** — 过期笔记清理覆盖整个库（根目录 + 嵌套），跨语言导入过滤器以笔记的真实源语言为准，而非从不匹配的文件名后缀。
+- **gitignore 语义** — `build/*.js` 等锚定模式中的 `*` 不再跨越 `/`，因此嵌套文件不会被误忽略。
+- **Next.js App Router** — 现在会发现基于 JS 的 `page.js` / `page.jsx` 路由（此前仅 `.ts` / `.tsx`）。
+- **DI 归属修复** — FastAPI 的 `Depends()` 与 Angular 构造函数注入按字节范围归属到其外围函数/类，而非文件中的首个/末个；Razor 的 `@using` 不再产生重复边。
+
+---
+
 ## 0.6.0 新功能
 
 - **`codebeacon affected`** — 接收变更文件列表（或通过 `--base <ref>` 读取 git diff），输出受影响的所有图节点。面向 CI 风险评分与 PR 审查。

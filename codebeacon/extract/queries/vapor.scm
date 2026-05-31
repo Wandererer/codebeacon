@@ -76,30 +76,30 @@
 
 ; ── Fluent Model class ────────────────────────────────────────────────────────
 
+; tree-sitter-swift 0.0.1: the class name is a `type_identifier` (not
+; simple_identifier), and the base type sits in an `inheritance_specifier`
+; directly under class_declaration — there is no `type_inheritance_clause`
+; wrapper (that node type does not exist in this grammar).
 (class_declaration
   (type_modifiers (attribute (user_type (type_identifier) @_final (#eq? @_final "final"))))?
-  (simple_identifier) @entity.class_name
-  (type_inheritance_clause
-    (inheritance_specifier
-      (user_type
-        (type_identifier) @_base
-        (#match? @_base "^(Model|Content|Authenticatable)$")
-      )
+  (type_identifier) @entity.class_name
+  (inheritance_specifier
+    (user_type
+      (type_identifier) @_base
+      (#match? @_base "^(Model|Content|Authenticatable)$")
     )
   )
 ) @entity.model
 
 ; @Field(key: "column_name") var fieldName: Type
+; In this grammar the attribute's argument is flat — `key:` and the string are
+; direct children of `attribute`; there is no `attribute_argument_clause`.
 (property_declaration
   (modifiers
     (attribute
       (user_type (type_identifier) @_attr (#eq? @_attr "Field"))
-      (attribute_argument_clause
-        (value_argument
-          (simple_identifier) @_key (#eq? @_key "key")
-          (line_string_literal (line_str_text) @entity.field_key)
-        )
-      )
+      (simple_identifier) @_key (#eq? @_key "key")
+      (line_string_literal (line_str_text) @entity.field_key)
     )
   )
   (pattern (simple_identifier) @entity.field_name)

@@ -27,6 +27,22 @@
 
 ---
 
+## Nouveautés en 0.6.1
+
+Version corrective — exactitude de l'extraction et sortie reproductible.
+
+- **Six extracteurs de frameworks restaurés** — les requêtes tree-sitter de `laravel`, `angular`, `aspnet`, `actix`, `ktor` et `vapor` s'étaient désynchronisées des versions actuelles des grammaires et n'extrayaient **rien** : la requête ne compilait pas et l'erreur était avalée sous forme d'avertissement. Les six compilent et extraient désormais avec les grammaires fournies (champs `scope:`/`name:` de Laravel, décorateurs `export class` d'Angular, champs `invocation_expression` d'ASP.NET, attributs ancrés aux frères d'Actix, renommages de nœuds de Kotlin 1.x, jeu de nœuds de Swift 0.0.1), chacun avec un test de régression pour ne plus se casser en silence.
+- **`beacon.json` reproductible** — les chemins `source_file` des nœuds sont réécrits relativement à la racine de chaque projet avant la sérialisation, de sorte que scanner le même commit sur deux machines produit un graphe identique octet par octet au lieu de brasser des chemins absolus dans les diffs.
+- **`affected` ne sur-rapporte plus** — la correspondance des fichiers modifiés est alignée par segments de chemin, donc `src/user.py` n'entraîne plus de nœuds étrangers comme `foosrc/user.py`.
+- **Correction de plantage de `semantic-apply`** — un `confidence_score: null` dans une arête JSONL archivée/migrée n'interrompt plus l'exécution avec `TypeError` ; il est normalisé vers la valeur sûre par défaut comme le reste du pipeline.
+- **Compatibilité ascendante NetworkX 3.6** — `beacon.json` est écrit avec la clé explicite `edges="links"` pour qu'un changement de valeur par défaut en amont ne modifie pas silencieusement le format sur disque ; le serveur MCP charge via la même couche de compatibilité.
+- **Hygiène du vault Obsidian** — le nettoyage des notes obsolètes balaie tout le vault (racine + imbriqué), et le filtre d'imports inter-langages se base sur le vrai langage source de la note au lieu d'un suffixe de nom de fichier qui ne correspondait jamais.
+- **Sémantique gitignore** — les motifs ancrés comme `build/*.js` ne laissent plus `*` franchir `/`, donc les fichiers imbriqués ne sont plus ignorés à tort.
+- **App Router Next.js** — les routes `page.js` / `page.jsx` basées sur JS sont désormais découvertes (auparavant seulement `.ts` / `.tsx`).
+- **Corrections d'attribution de DI** — `Depends()` de FastAPI et l'injection par constructeur d'Angular sont attribués à la fonction/classe englobante par plage d'octets plutôt qu'à la première/dernière du fichier ; `@using` de Razor n'émet plus d'arêtes en double.
+
+---
+
 ## Nouveautés en 0.6.0
 
 - **`codebeacon affected`** — prend une liste de fichiers modifiés (ou via `--base <ref>` un git diff) et imprime tous les nœuds du graphe en aval. Pensé pour le scoring de risque en CI et la revue de PR.

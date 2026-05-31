@@ -29,8 +29,11 @@
 
 ; ── Actix: #[get("/users")] async fn handler() ───────────────────────────────
 
-(function_item
-  .
+; tree-sitter-rust: attribute_item is a SIBLING preceding function_item, not a
+; child of it. The `(...) . (...)` grouping with the `.` anchor matches an
+; attribute_item immediately followed by a function_item. The old form nested
+; the attribute inside function_item → impossible pattern → whole query failed.
+(
   (attribute_item
     (attribute
       (identifier) @route.proc_macro
@@ -42,7 +45,10 @@
       )
     )
   )
-  name: (identifier) @route.func_name
+  .
+  (function_item
+    name: (identifier) @route.func_name
+  )
 ) @route.actix_handler
 
 ; ── Axum: Router::new().route("/users", get(handler)) ────────────────────────
@@ -68,8 +74,9 @@
 
 ; ── #[derive(Queryable, Serialize, ...)] struct ──────────────────────────────
 
-(struct_item
-  .
+; Same sibling relationship as the proc-macro handler above: the
+; #[derive(...)] attribute_item precedes the struct_item.
+(
   (attribute_item
     (attribute
       (identifier) @_derive (#eq? @_derive "derive")
@@ -79,7 +86,10 @@
       )
     )
   )
-  name: (type_identifier) @entity.struct_name
+  .
+  (struct_item
+    name: (type_identifier) @entity.struct_name
+  )
 ) @entity.struct
 
 ; All struct fields

@@ -40,8 +40,7 @@ class BeaconIndex:
         self._label_to_ids: dict[str, list[str]] = {}
 
     def load(self) -> None:
-        import networkx as nx
-        import networkx.readwrite.json_graph as nxjson
+        from ..graph.write import load_beacon
 
         beacon_json = self.beacon_dir / "beacon.json"
         if not beacon_json.exists():
@@ -50,8 +49,9 @@ class BeaconIndex:
                 "Run 'codebeacon scan <path>' first."
             )
 
-        data = json.loads(beacon_json.read_text(encoding="utf-8"))
-        self.G = nxjson.node_link_graph(data, directed=True, multigraph=False)
+        # Reuse read_beacon's edge-key compat shim so the MCP server stays
+        # correct across the NetworkX 3.6 links→edges default flip.
+        self.G, _meta = load_beacon(beacon_json)
 
         # Build label → [node_ids] lookup (case-insensitive key).
         # casefold() — not lower() — so non-ASCII labels (CJK, Cyrillic,

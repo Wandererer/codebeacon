@@ -91,6 +91,56 @@ class TestWriteBeacon:
         assert "built_at_ts" in data["meta"]
         assert wr.skipped_shrink is False
 
+    def test_relativizes_absolute_source_file(self, tmp_path):
+        """Mirrors graphify #999.
+
+        Absolute machine paths in beacon.json make it non-reproducible across
+        machines and churn git diffs. With ``project_roots`` supplied, node
+        ``source_file`` is stored relative to its project root.
+        """
+        root = tmp_path / "repo"
+        abs_src = str(root / "src" / "app.py")
+        G = nx.DiGraph()
+        G.add_node("p::App", label="App", source_file=abs_src, project="p")
+        write_beacon(G, tmp_path / "out", project_roots={"p": str(root)})
+        data = json.loads((tmp_path / "out" / "beacon.json").read_text())
+        node = next(n for n in data["nodes"] if n["id"] == "p::App")
+        assert node["source_file"] == "src/app.py"
+        # In-memory graph must keep the absolute path — analysis/wiki run on it
+        # right after the write.
+        assert G.nodes["p::App"]["source_file"] == abs_src
+
+    def test_relativize_is_machine_independent(self, tmp_path):
+        """Two different absolute roots → identical relative paths on disk."""
+        def write_under(root_name):
+            root = tmp_path / root_name
+            G = nx.DiGraph()
+            G.add_node("p::A", label="A", source_file=str(root / "a.py"), project="p")
+            out = tmp_path / f"out_{root_name}"
+            write_beacon(G, out, project_roots={"p": str(root)})
+            data = json.loads((out / "beacon.json").read_text())
+            return data["nodes"][0]["source_file"]
+        assert write_under("alice_machine") == write_under("a_totally_different_path") == "a.py"
+
+    def test_relativize_left_alone_outside_root(self, tmp_path):
+        """A source outside its declared project root keeps its absolute path
+        rather than emitting a fragile ``../../`` path."""
+        outside = str(tmp_path / "elsewhere" / "x.py")
+        G = nx.DiGraph()
+        G.add_node("p::X", label="X", source_file=outside, project="p")
+        write_beacon(G, tmp_path / "out", project_roots={"p": str(tmp_path / "repo")})
+        data = json.loads((tmp_path / "out" / "beacon.json").read_text())
+        assert data["nodes"][0]["source_file"] == outside
+
+    def test_no_project_roots_keeps_absolute(self, tmp_path):
+        """Backward compatible: without ``project_roots`` paths are untouched."""
+        abs_src = str(tmp_path / "repo" / "a.py")
+        G = nx.DiGraph()
+        G.add_node("p::A", label="A", source_file=abs_src, project="p")
+        write_beacon(G, tmp_path / "out")
+        data = json.loads((tmp_path / "out" / "beacon.json").read_text())
+        assert data["nodes"][0]["source_file"] == abs_src
+
     def test_shrink_guard_refuses_smaller_overwrite(self, tmp_path):
         G_big = nx.DiGraph()
         for i in range(5):

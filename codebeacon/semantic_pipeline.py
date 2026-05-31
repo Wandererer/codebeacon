@@ -591,7 +591,7 @@ def _reapply_archive(G: nx.DiGraph, archive: list[dict]) -> tuple[int, list[dict
             if _merge_edge(
                 G, label_idx, source, target,
                 relation=edge.get("relation") or "references",
-                score=float(edge.get("confidence_score", 0.7)),
+                score=_coerce_score(edge.get("confidence_score"), 0.7),
                 confidence=edge.get("confidence") or "INFERRED",
             ):
                 reapplied += 1

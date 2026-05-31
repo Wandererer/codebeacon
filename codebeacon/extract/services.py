@@ -314,15 +314,20 @@ def _interpret_fastapi(
     services: list[ServiceInfo] = []
     unresolved: list[UnresolvedRef] = []
     seen_funcs: set[str] = set()
+    # name → (start_byte, end_byte) of the enclosing function_definition, so a
+    # Depends() call can be attributed to the function it actually sits inside
+    # (a function_definition node spans its parameter list where Depends lives).
+    func_ranges: list[tuple[int, int, str]] = []
 
+    # Pass 1: collect candidate functions.
     for _idx, caps in matches:
-        # Functions that accept typed parameters (potential services)
         if "service.function" in caps and "service.func_name" in caps:
             name = node_text(caps["service.func_name"][0])
             if name in seen_funcs:
                 continue
             seen_funcs.add(name)
             node = caps["service.function"][0]
+            func_ranges.append((node.start_byte, node.end_byte, name))
             services.append(ServiceInfo(
                 name=name,
                 class_name=name,
@@ -331,22 +336,29 @@ def _interpret_fastapi(
                 framework="fastapi",
             ))
 
-        # Depends(func) calls
+    # Pass 2: attribute each Depends() call to its enclosing function by byte
+    # range, preferring the innermost (smallest) containing range.
+    service_names = {s.name for s in services}
+    for _idx, caps in matches:
         if "service.depends" in caps and "service.depends_func" in caps:
             dep_func = node_text(caps["service.depends_func"][0])
-            # Find enclosing function for the unresolved ref
-            depends_node = caps["service.depends"][0]
+            if dep_func in service_names:
+                continue
+            depends_start = caps["service.depends"][0].start_byte
             enclosing = ""
-            for svc in services:
-                if svc.name in seen_funcs:
-                    enclosing = svc.name
-            if dep_func not in (s.name for s in services):
-                unresolved.append(UnresolvedRef(
-                    source_node_id=_nid(file_path, enclosing or "unknown"),
-                    ref_type="depends",
-                    ref_name=dep_func,
-                    framework="fastapi",
-                ))
+            best_span = None
+            for start, end, name in func_ranges:
+                if start <= depends_start <= end:
+                    span = end - start
+                    if best_span is None or span < best_span:
+                        best_span = span
+                        enclosing = name
+            unresolved.append(UnresolvedRef(
+                source_node_id=_nid(file_path, enclosing or "unknown"),
+                ref_type="depends",
+                ref_name=dep_func,
+                framework="fastapi",
+            ))
 
     return services, unresolved
 
@@ -571,36 +583,57 @@ def _interpret_angular(
     file_path: str, matches: list, framework: str,
 ) -> tuple[list[ServiceInfo], list[UnresolvedRef]]:
     """Angular: @Injectable + constructor DI."""
-    services: dict[int, ServiceInfo] = {}
+    services: dict[int, ServiceInfo] = {}  # class start_byte → ServiceInfo
+    svc_ranges: list[tuple[int, int, int]] = []  # (start, end, start_key)
     unresolved: list[UnresolvedRef] = []
 
+    # Pass 1: collect @Injectable classes with their byte ranges. Exported
+    # classes capture as `service.injectable` (decorator on export_statement);
+    # bare classes as `service.injectable_noexport`.
     for _idx, caps in matches:
-        if "service.injectable" in caps and "service.class_name" in caps:
-            cls = caps["service.injectable"][0]
+        inj_key = ("service.injectable" if "service.injectable" in caps
+                   else "service.injectable_noexport" if "service.injectable_noexport" in caps
+                   else None)
+        if inj_key and "service.class_name" in caps:
+            cls = caps[inj_key][0]
             name = node_text(caps["service.class_name"][0])
-            services[cls.start_byte] = ServiceInfo(
-                name=name,
-                class_name=name,
-                source_file=file_path,
-                line=cls.start_point[0] + 1,
-                framework="angular",
-                annotations=["Injectable"],
-            )
+            if cls.start_byte not in services:
+                services[cls.start_byte] = ServiceInfo(
+                    name=name,
+                    class_name=name,
+                    source_file=file_path,
+                    line=cls.start_point[0] + 1,
+                    framework="angular",
+                    annotations=["Injectable"],
+                )
+                svc_ranges.append((cls.start_byte, cls.end_byte, cls.start_byte))
 
+    # Pass 2: attribute each constructor DI dep to the @Injectable class that
+    # actually encloses it (byte-range containment), not blindly the first one.
+    for _idx, caps in matches:
         if "service.constructor_di" in caps and "service.inject_type" in caps:
+            ctor_start = caps["service.constructor_di"][0].start_byte
+            key = None
+            best_span = None
+            for start, end, start_key in svc_ranges:
+                if start <= ctor_start <= end:
+                    span = end - start
+                    if best_span is None or span < best_span:
+                        best_span = span
+                        key = start_key
+            if key is None:
+                continue
+            svc = services[key]
             for dep_node in caps["service.inject_type"]:
                 dep = node_text(dep_node)
-                # Assign to closest service by position
-                for svc in services.values():
-                    if dep not in svc.dependencies:
-                        svc.dependencies.append(dep)
-                    unresolved.append(UnresolvedRef(
-                        source_node_id=_nid(file_path, svc.name),
-                        ref_type="inject",
-                        ref_name=dep,
-                        framework="angular",
-                    ))
-                    break  # assign to first service (constructor_di is inside a class)
+                if dep not in svc.dependencies:
+                    svc.dependencies.append(dep)
+                unresolved.append(UnresolvedRef(
+                    source_node_id=_nid(file_path, svc.name),
+                    ref_type="inject",
+                    ref_name=dep,
+                    framework="angular",
+                ))
 
     return list(services.values()), unresolved
 

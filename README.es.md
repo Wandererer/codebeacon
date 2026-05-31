@@ -27,6 +27,22 @@
 
 ---
 
+## Novedades en 0.6.1
+
+Versión de parche — corrección de extracción y salida reproducible.
+
+- **Seis extractores de frameworks restaurados** — las queries tree-sitter de `laravel`, `angular`, `aspnet`, `actix`, `ktor` y `vapor` se habían desincronizado de las versiones actuales de las gramáticas y no extraían **nada**: la query no compilaba y el error se silenciaba como advertencia. Las seis ahora compilan y extraen contra las gramáticas incluidas (campos `scope:`/`name:` de Laravel, decoradores `export class` de Angular, campos `invocation_expression` de ASP.NET, atributos anclados a hermanos de Actix, renombrados de nodos de Kotlin 1.x, conjunto de nodos de Swift 0.0.1), cada una con un test de regresión para que no vuelvan a romperse en silencio.
+- **`beacon.json` reproducible** — las rutas `source_file` de los nodos se reescriben relativas a la raíz de cada proyecto antes de serializar, así escanear el mismo commit en dos máquinas produce un grafo idéntico byte a byte en lugar de remover rutas absolutas en los diffs.
+- **`affected` ya no sobre-reporta** — la coincidencia de archivos cambiados está alineada por segmentos de ruta, de modo que `src/user.py` ya no arrastra nodos ajenos como `foosrc/user.py`.
+- **Corrección de fallo en `semantic-apply`** — un `confidence_score: null` en una arista JSONL archivada/migrada ya no aborta la ejecución con `TypeError`; se normaliza al valor seguro por defecto como el resto del pipeline.
+- **Compatibilidad futura con NetworkX 3.6** — `beacon.json` se escribe con la clave explícita `edges="links"` para que un cambio de valor por defecto upstream no altere en silencio el formato en disco; el servidor MCP carga a través de la misma capa de compatibilidad.
+- **Higiene del vault de Obsidian** — la limpieza de notas obsoletas barre todo el vault (raíz + anidado), y el filtro de imports entre lenguajes se basa en el lenguaje real de la nota en vez de un sufijo de nombre de archivo que nunca coincidía.
+- **Semántica de gitignore** — los patrones anclados como `build/*.js` ya no permiten que `*` cruce `/`, así los archivos anidados no se ignoran por error.
+- **App Router de Next.js** — ahora se descubren las rutas `page.js` / `page.jsx` basadas en JS (antes solo `.ts` / `.tsx`).
+- **Correcciones de atribución de DI** — `Depends()` de FastAPI y la inyección por constructor de Angular se atribuyen a la función/clase contenedora por rango de bytes en vez de la primera/última del archivo; `@using` de Razor ya no emite aristas duplicadas.
+
+---
+
 ## Novedades en 0.6.0
 
 - **`codebeacon affected`** — recibe una lista de archivos cambiados (o vía `--base <ref>` un git diff) e imprime todos los nodos del grafo aguas abajo. Pensado para puntuación de riesgo en CI y revisión de PR.

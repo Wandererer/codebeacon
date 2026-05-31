@@ -27,6 +27,22 @@
 
 ---
 
+## Neu in 0.6.1
+
+Patch-Release — Extraktionskorrektheit und reproduzierbare Ausgabe.
+
+- **Sechs Framework-Extraktoren wiederhergestellt** — die tree-sitter-Queries für `laravel`, `angular`, `aspnet`, `actix`, `ktor` und `vapor` waren mit aktuellen Grammatik-Versionen aus dem Takt geraten und extrahierten **nichts**: die Query ließ sich nicht kompilieren und der Fehler wurde als Warnung verschluckt. Alle sechs kompilieren und extrahieren nun gegen die mitgelieferten Grammatiken (Laravel `scope:`/`name:`-Felder, Angular `export class`-Dekoratoren, ASP.NET `invocation_expression`-Felder, Actix geschwister-verankerte Attribute, Kotlin-1.x-Knotenumbenennungen, Swift-0.0.1-Knotensatz) — jeweils mit Regressionstest gegen erneutes stilles Brechen.
+- **Reproduzierbare `beacon.json`** — `source_file`-Pfade der Knoten werden vor der Serialisierung relativ zum jeweiligen Projekt-Root umgeschrieben, sodass das Scannen desselben Commits auf zwei Maschinen einen byte-identischen Graphen erzeugt statt absolute Pfade im Diff zu wälzen.
+- **`affected` meldet nicht mehr zu viel** — der Seed-Abgleich geänderter Dateien ist nun pfadsegment-ausgerichtet, sodass `src/user.py` keine fremden Knoten wie `foosrc/user.py` mehr hineinzieht.
+- **`semantic-apply`-Absturz behoben** — ein `confidence_score: null` in einer archivierten/migrierten JSONL-Kante bricht den Lauf nicht mehr mit `TypeError` ab, sondern wird wie im Rest der Pipeline auf den sicheren Standard normalisiert.
+- **NetworkX-3.6-Vorwärtskompatibilität** — `beacon.json` wird mit explizitem `edges="links"`-Schlüssel geschrieben, damit eine geänderte Upstream-Voreinstellung das Festplattenformat nicht still verändert; der MCP-Server lädt über dieselbe Kompatibilitätsschicht.
+- **Obsidian-Vault-Hygiene** — die Bereinigung veralteter Notizen erfasst den gesamten Vault (Root + verschachtelt), und der Cross-Language-Import-Filter richtet sich nach der echten Quellsprache der Notiz statt nach einem Dateinamen-Suffix, das nie passte.
+- **gitignore-Semantik** — verankerte Muster wie `build/*.js` lassen `*` nicht mehr über `/` greifen, sodass verschachtelte Dateien nicht fälschlich ignoriert werden.
+- **Next.js App Router** — JS-basierte `page.js` / `page.jsx`-Routen werden nun erkannt (zuvor nur `.ts` / `.tsx`).
+- **DI-Zuordnungskorrekturen** — FastAPI `Depends()` und Angular-Konstruktor-Injektion werden per Byte-Range der umschließenden Funktion/Klasse zugeordnet statt der ersten/letzten in der Datei; Razor `@using` erzeugt keine doppelten Kanten mehr.
+
+---
+
 ## Neu in 0.6.0
 
 - **`codebeacon affected`** — nimmt eine Liste geänderter Dateien (oder via `--base <ref>` ein git diff) und gibt jeden nachgelagerten Graphknoten aus. Für CI-Risikoeinstufung und PR-Reviews.

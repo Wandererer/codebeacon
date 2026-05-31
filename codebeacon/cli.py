@@ -772,7 +772,30 @@ def _maybe_inject_scan(argv: list[str]) -> list[str]:
     return ["scan", *argv]
 
 
+def _ensure_utf8_stdio() -> None:
+    """Stop ``UnicodeEncodeError`` from killing a command on a non-UTF-8 console.
+
+    Our output uses non-ASCII glyphs (``→``, ``⚠``, box-drawing) in warnings and
+    reports. On Windows the default console codepage is cp1252, where a single
+    ``print("⚠ ...")`` raises ``UnicodeEncodeError`` and aborts the whole
+    command. Forcing each stream to UTF-8 with ``errors="replace"`` degrades a
+    legacy console to mojibake instead of crashing. Best-effort: streams that
+    are redirected, detached, or lack ``reconfigure`` are left untouched.
+    Mirrors graphify #992.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # Stream already detached/closed or doesn't support reconfigure.
+            pass
+
+
 def main() -> None:
+    _ensure_utf8_stdio()
     parser = build_parser()
     argv = _maybe_inject_scan(sys.argv[1:])
     args = parser.parse_args(argv)

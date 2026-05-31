@@ -395,13 +395,13 @@ def extract_convention_routes(project: ProjectInfo) -> list[str]:
         pages_dir = root / "pages"
         if pages_dir.exists():
             routes.extend(_fs_routes_from_dir(pages_dir, pages_dir))
-        # App Router: app/**/page.{ts,tsx,js,jsx} → route
+        # App Router: app/**/page.{ts,tsx,js,jsx} → route. JS-based projects use
+        # page.js/page.jsx, so globbing only .ts/.tsx silently dropped them.
         app_dir = root / "app"
         if app_dir.exists():
-            for f in app_dir.rglob("page.tsx"):
-                routes.append(_app_router_path(f, app_dir))
-            for f in app_dir.rglob("page.ts"):
-                routes.append(_app_router_path(f, app_dir))
+            for ext in ("tsx", "ts", "jsx", "js"):
+                for f in app_dir.rglob(f"page.{ext}"):
+                    routes.append(_app_router_path(f, app_dir))
 
     elif project.framework == "nuxt":
         pages_dir = root / "pages"

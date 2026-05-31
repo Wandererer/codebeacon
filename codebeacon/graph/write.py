@@ -66,6 +66,7 @@ def write_beacon(
     repo_path: str | Path | None = None,
     force: bool = False,
     had_explicit_deletions: bool = False,
+    project_roots: Optional[dict[str, str]] = None,
 ) -> WriteResult:
     """Atomically write ``beacon.json`` with shrink and desync guards.
 
@@ -82,6 +83,11 @@ def write_beacon(
                     has already accounted for deleted files; a smaller graph is
                     expected, so skip the shrink guard without disabling it
                     for other failure modes. Mirrors graphify #6fba4e4.
+        project_roots: optional ``{project_name: absolute_root_path}`` map. When
+                    given, each node's absolute ``source_file`` is rewritten to a
+                    path relative to its project root in the serialised output,
+                    so ``beacon.json`` is byte-identical across machines that
+                    scan the same commit. Mirrors graphify #999.
 
     Returns:
         WriteResult describing what was written. When the shrink guard fires,
@@ -111,7 +117,15 @@ def write_beacon(
         )
 
     commit = git_head(repo_path if repo_path is not None else out_dir)
-    payload = nxjson.node_link_data(G)
+    # Pin edges="links" explicitly: networkx 3.6 flips the default to
+    # edges="edges", which would silently change the on-disk key. Our loader
+    # (_load_with_edge_compat) and the documented schema both expect "links".
+    payload = nxjson.node_link_data(G, edges="links")
+    # Strip absolute machine paths from node source_file before serialising, so
+    # the artifact is reproducible across machines. Operates on the payload copy
+    # only — the in-memory graph keeps absolute paths for the analysis/wiki
+    # passes that run right after this write.
+    _relativize_node_paths(payload, project_roots)
     payload = {
         "meta": {
             "version": 1,
@@ -180,6 +194,46 @@ def _load_with_edge_compat(data: dict) -> nx.DiGraph:
             data["links"] = data.pop("edges")
             return nxjson.node_link_graph(data, directed=True, multigraph=False)
     return nxjson.node_link_graph(data, directed=True, multigraph=False)
+
+
+def _relativize_node_paths(
+    payload: dict,
+    project_roots: Optional[dict[str, str]],
+) -> None:
+    """Rewrite absolute node ``source_file`` paths to project-relative POSIX paths.
+
+    Mutates the serialised ``payload`` in place; the caller's in-memory graph is
+    untouched. Absolute paths such as ``/Users/alice/repo/src/a.py`` make
+    ``beacon.json`` differ on every machine and churn git diffs even when the
+    code is identical. Storing ``src/a.py`` (relative to the file's project
+    root) makes the artifact byte-stable across machines. Mirrors graphify #999.
+
+    A node is rewritten only when (a) ``project_roots`` is supplied, (b) its
+    ``project`` has a known root, (c) the path is absolute, and (d) the file
+    actually lives under that root. Anything else is left exactly as-is, so
+    external stubs, cross-drive paths (Windows), and unmapped projects never
+    regress to a broken relative path.
+    """
+    if not project_roots:
+        return
+    roots = {name: os.path.abspath(path) for name, path in project_roots.items()}
+    for node in payload.get("nodes", []):
+        sf = node.get("source_file")
+        if not sf or not os.path.isabs(sf):
+            continue
+        root = roots.get(node.get("project", ""))
+        if not root:
+            continue
+        try:
+            rel = os.path.relpath(os.path.abspath(sf), root)
+        except ValueError:
+            # Different drive on Windows — no relative path exists.
+            continue
+        if rel == ".." or rel.startswith(".." + os.sep):
+            # Source lives outside its declared project root; a fragile
+            # ``../../`` path is worse than keeping the absolute one.
+            continue
+        node["source_file"] = rel.replace(os.sep, "/")
 
 
 def _prior_node_count(beacon_path: Path) -> int:

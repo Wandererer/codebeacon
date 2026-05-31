@@ -27,6 +27,22 @@
 
 ---
 
+## 0.6.1 새 소식
+
+패치 릴리스 — 추출 정확성과 재현 가능한 출력.
+
+- **6개 프레임워크 추출기 복구** — `laravel`, `angular`, `aspnet`, `actix`, `ktor`, `vapor` tree-sitter 쿼리가 현재 grammar 버전과 어긋나 **아무것도 추출하지 못하던** 문제 수정: 쿼리가 컴파일에 실패하고 그 에러가 경고로 묻혀 있었습니다. 6개 모두 설치된 grammar로 컴파일·추출되도록 수정(Laravel `scope:`/`name:` 필드, Angular `export class` 데코레이터, ASP.NET `invocation_expression` 필드, Actix 형제 노드 앵커, Kotlin 1.x 노드 개명, Swift 0.0.1 노드셋)했으며, 재발 방지 회귀 테스트를 각각 추가했습니다.
+- **재현 가능한 `beacon.json`** — 직렬화 전에 노드 `source_file` 경로를 각 프로젝트 루트 기준 상대경로로 변환 → 같은 커밋을 다른 머신에서 스캔해도 바이트 단위로 동일한 그래프 생성(절대경로 diff 잡음 제거).
+- **`affected` 과다 보고 수정** — 변경 파일 seed 매칭을 경로 세그먼트 단위로 정렬 → `src/user.py`가 `foosrc/user.py` 같은 무관한 노드를 끌어오지 않음.
+- **`semantic-apply` 크래시 수정** — 아카이브/마이그레이션된 JSONL 엣지의 `confidence_score: null`이 `TypeError`로 실행을 중단시키던 문제 제거, 파이프라인의 나머지와 동일하게 안전 기본값으로 보정.
+- **NetworkX 3.6 호환** — `beacon.json`을 `edges="links"` 키로 명시 기록 → 상위 기본값 변경이 디스크 포맷을 조용히 바꾸지 못하게 함. MCP 서버도 동일한 호환 로더 사용.
+- **Obsidian 볼트 정리** — stale 노트 정리가 볼트 전체(루트+중첩)를 sweep하고, cross-language import 필터가 파일명 접미사 대신 노트의 실제 소스 언어를 기준으로 동작.
+- **gitignore 의미** — `build/*.js` 같은 anchored 패턴에서 `*`가 `/`를 넘지 않도록 수정 → 중첩 파일이 잘못 무시되지 않음.
+- **Next.js App Router** — JS 기반 `page.js` / `page.jsx` 라우트도 탐색(이전엔 `.ts` / `.tsx`만).
+- **DI 귀속 수정** — FastAPI `Depends()`와 Angular 생성자 주입을 파일 내 첫/마지막이 아니라 byte-range로 감싸는 함수·클래스에 정확히 귀속. Razor `@using`은 더 이상 중복 엣지를 만들지 않음.
+
+---
+
 ## 0.6.0 새 소식
 
 - **`codebeacon affected`** — 변경된 파일 목록(또는 `--base <ref>`로 git diff)을 받아 그 영향권에 있는 그래프 노드를 모두 출력. CI 리스크 스코어링·PR 리뷰용.

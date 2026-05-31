@@ -229,7 +229,13 @@ def parse_file(file_path: str) -> Optional[tuple[Node, Language]]:
         parser = Parser(lang)
         tree = parser.parse(content)
         return (tree.root_node, lang)
-    except (OSError, UnicodeDecodeError, Exception):
+    except (OSError, UnicodeDecodeError, ValueError):
+        # OSError: unreadable file. UnicodeDecodeError / ValueError: tree-sitter
+        # rejecting the content or an incompatible grammar binding. We do NOT
+        # catch bare Exception here on purpose — a programming error (e.g. an
+        # AttributeError from a tree-sitter API mismatch) should surface loudly
+        # rather than be silently mislabelled as an "unparseable file", which
+        # would yield a quietly incomplete graph.
         return None
 
 

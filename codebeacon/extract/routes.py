@@ -652,19 +652,35 @@ def _interpret_rails(file_path: str, matches: list, framework: str) -> list[Rout
 
 def _interpret_laravel(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
     """Laravel Route:: static calls and Route::resource expansion."""
-    prefix_stack: list[str] = []
     routes: list[RouteInfo] = []
-
+    # Pass 1: collect Route::prefix(...)->group(...) blocks with their byte
+    # ranges. The @route.prefix_group node spans the whole group statement
+    # (closure body included), so a route's prefix is the concatenation of the
+    # prefixes of every group whose range encloses it — properly scoped, unlike
+    # a flat stack that never pops and leaks prefixes across sibling groups.
+    groups: list[tuple[int, int, str]] = []  # (start_byte, end_byte, prefix)
     for _idx, caps in matches:
         if "route.prefix_group" in caps and "route.prefix" in caps:
-            prefix_stack.append(_clean(node_text(caps["route.prefix"][0])))
+            node = caps["route.prefix_group"][0]
+            groups.append((node.start_byte, node.end_byte,
+                           _clean(node_text(caps["route.prefix"][0]))))
 
-        elif "route.call" in caps and "route.path" in caps:
+    def _scoped_prefix(pos: int) -> str:
+        # Enclosing groups, outermost first (ascending start_byte).
+        enclosing = sorted(
+            ((s, p) for s, e, p in groups if s <= pos <= e),
+            key=lambda t: t[0],
+        )
+        return "/".join(p for _s, p in enclosing if p)
+
+    for _idx, caps in matches:
+        if "route.call" in caps and "route.path" in caps:
             path = _clean(node_text(caps["route.path"][0]))
             method = node_text(caps["route.method"][0]) if "route.method" in caps else "get"
             controller = node_text(caps["route.controller"][0]) if "route.controller" in caps else ""
-            line = caps["route.path"][0].start_point[0] + 1
-            prefix = "/".join(prefix_stack) if prefix_stack else ""
+            path_node = caps["route.path"][0]
+            line = path_node.start_point[0] + 1
+            prefix = _scoped_prefix(path_node.start_byte)
             routes.append(RouteInfo(
                 method=method.upper(),
                 path=_join(prefix, path),
@@ -675,9 +691,10 @@ def _interpret_laravel(file_path: str, matches: list, framework: str) -> list[Ro
             ))
 
         elif "route.resource" in caps and "route.resource_name" in caps:
-            resource = _clean(node_text(caps["route.resource_name"][0]))
-            line = caps["route.resource_name"][0].start_point[0] + 1
-            prefix = "/".join(prefix_stack) if prefix_stack else ""
+            name_node = caps["route.resource_name"][0]
+            resource = _clean(node_text(name_node))
+            line = name_node.start_point[0] + 1
+            prefix = _scoped_prefix(name_node.start_byte)
             routes.extend(_expand_resource(resource, prefix, file_path, "laravel", line))
 
     return routes

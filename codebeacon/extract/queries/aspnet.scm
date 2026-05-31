@@ -89,13 +89,17 @@
 
 ; ── Minimal API: app.MapGet("/users", handler) ───────────────────────────────
 
+; tree-sitter-c-sharp: invocation_expression uses fields `function:` and
+; `arguments:`; the callee member_access_expression uses `name:`. The query
+; previously used `expression:` and a positional argument_list → impossible
+; pattern → the whole aspnet query failed to compile.
 (expression_statement
   (invocation_expression
-    expression: (member_access_expression
+    function: (member_access_expression
       name: (identifier) @route.map_method
       (#match? @route.map_method "^(MapGet|MapPost|MapPut|MapPatch|MapDelete|MapMethods|Map)$")
     )
-    (argument_list
+    arguments: (argument_list
       (argument
         (string_literal
           (string_literal_content) @route.map_path
@@ -117,21 +121,24 @@
 ; ── DI registration: builder.Services.AddScoped<IFoo, FooImpl>() ─────────────
 
 (invocation_expression
-  expression: (member_access_expression
+  function: (member_access_expression
     name: (identifier) @_scope
     (#match? @_scope "^(AddScoped|AddSingleton|AddTransient|AddHostedService)$")
   )
-  (argument_list)
+  arguments: (argument_list)
 ) @di.registration
 
-; Generic DI: AddScoped<IFoo, FooImpl>()
+; Generic DI: builder.Services.AddScoped<IFoo, FooImpl>() — the AddScoped<...>
+; is a generic_name in the `name:` field of the callee member_access_expression.
 (invocation_expression
-  expression: (generic_name
-    (identifier) @_scope
-    (#match? @_scope "^(AddScoped|AddSingleton|AddTransient)$")
-    (type_argument_list
-      (identifier) @di.service_type
-      (identifier) @di.impl_type
+  function: (member_access_expression
+    name: (generic_name
+      (identifier) @_scope
+      (#match? @_scope "^(AddScoped|AddSingleton|AddTransient)$")
+      (type_argument_list
+        (identifier) @di.service_type
+        (identifier) @di.impl_type
+      )
     )
   )
 ) @di.generic_registration

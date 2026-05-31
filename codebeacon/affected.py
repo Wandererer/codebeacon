@@ -97,12 +97,21 @@ def affected_from_paths(
     # match by suffix (a relative suffix of the absolute node path).
     seeds = [str(p).replace("\\", "/") for p in changed_paths]
 
+    def _suffix_match(a: str, b: str) -> bool:
+        # True when one path is a *path-segment-aligned* suffix of the other,
+        # e.g. "src/services/user.py" vs "/repo/src/services/user.py". The
+        # leading "/" guard prevents bogus hits like "foosrc/x.py" matching
+        # seed "src/x.py" (plain str.endswith has no segment boundary).
+        if a == b:
+            return True
+        return ("/" + a).endswith("/" + b) or ("/" + b).endswith("/" + a)
+
     seed_node_ids: list[str] = []
     for node_id, data in G.nodes(data=True):
         src = (data.get("source_file") or "").replace("\\", "/")
         if not src:
             continue
-        if any(src.endswith(seed) or seed.endswith(src) for seed in seeds):
+        if any(_suffix_match(src, seed) for seed in seeds):
             seed_node_ids.append(node_id)
 
     # Walk *upstream* (predecessors): callers, controllers that depend on the

@@ -76,11 +76,16 @@ def generate_obsidian_vault(
     vault = Path(obsidian_dir) if obsidian_dir else Path(output_dir) / "obsidian"
     vault.mkdir(parents=True, exist_ok=True)
 
-    # Clear stale notes from previous runs so step 5 can overwrite them
-    for svc_dir in vault.iterdir():
-        if svc_dir.is_dir() and not svc_dir.name.startswith("."):
-            for md in svc_dir.glob("*.md"):
-                md.unlink()
+    # Clear stale notes from previous runs so step 1 regenerates cleanly. The
+    # whole vault is generated from the graph, so we sweep every *.md anywhere
+    # under it — not just one level inside service folders. Notes left at the
+    # vault root (e.g. by a prior run that crashed before step 5/8 moved them)
+    # or in deeper nesting were previously orphaned across re-scans. We skip
+    # dot-directories like .obsidian so config/graph.json survive.
+    for md in vault.rglob("*.md"):
+        if any(part.startswith(".") for part in md.relative_to(vault).parts):
+            continue
+        md.unlink()
 
     # Step 1 — basic note generation
     _step1_generate_notes(G, communities, vault)
@@ -445,14 +450,21 @@ def _step3_remove_cross_language(vault: Path) -> None:
     java_drop = re.compile(r"^- \[\[[^\]]*\.(?:java|kt)\]\] - `imports(?:_from)?` .*\n?", re.MULTILINE)
 
     for md in vault.glob("*.md"):
-        name = md.name
         content = md.read_text(errors="ignore")
         new_c = content
 
-        if name.endswith((".ts.md", ".tsx.md", ".js.md", ".jsx.md")):
-            new_c = ts_drop.sub("", new_c)
-        elif name.endswith((".java.md", ".kt.md")):
-            new_c = java_drop.sub("", new_c)
+        # Determine the note's own language from its source_file (notes are
+        # named by *label*, not filename, so the old name.endswith(".ts.md")
+        # gate never matched and this step was a silent no-op). A note drops
+        # import edges that point to a *different* language family — that is
+        # the cross-language false positive we want gone; same-language imports
+        # are kept.
+        m = _SOURCE_RE.search(content)
+        src = (m.group(1) if m else "").lower()
+        if src.endswith((".java", ".kt")):
+            new_c = ts_drop.sub("", new_c)     # Java/Kt note → drop TS/JS targets
+        elif src.endswith((".ts", ".tsx", ".js", ".jsx")):
+            new_c = java_drop.sub("", new_c)   # TS/JS note → drop Java/Kt targets
 
         if new_c != content:
             md.write_text(new_c, encoding="utf-8")

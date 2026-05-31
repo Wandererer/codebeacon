@@ -166,14 +166,55 @@ def _matches(rule: _Rule, rel_path: str) -> bool:
     return False
 
 
+def _segment_glob_regex(segment: str) -> str:
+    """Translate a single glob segment to regex where `*`/`?` do NOT cross `/`.
+
+    gitignore semantics: within a path segment, `*` matches any run of
+    non-separator characters and `?` matches a single one. This is the key
+    difference from :func:`fnmatch.fnmatchcase`, whose `*`/`?` happily cross
+    `/` and would make e.g. ``src/*.py`` match ``src/a/b.py``.
+    """
+    out: list[str] = []
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            j = i + 1
+            if j < n and segment[j] in "!^":
+                j += 1
+            if j < n and segment[j] == "]":
+                j += 1
+            while j < n and segment[j] != "]":
+                j += 1
+            if j >= n:
+                out.append(re.escape(c))  # unterminated class → literal '['
+            else:
+                inner = segment[i + 1:j]
+                if inner.startswith("!"):
+                    inner = "^" + inner[1:]
+                out.append("[" + inner + "]")
+                i = j + 1
+                continue
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
+
+
 def _glob_match(pattern: str, path: str) -> bool:
     """Match ``path`` against a gitignore-style ``pattern`` with ``**`` support."""
     if "**" not in pattern:
-        # `*` in fnmatch crosses `/`, but gitignore says it shouldn't. For the
-        # vast majority of real-world ignore rules this only matters at the
-        # boundary of the last segment, which the per-suffix iteration in
-        # ``_matches`` already covers. fnmatch is sufficient here.
-        return fnmatch.fnmatchcase(path, pattern)
+        # Segment-aware match: `*`/`?` must not cross `/`. Falls back to plain
+        # fnmatch only if the translated regex is somehow invalid.
+        regex = "^" + _segment_glob_regex(pattern) + "$"
+        try:
+            return bool(re.match(regex, path))
+        except re.error:
+            return fnmatch.fnmatchcase(path, pattern)
 
     # `**` means zero-or-more directory segments. Build a regex.
     parts = pattern.split("/")
@@ -187,11 +228,7 @@ def _glob_match(pattern: str, path: str) -> bool:
             else:
                 regex_parts.append(r"(?:.*/)?")
         else:
-            seg = fnmatch.translate(part)
-            # fnmatch.translate wraps with (?s:...) and trailing \Z. Strip them.
-            seg = re.sub(r"^\(\?s:|\)\\Z$", "", seg)
-            seg = seg.rstrip("$")
-            regex_parts.append(seg)
+            regex_parts.append(_segment_glob_regex(part))
             if i < len(parts) - 1:
                 regex_parts.append("/")
     regex = "^" + "".join(regex_parts).replace("//", "/") + "$"

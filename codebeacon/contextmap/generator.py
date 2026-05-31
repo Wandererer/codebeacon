@@ -21,6 +21,7 @@ Lookup strategy encoded in each file:
 from __future__ import annotations
 
 import datetime
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,23 @@ def _hub_files(G: nx.DiGraph, top_n: int = 5) -> list[tuple[str, int]]:
     return ranked[:top_n]
 
 
+def _relativize_to(file_path: str, root: Path) -> str:
+    """Return ``file_path`` relative to ``root`` (POSIX), or unchanged if it is
+    already relative or lives outside the root.
+
+    Keeps absolute machine paths out of the committed CLAUDE.md / AGENTS.md.
+    """
+    if not file_path or not os.path.isabs(file_path):
+        return file_path
+    try:
+        rel = os.path.relpath(file_path, str(root))
+    except ValueError:
+        return file_path  # different drive on Windows
+    if rel == ".." or rel.startswith(".." + os.sep):
+        return file_path
+    return rel.replace(os.sep, "/")
+
+
 # ── Content builders ──────────────────────────────────────────────────────────
 
 _REPO_TYPE_BLURB = {
@@ -432,8 +450,13 @@ def _build_content(
     # ── High-impact files ──
     if hub_files:
         lines += ["## High-Impact Files", "", "Changes here affect many other files:", ""]
+        # CLAUDE.md is committed, so absolute machine paths here would leak one
+        # developer's home directory into the repo and churn diffs. Show paths
+        # relative to the project root (``output_dir`` is ``<root>/.codebeacon``).
+        # Mirrors graphify #999.
+        project_root = output_dir.parent
         for fp, cnt in hub_files:
-            lines.append(f"- `{fp}` (imported by {cnt} files)")
+            lines.append(f"- `{_relativize_to(fp, project_root)}` (imported by {cnt} files)")
         lines += ["", "---", ""]
 
     # ── Skills ──

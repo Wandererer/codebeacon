@@ -156,6 +156,12 @@ def _extract_razor(file_path: str) -> list[Edge]:
     for m in _RAZOR_USING_RE.finditer(text):
         # @using brings a namespace into scope; record it as imports_from on
         # the namespace name (not class) so symbol resolution can still link
-        # it to a class node when present.
-        edges.append(_make_edge(file_path, m.group(1), "imports_from"))
+        # it to a class node when present. Unlike _emit we keep the *full*
+        # namespace, but still dedupe so repeated @using directives in one
+        # file don't emit duplicate edges.
+        ns = m.group(1)
+        key = ("imports_from", ns)
+        if ns and key not in seen:
+            seen.add(key)
+            edges.append(_make_edge(file_path, ns, "imports_from"))
     return edges

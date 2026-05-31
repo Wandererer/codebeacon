@@ -202,6 +202,7 @@ def run_pipeline(projects, output_dir: str, args) -> int:
             output_path,
             repo_path=projects[0].path if projects else output_path,
             had_explicit_deletions=getattr(args, "update", False),
+            project_roots={p.name: p.path for p in projects},
         )
         if wr.skipped_shrink:
             print(
@@ -422,6 +423,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 proj_output_dir,
                 repo_path=project.path,
                 had_explicit_deletions=getattr(args, "update", False),
+                project_roots={project.name: project.path},
             )
             if wr.skipped_shrink:
                 print(
@@ -496,6 +498,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             workspace_path,
             repo_path=workspace_output_dir,
             had_explicit_deletions=getattr(args, "update", False),
+            project_roots={p.name: p.path for p in projects},
         )
         if wr_all.skipped_shrink:
             print(

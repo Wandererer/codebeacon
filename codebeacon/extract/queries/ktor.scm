@@ -94,11 +94,16 @@
 
 ; ── Exposed ORM: object Users : Table() ──────────────────────────────────────
 
+; tree-sitter-kotlin 1.x wraps the base-type list in a `delegation_specifiers`
+; (plural) node; `delegation_specifier` is nested inside it, not a direct child
+; of object_declaration. `simple_identifier` was also renamed to `identifier`.
 (object_declaration
   (identifier) @entity.table_name
-  (delegation_specifier
-    (constructor_invocation
-      (user_type (identifier) @_table (#match? @_table "^(Table|IntIdTable|LongIdTable|UUIDTable|IdTable)$"))
+  (delegation_specifiers
+    (delegation_specifier
+      (constructor_invocation
+        (user_type (identifier) @_table (#match? @_table "^(Table|IntIdTable|LongIdTable|UUIDTable|IdTable)$"))
+      )
     )
   )
 ) @entity.table
@@ -106,7 +111,7 @@
 ; Exposed columns: val id = integer("id")
 (property_declaration
   (variable_declaration
-    (simple_identifier) @entity.column_name
+    (identifier) @entity.column_name
   )
   (call_expression
     (identifier) @entity.column_type
@@ -128,13 +133,13 @@
     (class_modifier) @_data
     (#eq? @_data "data")
   )
-  (simple_identifier) @entity.class_name
+  (identifier) @entity.class_name
 ) @entity.data_class
 
 ; ── Regular class (service) ───────────────────────────────────────────────────
 
 (class_declaration
-  (simple_identifier) @service.class_name
+  (identifier) @service.class_name
 ) @service.class
 
 ; ── imports ───────────────────────────────────────────────────────────────────

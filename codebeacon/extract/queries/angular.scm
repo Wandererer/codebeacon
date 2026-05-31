@@ -28,7 +28,30 @@
 ;   @import.path            - import source
 
 ; ── @Component({...}) class ───────────────────────────────────────────────────
+; Exported form (the common case): decorator lives on the export_statement.
 
+(export_statement
+  (decorator
+    (call_expression
+      function: (identifier) @_compe (#eq? @_compe "Component")
+      arguments: (arguments
+        (object
+          (pair
+            key: (property_identifier) @_sele (#eq? @_sele "selector")
+            value: (string
+              (string_fragment) @component.selector
+            )
+          )
+        )
+      )
+    )
+  )
+  declaration: (class_declaration
+    name: (type_identifier) @component.class_name
+  )
+) @component.class
+
+; Non-exported form: decorator is a child of the class_declaration.
 (class_declaration
   (decorator
     (call_expression
@@ -67,15 +90,30 @@
 ) @component.template_url_decorator
 
 ; ── @Injectable({ providedIn: "root" }) class ────────────────────────────────
+; Class-level decorators on an *exported* class are siblings of the
+; class_declaration inside an export_statement, NOT children of it (mirrors
+; nestjs.scm). The common `export class FooService` form is matched here; the
+; bare `class FooService` form by @service.injectable_noexport below.
 
-(class_declaration
+(export_statement
   (decorator
     (call_expression
       function: (identifier) @_inj (#eq? @_inj "Injectable")
     )
   )
-  name: (type_identifier) @service.class_name
+  declaration: (class_declaration
+    name: (type_identifier) @service.class_name
+  )
 ) @service.injectable
+
+(class_declaration
+  (decorator
+    (call_expression
+      function: (identifier) @_inj2 (#eq? @_inj2 "Injectable")
+    )
+  )
+  name: (type_identifier) @service.class_name
+) @service.injectable_noexport
 
 ; Constructor DI
 (method_definition

@@ -25,6 +25,22 @@
 
 ---
 
+## What's new in 0.6.1
+
+Patch release — extraction correctness and reproducible output.
+
+- **Six framework extractors restored** — the `laravel`, `angular`, `aspnet`, `actix`, `ktor`, and `vapor` tree-sitter queries had drifted out of sync with current grammar versions and silently extracted **nothing**: the query failed to compile and the error was swallowed as a warning. All six now compile and extract against the shipped grammars (Laravel `scope:`/`name:` fields, Angular `export class` decorators, ASP.NET `invocation_expression` fields, Actix sibling-anchored attributes, Kotlin 1.x node renames, Swift 0.0.1 node set), each with a regression test so they can't silently break again.
+- **Reproducible `beacon.json`** — node `source_file` paths are rewritten relative to each project root before serialization, so scanning the same commit on two machines produces a byte-identical graph instead of churning absolute paths in diffs.
+- **`affected` no longer over-reports** — changed-file seed matching is path-segment aligned, so `src/user.py` no longer drags in unrelated nodes such as `foosrc/user.py`.
+- **`semantic-apply` crash fix** — a `confidence_score: null` in an archived/migrated JSONL edge no longer aborts the run with a `TypeError`; it coerces to the safe default like the rest of the pipeline.
+- **NetworkX 3.6 forward-compat** — `beacon.json` is written with an explicit `edges="links"` key so an upstream default change can't silently alter the on-disk format; the MCP server now loads through the same compatibility shim.
+- **Obsidian vault hygiene** — stale-note cleanup sweeps the whole vault (root + nested), and the cross-language import filter keys off the note's real source language instead of a filename suffix that never matched.
+- **gitignore semantics** — anchored patterns like `build/*.js` no longer let `*` cross `/`, so nested files are not wrongly ignored.
+- **Next.js App Router** — JS-based `page.js` / `page.jsx` routes are now discovered (previously only `.ts` / `.tsx`).
+- **DI attribution fixes** — FastAPI `Depends()` and Angular constructor injection are attributed to the enclosing function/class by byte range instead of the first/last one in the file; Razor `@using` no longer emits duplicate edges.
+
+---
+
 ## What's new in 0.6.0
 
 - **`codebeacon affected`** — given a list of changed files (or a `--base <ref>` git diff), prints every graph node downstream of the change. Built for CI risk-scoring and PR review.

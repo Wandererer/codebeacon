@@ -147,7 +147,14 @@ def _try_louvain(G: nx.DiGraph) -> Optional[dict[str, int]]:
             for node in members:
                 result[node] = community_id
         return result
-    except (AttributeError, Exception):
+    except (ImportError, AttributeError):
+        # louvain_communities is absent on NetworkX < 3.0 — fall through to the
+        # weakly-connected-components fallback without noise.
+        return None
+    except Exception as exc:
+        # A genuine failure inside Louvain (not "unavailable") should surface,
+        # matching _try_graspologic / _try_leidenalg, instead of being hidden.
+        warnings.warn(f"louvain failed: {exc}", stacklevel=2)
         return None
 
 
