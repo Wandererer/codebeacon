@@ -24,25 +24,53 @@ def cluster(G: nx.DiGraph) -> dict[str, int]:
     """Detect communities in the graph.
 
     Returns:
-        node_id → community_id mapping (community IDs are consecutive integers
-        starting from 0).
+        node_id → community_id mapping. Community IDs are consecutive integers
+        starting from 0, assigned by a *stable total order* (see
+        :func:`_relabel_stable`) so that an identical graph always yields an
+        identical mapping regardless of which backend ran or the order it
+        happened to enumerate communities in.
     """
     if G.number_of_nodes() == 0:
         return {}
 
-    result = _try_graspologic(G)
-    if result is not None:
-        return result
+    for backend in (_try_graspologic, _try_leidenalg, _try_louvain):
+        result = backend(G)
+        if result is not None:
+            return _relabel_stable(result)
 
-    result = _try_leidenalg(G)
-    if result is not None:
-        return result
+    return _relabel_stable(_connected_components(G))
 
-    result = _try_louvain(G)
-    if result is not None:
-        return result
 
-    return _connected_components(G)
+def _relabel_stable(communities: dict[str, int]) -> dict[str, int]:
+    """Reassign community IDs deterministically from the raw partition.
+
+    The Leiden / Louvain / connected-component backends each label communities
+    in whatever order they happen to enumerate them — an order that is *not*
+    stable across runs when several communities share the same size. Two scans
+    of an unchanged graph could therefore hand the same grouping different
+    integer IDs, churning 77–88% of ``beacon.json`` lines on a no-op rescan and
+    drowning real diffs (graphify measured exactly this before f5f3a1c).
+
+    We break that by imposing a total order on the communities themselves:
+    largest first, ties broken by the lexicographically-sorted tuple of member
+    node IDs. Equal groupings are bytewise-identical inputs to the sort, so they
+    always receive the same ID. The ``str()`` coercion keeps the comparison
+    well-defined even if a backend hands back non-string node keys.
+    """
+    members: dict[int, list[str]] = {}
+    for node, cid in communities.items():
+        members.setdefault(cid, []).append(node)
+
+    ordered = sorted(
+        members.values(),
+        key=lambda nodes: (-len(nodes), tuple(sorted(map(str, nodes)))),
+    )
+
+    relabeled: dict[str, int] = {}
+    for new_cid, nodes in enumerate(ordered):
+        for node in nodes:
+            relabeled[node] = new_cid
+    return relabeled
 
 
 def apply_communities(G: nx.DiGraph, communities: dict[str, int]) -> None:

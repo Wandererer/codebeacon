@@ -18,6 +18,7 @@ Three concerns:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -67,6 +68,38 @@ def escape_frontmatter_value(value: object) -> str:
     # Double single quotes per YAML single-quoted scalar rules.
     text = text.replace("'", "''")
     return text
+
+
+def cap_filename(name: str, limit: int = 200) -> str:
+    """Cap a filename stem to ``limit`` UTF-8 *bytes*, collision-safely.
+
+    A single path component is capped at 255 bytes by every mainstream
+    filesystem, so a node label long enough to overflow that — roughly 85 CJK
+    characters at 3 bytes each, or 255 ASCII — makes ``Path.write_text`` raise
+    ``OSError`` (ENAMETOOLONG) and aborts the *entire* obsidian / wiki export,
+    not just the one note. We cap to 200 bytes to leave headroom for the
+    trailing ``.md`` and any ``_N`` dedup suffix the caller appends.
+
+    Two properties matter:
+
+    * The budget is counted in **bytes**, not characters, so multi-byte scripts
+      (CJK, emoji) cannot slip past a character-count guard.
+    * When truncation actually happens we append ``_<sha1[:8]>`` of the original
+      name, so two labels sharing a long common prefix
+      (``"z"*250 + "_ALPHA"`` vs ``"z"*250 + "_BETA"``) still resolve to
+      distinct files instead of silently colliding.
+
+    Truncation slices the UTF-8 byte string and decodes with ``"ignore"`` so a
+    multi-byte character straddling the cut is dropped rather than producing
+    mojibake. Short names are returned untouched. Mirrors graphify 690b4e5.
+    """
+    encoded = name.encode("utf-8")
+    if len(encoded) <= limit:
+        return name
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    keep = max(limit - 9, 0)  # room for "_" + 8 hex chars
+    truncated = encoded[:keep].decode("utf-8", "ignore")
+    return f"{truncated}_{digest}"
 
 
 def git_head(repo_path: str | Path) -> str:

@@ -181,3 +181,21 @@
 (import_statement
   source: (string) @import.path
 ) @import.decl
+
+; ── Class heritage: extends / implements ─────────────────────────────────────
+; Feeds SymbolTable._implements_map so an interface-typed provider resolves to
+; the @Injectable class that implements it. One match is emitted per heritage
+; type (multiple implements → multiple matches); the interpreter folds them
+; back per class. Validated against tree-sitter-typescript:
+;   class_heritage → extends_clause(value:) + implements_clause(type_identifier)
+(class_declaration
+  name: (type_identifier) @service.heritage_class
+  (class_heritage
+    (extends_clause
+      value: (identifier) @service.extends
+    )?
+    (implements_clause
+      (type_identifier) @service.implements
+    )?
+  )
+) @service.with_heritage

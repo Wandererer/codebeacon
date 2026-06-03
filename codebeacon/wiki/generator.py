@@ -27,6 +27,7 @@ from typing import Any
 
 import networkx as nx
 
+from codebeacon.common.safety import cap_filename
 from codebeacon.wiki import templates
 
 
@@ -54,8 +55,15 @@ def _is_controller(label: str, annotations: list[str]) -> bool:
 
 
 def _safe_filename(label: str) -> str:
-    """Strip characters that are unsafe in filenames."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
+    """Strip filename-unsafe characters, then cap the stem to a safe byte length.
+
+    The byte cap stops a pathologically long class label (or an 85+ character
+    CJK name) from overflowing the 255-byte filesystem limit and crashing the
+    whole wiki write with ENAMETOOLONG. ``cap_filename`` keeps long-prefix
+    labels distinct via a hash suffix, so two capped names never collide.
+    """
+    cleaned = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
+    return cap_filename(cleaned)
 
 
 def node_to_wiki_path(G: nx.DiGraph, node_id: str) -> str | None:

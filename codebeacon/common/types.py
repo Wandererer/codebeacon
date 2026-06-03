@@ -62,6 +62,8 @@ class ServiceInfo:
     methods: list = field(default_factory=list)    # list[str] - method names
     dependencies: list = field(default_factory=list)  # list[str] - injected type names (unresolved)
     annotations: list = field(default_factory=list)   # list[str] - @Service, @Injectable, etc.
+    implements: list = field(default_factory=list)    # list[str] - implemented interface names
+    extends: list = field(default_factory=list)       # list[str] - superclass names
 
 
 @dataclass(slots=True)

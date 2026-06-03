@@ -137,6 +137,38 @@ def _nid(file_path: str, name: str) -> str:
     return f"{file_path}::{name}"
 
 
+def _collect_heritage(matches: list) -> dict[str, tuple[list[str], list[str]]]:
+    """Collect ``class_name → (extends, implements)`` from heritage captures.
+
+    The ``@service.with_heritage`` query pattern (TS frameworks) emits one match
+    per heritage type, so a class with ``implements IFoo, OnInit`` produces two
+    matches that both carry ``@service.heritage_class``. We fold them back into
+    per-class lists, de-duplicating while preserving declaration order. Feeds the
+    structured ``ServiceInfo.extends`` / ``.implements`` fields that
+    ``SymbolTable`` reads for interface→implementation DI resolution.
+    """
+    extends: dict[str, list[str]] = {}
+    implements: dict[str, list[str]] = {}
+    for _idx, caps in matches:
+        if "service.heritage_class" not in caps:
+            continue
+        cname = node_text(caps["service.heritage_class"][0])
+        for node in caps.get("service.extends", []):
+            val = node_text(node)
+            bucket = extends.setdefault(cname, [])
+            if val and val not in bucket:
+                bucket.append(val)
+        for node in caps.get("service.implements", []):
+            val = node_text(node)
+            bucket = implements.setdefault(cname, [])
+            if val and val not in bucket:
+                bucket.append(val)
+    return {
+        cname: (extends.get(cname, []), implements.get(cname, []))
+        for cname in set(extends) | set(implements)
+    }
+
+
 def _interpret_noop(
     file_path: str, matches: list, framework: str,
 ) -> tuple[list[ServiceInfo], list[UnresolvedRef]]:
@@ -183,6 +215,11 @@ def _interpret_spring_boot(
                 if start <= cls.start_byte <= end:
                     if iface not in info.annotations:
                         info.annotations.append(f"implements:{iface}")
+                    # Structured field too: SymbolTable reads metadata["implements"]
+                    # (not the annotation string) to drive interface→impl DI
+                    # resolution. The annotation is kept for the wiki display.
+                    if iface not in info.implements:
+                        info.implements.append(iface)
                     break
 
         # @Autowired field injection
@@ -303,6 +340,16 @@ def _interpret_nestjs(
                     ref_name=dep,
                     framework="nestjs",
                 ))
+
+    # Attach class heritage (extends / implements) so interface-typed providers
+    # resolve to their implementing service via SymbolTable._implements_map.
+    heritage = _collect_heritage(matches)
+    for svc in services.values():
+        ext, impl = heritage.get(svc.name, ([], []))
+        if ext:
+            svc.extends = ext
+        if impl:
+            svc.implements = impl
 
     return list(services.values()), unresolved
 
@@ -475,6 +522,10 @@ def _interpret_aspnet(
             )
             if iface:
                 svc.annotations.append(f"implements:{iface}")
+                # Structured field drives interface→impl DI resolution; the C#
+                # base_list's first identifier is conventionally the interface
+                # (IFoo) when a class registers via AddScoped<IFoo, FooImpl>().
+                svc.implements.append(iface)
             services.append(svc)
 
         if "di.generic_registration" in caps and "di.service_type" in caps and "di.impl_type" in caps:
@@ -634,6 +685,16 @@ def _interpret_angular(
                     ref_name=dep,
                     framework="angular",
                 ))
+
+    # Attach class heritage (extends / implements) so interface-typed providers
+    # resolve to their implementing service via SymbolTable._implements_map.
+    heritage = _collect_heritage(matches)
+    for svc in services.values():
+        ext, impl = heritage.get(svc.name, ([], []))
+        if ext:
+            svc.extends = ext
+        if impl:
+            svc.implements = impl
 
     return list(services.values()), unresolved
 

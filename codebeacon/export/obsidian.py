@@ -33,7 +33,7 @@ from typing import Any
 
 import networkx as nx
 
-from codebeacon.common.safety import escape_frontmatter_value, sanitize_label
+from codebeacon.common.safety import cap_filename, escape_frontmatter_value, sanitize_label
 
 
 # ── Regexes ────────────────────────────────────────────────────────────────────
@@ -402,9 +402,18 @@ def _reverse_relation(relation: str) -> str:
 
 
 def _safe_note_name(label: str) -> str:
-    """Convert node label to a safe filename stem (no path separators)."""
+    """Convert node label to a safe filename stem (no path separators).
+
+    The byte cap (via ``cap_filename``) prevents a very long label — or an 85+
+    character CJK class name — from overflowing the 255-byte filesystem limit
+    and crashing ``_step1_generate_notes`` with ENAMETOOLONG. Because every
+    wikilink target is generated through this same function, the note's
+    filename and the links pointing at it stay byte-for-byte consistent even
+    after truncation.
+    """
     # Replace characters that confuse Obsidian wikilinks
-    return re.sub(r'[/\\#^|[\]]', "_", label).strip()
+    cleaned = re.sub(r'[/\\#^|[\]]', "_", label).strip()
+    return cap_filename(cleaned)
 
 
 # ── Step 2: Fix broken wikilinks ──────────────────────────────────────────────

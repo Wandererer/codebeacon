@@ -62,6 +62,18 @@ def build_graph(
             service_roots, claimed_ids,
         )
 
+    # Rewrite file-path-keyed UnresolvedRef sources onto their final node IDs.
+    # The per-file extractors mint ``UnresolvedRef.source_node_id`` as
+    # ``f"{file_path}::{name}"`` (see extract/services.py::_nid), but graph nodes
+    # are keyed ``project::name``. Left unrewritten, the resolved injects edge
+    # carries a source the graph has never heard of and gets silently dropped by
+    # ``_build_nx_graph``. Spring/NestJS survive that drop because they *also*
+    # stage the dependency on ``svc.dependencies`` (which _ingest_wave re-emits
+    # with the correct id), but FastAPI ``Depends()``, Laravel ``bind()`` and
+    # ASP.NET ``AddScoped<>`` only ever emit the file-path form — so their DI
+    # edges vanished entirely until this remap.
+    _remap_unresolved_sources(all_nodes, all_unresolved)
+
     # Cross-file declaration merge. When the same symbol appears in multiple
     # files (Swift `extension Foo`, C# partial classes, Ruby reopened classes),
     # the per-file extractor emits one Node per file. NetworkX collapses them
@@ -142,6 +154,8 @@ def _ingest_wave(
                 "methods": svc.methods,
                 "dependencies": svc.dependencies,
                 "annotations": svc.annotations,
+                "implements": svc.implements,
+                "extends": svc.extends,
                 "framework": svc.framework,
                 "project": project_name,
             },
@@ -258,6 +272,64 @@ def _disambiguate_decl(
     return disambiguated, f"{name} ({hint})"
 
 
+# ── UnresolvedRef source remap ────────────────────────────────────────────────
+
+def _bare_name(node_id: str) -> str:
+    """Recover a declaration's plain name from its graph node ID.
+
+    Node IDs are ``project::Name`` or, for directory-disambiguated collisions,
+    ``project::hint/Name`` — so the trailing path segment after the last ``::``
+    and ``/`` is the original symbol name. Route IDs carry extra ``::`` segments
+    but are never DI sources, so the (harmless) value they yield never matches a
+    real ``ref_name``.
+    """
+    return node_id.rsplit("::", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _remap_unresolved_sources(
+    all_nodes: list[Node], all_unresolved: list[UnresolvedRef]
+) -> None:
+    """Point each UnresolvedRef at a real graph node ID, in place.
+
+    Two lookup tables are built from the finalized node set:
+
+    * ``by_file_name`` — ``(source_file, bare_name) → node_id``. This is the
+      exact case: the injecting class is declared in the same file the
+      extractor stamped onto the ref (Spring, NestJS, FastAPI).
+    * ``by_name`` — ``bare_name → node_id``. The fallback for binding-style DI
+      where the ref's file is the *registration site* (a Laravel ServiceProvider
+      or an ASP.NET ``Startup``) but the intended source node is the
+      implementation class declared elsewhere.
+
+    A ref whose ``source_node_id`` already names a live node (the
+    ``project::Name`` form that ``_ingest_wave`` emits from ``svc.dependencies``)
+    is left untouched, so this never disturbs edges that already resolve. A ref
+    that matches nothing is also left as-is and will drop exactly as it did
+    before — no regression, only recovery.
+    """
+    node_ids = {n.id for n in all_nodes}
+    by_file_name: dict[tuple[str, str], str] = {}
+    by_name: dict[str, list[str]] = {}
+    for n in all_nodes:
+        bare = _bare_name(n.id)
+        by_file_name.setdefault((n.source_file, bare), n.id)
+        by_name.setdefault(bare, []).append(n.id)
+
+    for ref in all_unresolved:
+        sid = ref.source_node_id
+        if sid in node_ids:
+            continue  # already a valid graph node id
+        file_part, sep, name_part = sid.rpartition("::")
+        if not sep or not name_part:
+            continue
+        new_id = by_file_name.get((file_part, name_part))
+        if new_id is None:
+            candidates = by_name.get(name_part)
+            new_id = candidates[0] if candidates else None
+        if new_id is not None:
+            ref.source_node_id = new_id
+
+
 # ── Cross-file declaration merge ──────────────────────────────────────────────
 
 def _merge_cross_file_decls(nodes: list[Node]) -> list[Node]:
@@ -271,7 +343,7 @@ def _merge_cross_file_decls(nodes: list[Node]) -> list[Node]:
     """
     _LIST_KEYS = (
         "fields", "methods", "dependencies", "annotations",
-        "relations", "props", "hooks",
+        "relations", "props", "hooks", "implements", "extends",
     )
     first: dict[str, Node] = {}
     for node in nodes:
