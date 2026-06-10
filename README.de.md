@@ -27,6 +27,16 @@
 
 ---
 
+## Neu in 0.6.4
+
+Deep-dive-Aufräumarbeit — Ausgaben landen dort, wo man nach ihnen sucht, plus zwei Bugs mit stillem Datenverlust, gefunden bei der Verifikation an einem Workspace mit 47 Projekten.
+
+- **Deep-dive schreibt auf genau zwei Ebenen** — jede *Repo-Wurzel* (ein Verzeichnis mit eigenem `.git` oder `codebeacon.yaml`) und die *Scan-Wurzel*. Die Framework-Ordner eines Monorepos (`mono/landing`, `mono/server`) bekommen nicht mehr jeweils ein eigenes `.codebeacon/` + CLAUDE.md; ihr kombinierter Graph liegt unter `mono/.codebeacon/`, und die Scan-Wurzel trägt den vollständigen Workspace-Graphen, sodass jedes Projekt von einer Stelle aus auffindbar ist. Deep-dive *innerhalb* eines Monorepos auszuführen erzeugt jetzt eine einzige Wurzel-Ausgabe statt einer pro Unterordner.
+- **Cache-Schlüssel sind nach Framework namespaced** — eine Repo-Gruppe teilt sich einen Cache, und ein Elternprojekt, das die Dateien eines verschachtelten Projekts zuerst durchlief (`desktop/` als sveltekit über `desktop/src-tauri`), vergiftete den Cache zuvor mit leeren Ergebnissen, die das verschachtelte Projekt (tauri) dann wiederverwendete — und so stillschweigend alle seine Routen und Entitäten verlor.
+- **Grammatik-Lade-Race behoben** — zwei parallele Extraktions-Worker, die auf eine ungecachte tree-sitter-Grammatik trafen, bauten jeweils eine eigene `Language`-Instanz; die Dateien des unterlegenen Threads fielen anschließend durch einen Identitätscheck und extrahierten zu **nichts** — keine Warnung, kein Fehlereintrag, nur ein paar Dateien, denen bei großen Scans zufällig alle Routen fehlten. Der erste Ladevorgang ist jetzt auf eine einzige geteilte Instanz gelockt (über 20 aufeinanderfolgende Vollscans als stabil verifiziert).
+
+---
+
 ## Neu in 0.6.3
 
 Bugfix-Release — ein graphify-Paritätsaudit (Upstream 3.–10. Juni) plus ein unabhängiges Audit von codebeacons eigenem Code: **16 Fixes**, Ende-zu-Ende verifiziert mit einem `--deep-dive`-Workspace-Scan über 47 Projekte (5.226 Knoten / 8.715 Kanten).

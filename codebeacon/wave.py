@@ -87,9 +87,11 @@ def _extract_file(
     two paths — the function never returns None so partial graphs cannot be
     masked by silent drops.
     """
-    # Check cache before parsing
+    # Check cache before parsing. Keyed by framework too: one cache can serve
+    # several projects in a repo group, and the same file extracted under a
+    # different framework yields different results.
     if cache is not None:
-        cached = cache.get(file_path)
+        cached = cache.get(file_path, framework=framework)
         if cached is not None:
             return {"_cache_hit": True, **cached}
 
@@ -123,7 +125,7 @@ def _extract_file(
 
         if cache is not None:
             fh = cache.file_hash(file_path)
-            cache.put(file_path, result, fh)
+            cache.put(file_path, result, fh, framework=framework)
 
         return result
 

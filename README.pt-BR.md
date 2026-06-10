@@ -27,6 +27,16 @@
 
 ---
 
+## Novidades na 0.6.4
+
+Limpeza do deep-dive — as saídas caem onde você procura por elas, mais dois bugs de perda silenciosa de dados encontrados ao verificá-lo num workspace de 47 projetos.
+
+- **O deep-dive escreve em exatamente dois níveis** — cada *raiz de repo* (um diretório com seu próprio `.git` ou `codebeacon.yaml`) e a *raiz do escaneamento*. As pastas de framework de um monorepo (`mono/landing`, `mono/server`) não ganham mais cada uma seu próprio `.codebeacon/` + CLAUDE.md; o grafo combinado delas vive em `mono/.codebeacon/`, e a raiz do escaneamento carrega o grafo completo do workspace, então qualquer projeto pode ser encontrado a partir de um só lugar. Rodar o deep-dive *dentro* de um monorepo agora produz uma única saída raiz em vez de uma por subpasta.
+- **Chaves de cache têm namespace por framework** — um grupo de repos compartilha um cache, e um projeto pai que percorria primeiro os arquivos de um projeto aninhado (`desktop/` como sveltekit sobre `desktop/src-tauri`) envenenava o cache com resultados vazios que o projeto aninhado (tauri) depois reutilizava, descartando silenciosamente todas as suas rotas e entidades.
+- **Corrida no carregamento de gramáticas corrigida** — dois workers de extração em paralelo encontrando uma gramática tree-sitter sem cache construíam cada um sua própria instância de `Language`; os arquivos da thread perdedora então falhavam numa checagem de identidade e extraíam **nada** — sem aviso, sem registro de falha, só alguns arquivos aleatoriamente sem todas as suas rotas em escaneamentos grandes. O primeiro carregamento agora está travado numa única instância compartilhada (verificado estável ao longo de 20 escaneamentos completos consecutivos).
+
+---
+
 ## Novidades na 0.6.3
 
 Versão de correção de bugs — uma auditoria de paridade com o graphify (upstream 3–10 de junho) mais uma auditoria independente do próprio código do codebeacon: **16 correções**, verificadas de ponta a ponta com um escaneamento de workspace `--deep-dive` de 47 projetos (5.226 nós / 8.715 arestas).

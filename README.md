@@ -25,6 +25,16 @@
 
 ---
 
+## What's new in 0.6.4
+
+Deep-dive cleanup — outputs land where you look for them, and two silent-data-loss bugs found while verifying it on a 47-project workspace.
+
+- **Deep-dive writes to exactly two levels** — each *repo root* (a directory with its own `.git` or `codebeacon.yaml`) and the *scan root*. A monorepo's framework folders (`mono/landing`, `mono/server`) no longer each grow a `.codebeacon/` + CLAUDE.md; their combined graph lives at `mono/.codebeacon/`, and the scan root carries the full workspace graph so any project can be found from one place. Running deep-dive *inside* a monorepo now produces a single root output instead of one per subfolder.
+- **Cache keys are framework-namespaced** — a repo group shares one cache, and a parent project walking over a nested project's files first (`desktop/` as sveltekit over `desktop/src-tauri`) used to poison the cache with empty results that the nested project (tauri) then reused, silently dropping all of its routes and entities.
+- **Grammar-load race fixed** — two parallel extraction workers hitting an uncached tree-sitter grammar each built their own `Language` instance; the losing thread's files then failed an identity check and extracted to **nothing** — no warning, no failure record, just a couple of files randomly missing all their routes on big scans. First load is now locked to a single shared instance (verified stable across 20 consecutive full scans).
+
+---
+
 ## What's new in 0.6.3
 
 Bug-fix release — a graphify-parity audit (upstream Jun 3–10) plus an independent audit of codebeacon's own code: **16 fixes**, verified end-to-end with a 47-project `--deep-dive` workspace scan (5,226 nodes / 8,715 edges).

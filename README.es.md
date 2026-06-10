@@ -27,6 +27,16 @@
 
 ---
 
+## Novedades en 0.6.4
+
+Limpieza del deep-dive — las salidas aterrizan donde las buscas, más dos bugs de pérdida silenciosa de datos encontrados al verificarlo en un workspace de 47 proyectos.
+
+- **El deep-dive escribe exactamente en dos niveles** — cada *raíz de repo* (un directorio con su propio `.git` o `codebeacon.yaml`) y la *raíz del escaneo*. Las carpetas de framework de un monorepo (`mono/landing`, `mono/server`) ya no generan cada una su propio `.codebeacon/` + CLAUDE.md; su grafo combinado vive en `mono/.codebeacon/`, y la raíz del escaneo lleva el grafo completo del workspace, así cualquier proyecto puede encontrarse desde un solo lugar. Ejecutar deep-dive *dentro* de un monorepo ahora produce una única salida raíz en lugar de una por subcarpeta.
+- **Las claves de caché tienen namespace por framework** — un grupo de repos comparte una caché, y un proyecto padre que recorría primero los archivos de un proyecto anidado (`desktop/` como sveltekit sobre `desktop/src-tauri`) envenenaba la caché con resultados vacíos que el proyecto anidado (tauri) luego reutilizaba, perdiendo en silencio todas sus rutas y entidades.
+- **Corregida la condición de carrera al cargar gramáticas** — dos workers de extracción en paralelo que tocaban una gramática de tree-sitter sin cachear construían cada uno su propia instancia de `Language`; los archivos del hilo perdedor fallaban entonces una comprobación de identidad y extraían **nada** — sin advertencia, sin registro de fallo, solo un par de archivos a los que aleatoriamente les faltaban todas sus rutas en escaneos grandes. La primera carga ahora está bloqueada a una única instancia compartida (verificada estable a lo largo de 20 escaneos completos consecutivos).
+
+---
+
 ## Novedades en 0.6.3
 
 Versión de corrección de errores — una auditoría de paridad con graphify (upstream 3–10 de junio) más una auditoría independiente del propio código de codebeacon: **16 correcciones**, verificadas de extremo a extremo con un escaneo de workspace `--deep-dive` de 47 proyectos (5.226 nodos / 8.715 aristas).

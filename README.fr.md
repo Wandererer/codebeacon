@@ -27,6 +27,16 @@
 
 ---
 
+## Nouveautés en 0.6.4
+
+Nettoyage du deep-dive — les sorties atterrissent là où vous les cherchez, plus deux bugs de perte silencieuse de données trouvés en le vérifiant sur un workspace de 47 projets.
+
+- **Le deep-dive écrit exactement à deux niveaux** — chaque *racine de dépôt* (un répertoire avec son propre `.git` ou `codebeacon.yaml`) et la *racine du scan*. Les dossiers framework d'un monorepo (`mono/landing`, `mono/server`) ne reçoivent plus chacun leur propre `.codebeacon/` + CLAUDE.md ; leur graphe combiné vit dans `mono/.codebeacon/`, et la racine du scan porte le graphe complet du workspace, donc n'importe quel projet se trouve depuis un seul endroit. Lancer le deep-dive *à l'intérieur* d'un monorepo produit désormais une seule sortie racine au lieu d'une par sous-dossier.
+- **Les clés de cache sont namespacées par framework** — un groupe de dépôts partage un seul cache, et un projet parent parcourant en premier les fichiers d'un projet imbriqué (`desktop/` comme sveltekit au-dessus de `desktop/src-tauri`) empoisonnait auparavant le cache avec des résultats vides que le projet imbriqué (tauri) réutilisait ensuite, perdant silencieusement toutes ses routes et entités.
+- **Course au chargement des grammaires corrigée** — deux workers d'extraction parallèles touchant une grammaire tree-sitter non mise en cache construisaient chacun leur propre instance `Language` ; les fichiers du thread perdant échouaient alors à une vérification d'identité et n'extrayaient **rien** — aucun avertissement, aucun enregistrement d'échec, juste quelques fichiers auxquels il manquait aléatoirement toutes leurs routes sur les gros scans. Le premier chargement est désormais verrouillé sur une seule instance partagée (vérifié stable sur 20 scans complets consécutifs).
+
+---
+
 ## Nouveautés en 0.6.3
 
 Version de correction de bugs — un audit de parité avec graphify (upstream 3–10 juin) plus un audit indépendant du propre code de codebeacon : **16 correctifs**, vérifiés de bout en bout avec un scan de workspace `--deep-dive` sur 47 projets (5 226 nœuds / 8 715 arêtes).

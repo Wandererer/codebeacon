@@ -68,20 +68,28 @@ class Cache:
         # the get()/put() check-then-act sequences need a lock to stay atomic.
         self._lock = threading.RLock()
 
-    def _key(self, file_path: str) -> str:
+    def _key(self, file_path: str, framework: str = "") -> str:
         """Map a (possibly absolute) ``file_path`` to its on-disk cache key.
 
         Returns a repo-relative POSIX path when ``project_root`` is set
         and the file lies inside it; otherwise the path is returned
         verbatim (legacy / out-of-tree files keep their original keying).
+
+        ``framework`` namespaces the key: extraction results depend on the
+        framework's query set, and one cache can serve several projects (a
+        monorepo group shares a single cache at its repo root). Without the
+        namespace, a parent project scanning a nested project's files first
+        (desktop/ sveltekit walking over desktop/src-tauri) poisons the cache
+        with empty results that the nested project (tauri) then reuses.
         """
         if self._root is None:
-            return file_path
-        try:
-            rel = Path(file_path).resolve().relative_to(self._root)
-        except (ValueError, OSError):
-            return file_path
-        return rel.as_posix()
+            key = file_path
+        else:
+            try:
+                key = Path(file_path).resolve().relative_to(self._root).as_posix()
+            except (ValueError, OSError):
+                key = file_path
+        return f"{framework}::{key}" if framework else key
 
     def load(self) -> None:
         """Load cache from disk. Safe to call even if the cache file doesn't exist.
@@ -156,14 +164,14 @@ class Cache:
         self._stat_memo[file_path] = result
         return result
 
-    def is_fresh(self, file_path: str) -> bool:
+    def is_fresh(self, file_path: str, framework: str = "") -> bool:
         """Return True if the cached entry still matches the file.
 
         Uses mtime + size as a fast path. On a stat mismatch we fall back to a
         full content hash so a true content change is detected, but a mtime-only
         bump (sync tools, ``touch``) is treated as unchanged.
         """
-        entry = self._data.get(self._key(file_path))
+        entry = self._data.get(self._key(file_path, framework))
         if not entry:
             return False
         mtime_ns, size = self._file_stat(file_path)
@@ -171,10 +179,10 @@ class Cache:
             return True
         return entry.get("hash") == self.file_hash(file_path)
 
-    def get(self, file_path: str) -> Optional[dict]:
+    def get(self, file_path: str, framework: str = "") -> Optional[dict]:
         """Return the cached extraction result dict, or None if stale/missing."""
         with self._lock:
-            key = self._key(file_path)
+            key = self._key(file_path, framework)
             entry = self._data.get(key)
             if not entry:
                 return None
@@ -190,13 +198,17 @@ class Cache:
             self._dirty = True
             return entry.get("result")
 
-    def put(self, file_path: str, result: Any, file_hash: Optional[str] = None) -> None:
+    def put(
+        self, file_path: str, result: Any, file_hash: Optional[str] = None,
+        framework: str = "",
+    ) -> None:
         """Store an extraction result for a file.
 
         Args:
             file_path: absolute path to the source file
             result: extraction result dict (must be JSON-serializable)
             file_hash: pre-computed SHA-256 digest (computed if not provided)
+            framework: extraction namespace — see :meth:`_key`
         """
         h = file_hash or self.file_hash(file_path)
         if not isinstance(result, dict):
@@ -208,7 +220,7 @@ class Cache:
 
         with self._lock:
             mtime_ns, size = self._file_stat(file_path)
-            self._data[self._key(file_path)] = {
+            self._data[self._key(file_path, framework)] = {
                 "hash": h,
                 "result": result,
                 "ts": time.time(),
@@ -219,17 +231,18 @@ class Cache:
             self._dirty = True
 
     def invalidate(self, file_path: str) -> None:
-        """Remove a specific file's cache entry."""
-        key = self._key(file_path)
-        if key in self._data:
-            del self._data[key]
-            self._dirty = True
-        # Fall through to legacy absolute-key lookup for backwards compat
-        if file_path in self._data:
-            del self._data[file_path]
-            self._dirty = True
-        self._hash_memo.pop(file_path, None)
-        self._stat_memo.pop(file_path, None)
+        """Remove a file's cache entries across ALL framework namespaces."""
+        base = self._key(file_path)
+        with self._lock:
+            doomed = [
+                k for k in self._data
+                if k == base or k.endswith("::" + base) or k == file_path
+            ]
+            for k in doomed:
+                del self._data[k]
+                self._dirty = True
+            self._hash_memo.pop(file_path, None)
+            self._stat_memo.pop(file_path, None)
 
     def clear(self) -> None:
         """Remove all cache entries."""

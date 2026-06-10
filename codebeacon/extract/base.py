@@ -11,6 +11,7 @@ If a grammar is not installed, that language is gracefully skipped with a warnin
 from __future__ import annotations
 
 import re
+import threading
 import warnings
 from pathlib import Path
 from typing import Iterator, Optional
@@ -20,6 +21,13 @@ from tree_sitter import Language, Parser, Query, QueryCursor, Node
 # ── Grammar registry ─────────────────────────────────────────────────────────
 
 _LANG_CACHE: dict[str, Optional[Language]] = {}
+# Guards first-load of a grammar. Without it, two wave worker threads hitting
+# the same uncached grammar each build their OWN Language instance and the
+# loser's overwrites the cache. The winner thread then fails the
+# `cache_value is lang` identity check in is_grammar_allowed() and its file
+# extracts to [] — silently, no warning, no failure record. Observed as a
+# couple of files randomly losing all routes on large parallel scans.
+_LANG_LOCK = threading.Lock()
 
 _GRAMMAR_MODULES: dict[str, str] = {
     "python":     "tree_sitter_python",
@@ -101,15 +109,29 @@ def is_grammar_allowed(query_name: str, lang: Language) -> bool:
     allowed = QUERY_GRAMMAR_ALLOWLIST.get(query_name)
     if allowed is None:
         return True  # no restriction defined — attempt the query
-    # Reverse-lookup the grammar name from the cached Language object
-    gram_name = next((k for k, v in _LANG_CACHE.items() if v is lang), None)
+    # Reverse-lookup the grammar name from the cached Language object.
+    # Snapshot the items: another thread may insert a new grammar mid-iteration
+    # (RuntimeError: dictionary changed size during iteration).
+    gram_name = next((k for k, v in list(_LANG_CACHE.items()) if v is lang), None)
     if gram_name is None:
         return False  # can't determine — deny when allowlist exists
     return gram_name in allowed
 
 
 def get_language(name: str) -> Optional[Language]:
-    """Return a Language object for the given grammar name, or None if not installed."""
+    """Return THE Language object for a grammar name, or None if not installed.
+
+    Exactly one instance per grammar is ever cached (double-checked lock) —
+    is_grammar_allowed() relies on identity to reverse-map a Language back to
+    its grammar name, so duplicate instances mean silently dropped files.
+    """
+    if name in _LANG_CACHE:
+        return _LANG_CACHE[name]
+    with _LANG_LOCK:
+        return _load_language_locked(name)
+
+
+def _load_language_locked(name: str) -> Optional[Language]:
     if name in _LANG_CACHE:
         return _LANG_CACHE[name]
 
