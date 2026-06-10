@@ -70,6 +70,10 @@ def load_config(path: str | Path) -> CodebeaconConfig:
 
     projects = []
     for p in projects_raw:
+        # A bare `-` in the YAML list arrives as None; a scalar entry as str.
+        # Both must surface as a config error, not a TypeError traceback.
+        if not isinstance(p, dict):
+            raise ValueError(f"Invalid project entry (expected mapping): {p!r}")
         if "name" not in p or "path" not in p:
             raise ValueError(f"Project entry missing 'name' or 'path': {p}")
         # Resolve path relative to config file location
@@ -82,8 +86,10 @@ def load_config(path: str | Path) -> CodebeaconConfig:
             type=p.get("type", "auto"),
         ))
 
-    output_raw = raw.get("output", {})
-    context_map = output_raw.get("context_map", {})
+    # `.get(key, {})` is not enough: a section present-but-empty in the YAML
+    # (`output:` on its own line) loads as None, and None.get(...) crashes.
+    output_raw = raw.get("output") or {}
+    context_map = output_raw.get("context_map") or {}
     output = OutputConfig(
         dir=output_raw.get("dir", ".codebeacon"),
         wiki=output_raw.get("wiki", True),
@@ -91,14 +97,14 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         context_map_targets=context_map.get("targets", ["CLAUDE.md", ".cursorrules", "AGENTS.md"]),
     )
 
-    wave_raw = raw.get("wave", {})
+    wave_raw = raw.get("wave") or {}
     wave = WaveConfig(
         auto=wave_raw.get("auto", True),
         chunk_size=wave_raw.get("chunk_size", 300),
         max_parallel=wave_raw.get("max_parallel", 5),
     )
 
-    semantic_raw = raw.get("semantic", {})
+    semantic_raw = raw.get("semantic") or {}
     semantic = SemanticConfig(
         enabled=semantic_raw.get("enabled", False),
     )

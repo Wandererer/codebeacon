@@ -218,10 +218,19 @@ def _detect_language_from_files(directory: Path) -> str:
         ".swift": "swift",
     }
     try:
-        for entry in directory.rglob("*"):
-            if entry.is_file() and entry.suffix in ext_to_lang:
-                lang = ext_to_lang[entry.suffix]
-                counts[lang] = counts.get(lang, 0) + 1
+        # os.walk with pruning, not rglob: an unbounded rglob descends into
+        # node_modules / .git / dist, which on a Node repo means enumerating
+        # tens of thousands of vendored files (and skews the language vote
+        # toward vendored JS) just to answer "what language is this project".
+        for dirpath, dirnames, filenames in os.walk(directory):
+            dirnames[:] = [
+                d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")
+            ]
+            for fname in filenames:
+                ext = os.path.splitext(fname)[1]
+                if ext in ext_to_lang:
+                    lang = ext_to_lang[ext]
+                    counts[lang] = counts.get(lang, 0) + 1
     except (PermissionError, OSError):
         pass
 

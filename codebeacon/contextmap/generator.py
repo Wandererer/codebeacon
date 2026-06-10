@@ -247,14 +247,26 @@ def _collect_stats(G: nx.DiGraph) -> dict[str, dict[str, int]]:
 
 
 def _hub_files(G: nx.DiGraph, top_n: int = 5) -> list[tuple[str, int]]:
-    """Return (file_path, import_count) for the most-imported source files."""
-    counter: dict[str, int] = defaultdict(int)
-    for _, _, data in G.edges(data=True):
-        if data.get("relation") in ("imports", "imports_from"):
-            sf = data.get("source_file", "")
-            if sf:
-                counter[sf] += 1
-    ranked = sorted(counter.items(), key=lambda x: x[1], reverse=True)
+    """Return (file_path, importer_count) for the most-imported source files.
+
+    Counts DISTINCT importing files per edge-target file, mirroring
+    analyze.hub_files. The old version counted `edge["source_file"]` — the
+    importer's own file — so CLAUDE.md's "High-Impact Files" actually listed
+    the files that *import the most* (entry points), with counts inflated by
+    per-node edge remapping (e.g. "imported by 392 files" in a 60-file repo).
+    """
+    importers: dict[str, set[str]] = defaultdict(set)
+    for src, tgt, data in G.edges(data=True):
+        if data.get("relation") not in ("imports", "imports_from"):
+            continue
+        tgt_file = G.nodes[tgt].get("source_file", "")
+        src_file = G.nodes[src].get("source_file", "")
+        if tgt_file and src_file and tgt_file != src_file:
+            importers[tgt_file].add(src_file)
+    ranked = sorted(
+        ((fp, len(srcs)) for fp, srcs in importers.items()),
+        key=lambda x: (-x[1], x[0]),
+    )
     return ranked[:top_n]
 
 

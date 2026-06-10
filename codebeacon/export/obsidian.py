@@ -641,7 +641,11 @@ def _step8_move_remaining(vault: Path) -> None:
         content = md.read_text(errors="ignore")
         m = _PROJECT_RE.search(content)
         if m and m.group(1):
-            svc = m.group(1)
+            # Cap here so the folder, the Step-9 hub note (`<svc>/<svc>.md`),
+            # and every backlink derived from the folder name stay consistent
+            # and under the 255-byte filesystem limit — note filenames are
+            # capped in _safe_note_name but this path wasn't.
+            svc = cap_filename(m.group(1))
             dest_dir = vault / svc
             dest_dir.mkdir(exist_ok=True)
             dest = dest_dir / md.name

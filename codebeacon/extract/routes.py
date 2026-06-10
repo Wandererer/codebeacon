@@ -857,14 +857,21 @@ def _interpret_ktor(file_path: str, matches: list, framework: str) -> list[Route
             method = node_text(caps["route.method"][0])
             path = node_text(caps["route.path"][0])
             line = call_node.start_point[0] + 1
-            # Find innermost applicable prefix scope
-            prefix = ""
-            for start, end, pfx in prefix_scopes:
-                if start <= call_node.start_point[0] <= end:
-                    prefix = pfx
+            # Concatenate ALL enclosing prefix scopes, outermost first —
+            # Ktor nests them: route("/api") { route("/v1") { get("/users") }}
+            # serves /api/v1/users. Keeping only the last (innermost) match
+            # silently dropped every outer prefix.
+            enclosing = sorted(
+                (
+                    (start, pfx)
+                    for start, end, pfx in prefix_scopes
+                    if start <= call_node.start_point[0] <= end
+                ),
+                key=lambda t: t[0],
+            )
             routes.append(RouteInfo(
                 method=method.upper(),
-                path=_join(prefix, path),
+                path=_join(*(pfx for _, pfx in enclosing), path),
                 handler="",
                 source_file=file_path,
                 line=line,

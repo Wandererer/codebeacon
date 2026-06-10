@@ -8,13 +8,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from codebeacon.common.safety import safe_wiki_filename
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _rel_link(label: str, project: str) -> str:
-    """Produce a relative markdown link (same project)."""
-    safe = label.replace(" ", "%20")
-    return f"[{label}](./{safe}.md)"
+    """Produce a relative markdown link (same project).
+
+    The link target must be the exact stem the generator writes the file
+    under (``safe_wiki_filename``) — space-encoding alone left links to any
+    label with `#`, parentheses, generics, etc. pointing at missing files.
+    """
+    return f"[{label}](./{safe_wiki_filename(label)}.md)"
 
 
 def _back_link(project_name: str) -> str:
@@ -339,28 +345,19 @@ def project_index(
         "",
     ]
 
-    if controllers:
-        lines += ["## Controllers", ""]
-        for name in sorted(controllers):
-            lines.append(f"- [controllers/{name}](./controllers/{name}.md)")
-        lines.append("")
-
-    if services:
-        lines += ["## Services", ""]
-        for name in sorted(services):
-            lines.append(f"- [services/{name}](./services/{name}.md)")
-        lines.append("")
-
-    if entities:
-        lines += ["## Entities", ""]
-        for name in sorted(entities):
-            lines.append(f"- [entities/{name}](./entities/{name}.md)")
-        lines.append("")
-
-    if components:
-        lines += ["## Components", ""]
-        for name in sorted(components):
-            lines.append(f"- [components/{name}](./components/{name}.md)")
+    for heading, bucket, names in (
+        ("Controllers", "controllers", controllers),
+        ("Services", "services", services),
+        ("Entities", "entities", entities),
+        ("Components", "components", components),
+    ):
+        if not names:
+            continue
+        lines += [f"## {heading}", ""]
+        for name in sorted(names):
+            # Link target uses the same transform the generator names the
+            # file with; the display text stays the raw label.
+            lines.append(f"- [{bucket}/{name}](./{bucket}/{safe_wiki_filename(name)}.md)")
         lines.append("")
 
     lines += ["---", "_Back to [index.md](../index.md)_"]

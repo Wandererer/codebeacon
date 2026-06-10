@@ -27,6 +27,8 @@ class SymbolTable:
         self._implements_map: dict[str, list[str]] = {}
         # All known node IDs
         self._node_ids: set[str] = set()
+        # node_id → source_file, so resolved edges carry a real file path
+        self._node_files: dict[str, str] = {}
 
     def build(self, nodes: list[Node]) -> None:
         """Build symbol maps from a flat list of all extracted nodes.
@@ -35,6 +37,7 @@ class SymbolTable:
         """
         for node in nodes:
             self._node_ids.add(node.id)
+            self._node_files[node.id] = node.source_file or ""
 
             label = node.label
             if label not in self._class_map:
@@ -91,7 +94,10 @@ class SymbolTable:
             relation="injects",
             confidence="INFERRED" if is_interface_resolved else "EXTRACTED",
             confidence_score=0.8 if is_interface_resolved else 1.0,
-            source_file=ref.source_node_id,
+            # The source node's actual file — Edge.source_file is a file path
+            # everywhere else; stamping the node ID here leaked "proj::Name"
+            # strings into beacon.json's source_file fields.
+            source_file=self._node_files.get(ref.source_node_id, ""),
         )
 
     def resolve_all(

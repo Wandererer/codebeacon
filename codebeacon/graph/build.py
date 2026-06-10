@@ -401,6 +401,11 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
 
     for node in all_nodes:
         file_to_nodes.setdefault(node.source_file, []).append(node.id)
+        # A node with a None/empty label (defective extractor output, replayed
+        # semantic archive) must not abort the whole build — graphify #1194
+        # crashed in exactly this spot via `None.casefold()`.
+        if not node.label:
+            continue
         label_to_nodes.setdefault(node.label, []).append(node.id)
         label_cf_to_nodes.setdefault(node.label.casefold(), []).append(node.id)
 

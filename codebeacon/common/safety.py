@@ -102,6 +102,20 @@ def cap_filename(name: str, limit: int = 200) -> str:
     return f"{truncated}_{digest}"
 
 
+def safe_wiki_filename(label: str) -> str:
+    """Filename stem for a wiki article: filesystem-safe and byte-capped.
+
+    Lives here (not in wiki/generator.py) because BOTH sides of every wiki
+    link must agree on it: the generator names the file with it, and the
+    templates build `./<stem>.md` links with it. When the two used different
+    transforms, any label with a character outside [-_.\\w] (spaces, `#`,
+    parentheses, `<>` from generics) produced a file at one path and links
+    pointing at another — every such link was dead on arrival.
+    """
+    cleaned = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
+    return cap_filename(cleaned)
+
+
 def git_head(repo_path: str | Path) -> str:
     """Return the full HEAD commit SHA for ``repo_path``, or "" if not a repo.
 

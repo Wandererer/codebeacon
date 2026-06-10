@@ -44,7 +44,9 @@ def _extract_api_urls(source_file: str) -> list[str]:
             url = m.group(1).split("?")[0].split("#")[0].strip()
             if _URL_LIKE.match(url):
                 urls.add(url)
-    return list(urls)
+    # Sorted so edge insertion order — and therefore beacon.json — is
+    # deterministic across runs. Mirrors graphify #1090.
+    return sorted(urls)
 
 
 def enrich_http_api(G: nx.DiGraph) -> int:
@@ -60,15 +62,18 @@ def enrich_http_api(G: nx.DiGraph) -> int:
     """
     added = 0
 
-    # Build route lookup: normalized_path → (node_id, project)
-    route_map: dict[str, tuple[str, str]] = {}
+    # Build route lookup: normalized_path → [(node_id, project), ...].
+    # A list, not a single tuple — in a monorepo two services legitimately
+    # expose the same path (gateway + upstream both serving /api/users), and
+    # a last-writer-wins dict silently dropped all but one of them.
+    route_map: dict[str, list[tuple[str, str]]] = {}
     for node_id, data in G.nodes(data=True):
         if data.get("type") != "route":
             continue
         path = data.get("path", "")
         if path:
             proj = data.get("project", "")
-            route_map[_normalize_path(path)] = (node_id, proj)
+            route_map.setdefault(_normalize_path(path), []).append((node_id, proj))
 
     if not route_map:
         return 0
@@ -93,35 +98,40 @@ def enrich_http_api(G: nx.DiGraph) -> int:
 
             # Exact match
             if normalized in route_map:
-                target_id, target_proj = route_map[normalized]
-                # Only create cross-project edges (skip same-project)
-                if target_proj == src_proj:
-                    continue
-                if not G.has_edge(node_id, target_id):
-                    G.add_edge(
-                        node_id, target_id,
-                        relation="calls_api",
-                        confidence="EXTRACTED",
-                        confidence_score=1.0,
-                        source_file=src_file,
-                    )
-                    added += 1
-                continue
-
-            # Parameterized match: /api/users/123 → /api/users/:id
-            for route_path, (route_node_id, route_proj) in route_map.items():
-                if route_proj == src_proj:
-                    continue
-                if _paths_match(normalized, route_path):
-                    if not G.has_edge(node_id, route_node_id):
+                for target_id, target_proj in route_map[normalized]:
+                    # Only create cross-project edges (skip same-project)
+                    if target_proj == src_proj:
+                        continue
+                    if not G.has_edge(node_id, target_id):
                         G.add_edge(
-                            node_id, route_node_id,
+                            node_id, target_id,
                             relation="calls_api",
-                            confidence="INFERRED",
-                            confidence_score=0.8,
+                            confidence="EXTRACTED",
+                            confidence_score=1.0,
                             source_file=src_file,
                         )
                         added += 1
+                continue
+
+            # Parameterized match: /api/users/123 → /api/users/:id
+            matched = False
+            for route_path, candidates in route_map.items():
+                for route_node_id, route_proj in candidates:
+                    if route_proj == src_proj:
+                        continue
+                    if _paths_match(normalized, route_path):
+                        if not G.has_edge(node_id, route_node_id):
+                            G.add_edge(
+                                node_id, route_node_id,
+                                relation="calls_api",
+                                confidence="INFERRED",
+                                confidence_score=0.8,
+                                source_file=src_file,
+                            )
+                            added += 1
+                        matched = True
+                        break
+                if matched:
                     break
 
     return added
@@ -219,7 +229,8 @@ def _extract_ipc_commands(source_file: str) -> list[str]:
     for pat in _IPC_INVOKE_RES:
         for m in pat.finditer(content):
             commands.add(m.group(1))
-    return list(commands)
+    # Sorted for deterministic edge order (graphify #1090).
+    return sorted(commands)
 
 
 def enrich_ipc_invoke(G: nx.DiGraph) -> int:

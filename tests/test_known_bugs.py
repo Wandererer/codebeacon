@@ -180,8 +180,8 @@ class TestCacheRelativeKeys:
 
 class TestPostCommitHookFiltering:
     def _hook(self) -> str:
-        from codebeacon.export.hooks import _POST_COMMIT_HOOK
-        return _POST_COMMIT_HOOK
+        from codebeacon.export.hooks import _render_post_commit_hook
+        return _render_post_commit_hook()
 
     def test_hook_inspects_changed_files(self):
         """The hook must look at the diff before triggering a rebuild."""

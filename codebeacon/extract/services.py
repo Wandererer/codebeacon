@@ -400,8 +400,13 @@ def _interpret_fastapi(
                     if best_span is None or span < best_span:
                         best_span = span
                         enclosing = name
+            # No enclosing matched function (untyped params, module-level
+            # Depends, FastAPI(dependencies=[...])) — skip rather than emit a
+            # ghost "<file>::unknown" source that can never resolve to a node.
+            if not enclosing:
+                continue
             unresolved.append(UnresolvedRef(
-                source_node_id=_nid(file_path, enclosing or "unknown"),
+                source_node_id=_nid(file_path, enclosing),
                 ref_type="depends",
                 ref_name=dep_func,
                 framework="fastapi",

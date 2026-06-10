@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -63,6 +64,9 @@ class Cache:
         self._hash_memo: dict[str, str] = {}
         # Memoize stat() results within a single run as well
         self._stat_memo: dict[str, tuple[int, int]] = {}
+        # One Cache instance is shared by the wave ThreadPoolExecutor workers;
+        # the get()/put() check-then-act sequences need a lock to stay atomic.
+        self._lock = threading.RLock()
 
     def _key(self, file_path: str) -> str:
         """Map a (possibly absolute) ``file_path`` to its on-disk cache key.
@@ -117,8 +121,9 @@ class Cache:
 
     def file_hash(self, file_path: str) -> str:
         """Compute (and memoize) the SHA-256 hex digest of a file's contents."""
-        if file_path in self._hash_memo:
-            return self._hash_memo[file_path]
+        with self._lock:
+            if file_path in self._hash_memo:
+                return self._hash_memo[file_path]
 
         h = hashlib.sha256()
         try:
@@ -129,7 +134,8 @@ class Cache:
         except OSError:
             digest = ""
 
-        self._hash_memo[file_path] = digest
+        with self._lock:
+            self._hash_memo[file_path] = digest
         return digest
 
     def _file_stat(self, file_path: str) -> tuple[int, int]:
@@ -167,21 +173,22 @@ class Cache:
 
     def get(self, file_path: str) -> Optional[dict]:
         """Return the cached extraction result dict, or None if stale/missing."""
-        key = self._key(file_path)
-        entry = self._data.get(key)
-        if not entry:
-            return None
-        mtime_ns, size = self._file_stat(file_path)
-        if entry.get("mtime_ns") == mtime_ns and entry.get("size") == size:
+        with self._lock:
+            key = self._key(file_path)
+            entry = self._data.get(key)
+            if not entry:
+                return None
+            mtime_ns, size = self._file_stat(file_path)
+            if entry.get("mtime_ns") == mtime_ns and entry.get("size") == size:
+                return entry.get("result")
+            if entry.get("hash") != self.file_hash(file_path):
+                return None
+            # Content unchanged despite mtime bump — refresh the stat fields so
+            # the next run skips hashing.
+            entry["mtime_ns"] = mtime_ns
+            entry["size"] = size
+            self._dirty = True
             return entry.get("result")
-        if entry.get("hash") != self.file_hash(file_path):
-            return None
-        # Content unchanged despite mtime bump — refresh the stat fields so the
-        # next run skips hashing.
-        entry["mtime_ns"] = mtime_ns
-        entry["size"] = size
-        self._dirty = True
-        return entry.get("result")
 
     def put(self, file_path: str, result: Any, file_hash: Optional[str] = None) -> None:
         """Store an extraction result for a file.
@@ -199,16 +206,17 @@ class Cache:
             except (TypeError, ImportError):
                 result = {"_raw": str(result)}
 
-        mtime_ns, size = self._file_stat(file_path)
-        self._data[self._key(file_path)] = {
-            "hash": h,
-            "result": result,
-            "ts": time.time(),
-            "mtime_ns": mtime_ns,
-            "size": size,
-        }
-        self._hash_memo[file_path] = h
-        self._dirty = True
+        with self._lock:
+            mtime_ns, size = self._file_stat(file_path)
+            self._data[self._key(file_path)] = {
+                "hash": h,
+                "result": result,
+                "ts": time.time(),
+                "mtime_ns": mtime_ns,
+                "size": size,
+            }
+            self._hash_memo[file_path] = h
+            self._dirty = True
 
     def invalidate(self, file_path: str) -> None:
         """Remove a specific file's cache entry."""

@@ -60,6 +60,52 @@ _JS_REQUIRE_RE = re.compile(
 _JS_FAMILY_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
 
 
+def _strip_js_comments(source: str) -> str:
+    """Blank out ``//`` and ``/* */`` comments, preserving string literals.
+
+    The regex passes below run on raw text, so a commented-out
+    ``export * from './foo'`` or ``require('./x')`` — or a module path
+    mentioned in prose like ``// re-exported from './index'`` — would
+    otherwise produce a phantom edge and false import cycles. Mirrors
+    graphify #1193. String/template literals are scanned so a ``//``
+    inside ``'http://…'`` is not treated as a comment.
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if c in "'\"`":
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n:
+                ch = source[i]
+                out.append(ch)
+                if ch == "\\" and i + 1 < n:
+                    out.append(source[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                if ch == quote:
+                    break
+                if ch == "\n" and quote != "`":
+                    break  # unterminated ' / " string ends at the line
+        elif c == "/" and i + 1 < n and source[i + 1] == "/":
+            while i < n and source[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and source[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (source[i] == "*" and source[i + 1] == "/"):
+                if source[i] == "\n":
+                    out.append("\n")
+                i += 1
+            i = min(i + 2, n)
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 # ── Framework → query file stem ───────────────────────────────────────────────
 
 _FW_TO_QUERY: dict[str, str] = {
@@ -175,6 +221,34 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
                 source_file=file_path,
             ))
 
+        # Python `from pkg import name` — the module path alone loses the
+        # actual import target (`from auth.services import UserService` only
+        # yielded "auth.services", so the edge to UserService was never even
+        # attempted, and `from pkg import submodule` left the importer
+        # disconnected from pkg/submodule.py). The Python queries capture the
+        # imported names as @import.item; emit a dotted `module.name` target
+        # for each so label resolution can bind the real symbol. Mirrors
+        # graphify #1146.
+        if "import.item" in caps and "import.path" in caps:
+            module_raw = node_text(caps["import.path"][0]).strip("'\"` ")
+            for item_node in caps["import.item"]:
+                item = node_text(item_node).strip()
+                if not item:
+                    continue
+                dotted = f"{module_raw}.{item}" if module_raw else item
+                key = ("imports_from", dotted)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(Edge(
+                    source=file_path,
+                    target=dotted,
+                    relation="imports_from",
+                    confidence="EXTRACTED",
+                    confidence_score=1.0,
+                    source_file=file_path,
+                ))
+
         # Vapor uses @import.name instead of @import.path
         if "import.name" in caps:
             for import_node in caps["import.name"]:
@@ -201,6 +275,7 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
             source = Path(file_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             source = ""
+        source = _strip_js_comments(source)
         for m in _JS_REEXPORT_RE.finditer(source):
             raw = m.group(1).strip()
             key = ("re_exports", raw)

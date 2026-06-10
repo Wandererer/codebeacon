@@ -115,6 +115,18 @@
   module_name: _ @import.path
 ) @import.from
 
+; `from pkg import name` — also capture each imported name so the edge can
+; bind the real symbol/submodule, not just the module path (graphify #1146).
+(import_from_statement
+  module_name: _ @import.path
+  name: (dotted_name) @import.item
+) @import.from_item
+
+(import_from_statement
+  module_name: _ @import.path
+  name: (aliased_import name: (dotted_name) @import.item)
+) @import.from_item
+
 (import_statement
   name: _ @import.path
 ) @import.plain

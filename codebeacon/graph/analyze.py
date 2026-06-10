@@ -267,7 +267,6 @@ def hub_files(
     Returns:
         List of HubFile sorted by import_count descending.
     """
-    file_imports: dict[str, int] = {}
     file_nodes: dict[str, int] = {}
 
     for _node_id, data in G.nodes(data=True):
@@ -275,12 +274,21 @@ def hub_files(
         if sf:
             file_nodes[sf] = file_nodes.get(sf, 0) + 1
 
-    for _src, _tgt, edge_data in G.edges(data=True):
+    # A hub is a file *imported by* many others, so count DISTINCT importing
+    # files per edge-TARGET file. Two prior inflations corrected here:
+    # `edge_data["source_file"]` is always the importer's file (dependencies.py
+    # stamps it with the importing file), so counting it ranked high-fan-out
+    # entry points instead of hubs; and raw edge counts multiply by the number
+    # of nodes in the importing file (import edges are remapped per-node).
+    importers: dict[str, set[str]] = {}
+    for src, tgt, edge_data in G.edges(data=True):
         if edge_data.get("relation") not in ("imports", "imports_from"):
             continue
-        sf = edge_data.get("source_file", "")
-        if sf:
-            file_imports[sf] = file_imports.get(sf, 0) + 1
+        tgt_file = G.nodes[tgt].get("source_file", "")
+        src_file = G.nodes[src].get("source_file", "")
+        if tgt_file and src_file and tgt_file != src_file:
+            importers.setdefault(tgt_file, set()).add(src_file)
+    file_imports = {fp: len(srcs) for fp, srcs in importers.items()}
 
     results = [
         HubFile(

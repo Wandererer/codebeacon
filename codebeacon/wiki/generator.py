@@ -27,7 +27,7 @@ from typing import Any
 
 import networkx as nx
 
-from codebeacon.common.safety import cap_filename
+from codebeacon.common.safety import safe_wiki_filename
 from codebeacon.wiki import templates
 
 
@@ -62,8 +62,9 @@ def _safe_filename(label: str) -> str:
     whole wiki write with ENAMETOOLONG. ``cap_filename`` keeps long-prefix
     labels distinct via a hash suffix, so two capped names never collide.
     """
-    cleaned = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
-    return cap_filename(cleaned)
+    # Delegates to the shared transform so generator filenames and template
+    # links can never drift apart again.
+    return safe_wiki_filename(label)
 
 
 def node_to_wiki_path(G: nx.DiGraph, node_id: str) -> str | None:
