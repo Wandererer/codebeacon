@@ -27,6 +27,33 @@
 
 ---
 
+## 0.6.3 새 소식
+
+버그 수정 릴리스 — graphify-parity 감사(업스트림 6월 3–10일)에 codebeacon 자체 코드에 대한 독립 감사를 더해 **16건 수정**, 47개 프로젝트 `--deep-dive` 워크스페이스 스캔(노드 5,226 / 엣지 8,715)으로 end-to-end 검증.
+
+- **Git hook이 어디서나 동작** — post-commit 재빌드 hook이 설치 시점의 Python 인터프리터를 스크립트에 고정하고 `nohup` 대신 `subprocess`로 detach하므로, GUI git 클라이언트(Sublime Merge, GitKraken)·CI 러너·Windows처럼 `codebeacon` 런처가 `PATH`에 없어 기존 hook이 조용히 아무것도 하지 않던 환경에서도 동작합니다. `codebeacon hook install`을 다시 실행하면 수정이 적용되며, merge driver도 같은 방식으로 고정됩니다.
+- **주석 처리된 JS/TS import가 더 이상 엣지를 만들지 않음** — 배럴 re-export와 `require()` 정규식 패스가 먼저 `//`·`/* */` 주석을 (문자열 리터럴을 인식하며) 제거합니다. 주석 처리된 `export * from './legacy'`가 phantom 엣지와 가짜 import 순환을 만들던 문제 해결.
+- **`from pkg import name`이 실제 대상에 바인딩 (Python)** — import 추출기가 import된 이름을 캡처하므로 `from auth.services import UserService`는 `UserService` 노드로, `from src.services import enricher`는 서브모듈로 연결됩니다. 이전엔 모듈 경로의 마지막 세그먼트만 시도해 테스트 파일이 그래프에서 끊겨 있었습니다. 별칭(`import x as y`)은 실제 심볼 이름으로 해석됩니다.
+- **"High-Impact Files"가 진짜 high-impact** — hub 랭킹(CLAUDE.md, `analyze`)이 엣지의 `source_file`(항상 import하는 쪽)로 import *fan-out*을 세는 바람에, 엔트리 포인트가 노드 단위로 부풀려진 수치(60개 파일 레포에서 "imported by 392 files")로 진짜 공유 모듈을 제쳤습니다. 두 사본 모두 import되는 파일별로 고유한 import하는 파일 수를 셉니다.
+- **DI `injects` 엣지가 실제 파일 경로를 가짐** — 해석된 dependency-injection 엣지가 `source_file`에 그래프 노드 ID(`proj::Name`)를 찍던 문제 수정 → 이제 소스 노드의 실제 파일을 담습니다.
+- **Ktor 중첩 route prefix 연결** — `route("/api") { route("/v1") { get("/users") } }`가 바깥 prefix를 전부 버리는 대신 `/api/v1/users`를 추출합니다.
+- **같은 경로의 route가 모두 매칭** — 두 서비스가 같은 URL을 노출할 때(gateway + upstream), `calls_api` enrichment가 마지막 하나만 조용히 남기지 않습니다.
+- **희소한 YAML 설정 허용** — `output:` / `wave:` / `semantic:`을 비워 둬도 `AttributeError`로 크래시하지 않고, `projects:` 아래 떠도는 bare `-`는 `TypeError` 대신 깔끔한 설정 에러를 냅니다.
+- **언어 감지가 vendored 디렉토리 스킵** — 폴백 언어 투표가 `node_modules` / `.git` / `dist`를 제외 → vendored JS가 있는 Python 레포가 *javascript*로 감지되지 않음(그리고 discovery가 수만 개의 vendored 파일을 크롤하지 않음).
+- **wiki 링크가 파일과 일치** — 링크 대상이 생성기가 파일을 쓸 때와 정확히 같은 파일명 변환을 사용 → 공백, `#`, 괄호, 제네릭이 포함된 라벨이 깨진 링크를 만들지 않음.
+- 추가: 결정적 enrichment 엣지 순서, `None` 라벨 빌드 가드, 스레드 안전 추출 캐시, FastAPI `Depends()` ghost ref 제거, Obsidian 서비스 폴더명 byte 상한.
+
+---
+
+## 0.6.2 새 소식
+
+- **결정적 community ID** — 같은 크기의 community가 partitioner 열거 순서로 번호를 받아 no-op 재스캔에서 `beacon.json`의 77–88 %가 뒤바뀌던 문제 수정; 동일한 그룹은 이제 항상 동일한 ID를 받습니다.
+- **노트 파일명 byte 상한** — 85자 이상의 CJK 클래스명이 파일시스템 255바이트 한계를 넘어 `ENAMETOOLONG`으로 wiki/Obsidian 내보내기 전체를 크래시시키던 문제; UTF-8 200바이트로 캡하고 충돌 안전 해시 접미사를 붙입니다.
+- **FastAPI / Laravel / ASP.NET DI 엣지 복구** — 해석된 `Depends()` / `bind()` / `AddScoped<>` 참조가 파일 경로로 키잉된 반면 노드는 프로젝트로 키잉되어 엣지가 조용히 버려졌습니다; 이제 최종 노드 ID로 리매핑됩니다.
+- **인터페이스 → 구현 DI 부활** — `implements`/`extends` 메타데이터를 어떤 추출기도 채우지 않아 인터페이스 타입 주입이 전혀 해석되지 않았습니다; Spring, ASP.NET, NestJS, Angular가 이제 이를 연결합니다.
+
+---
+
 ## 0.6.1 새 소식
 
 패치 릴리스 — 추출 정확성과 재현 가능한 출력.

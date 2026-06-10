@@ -27,6 +27,33 @@
 
 ---
 
+## 0.6.3 の新機能
+
+バグ修正リリース — graphify-parity 監査（上流 6 月 3–10 日）に codebeacon 自身のコードの独立監査を加えた **16 件の修正**。47 プロジェクトの `--deep-dive` ワークスペーススキャン（5,226 ノード / 8,715 エッジ）でエンドツーエンド検証済み。
+
+- **Git フックがどこでも発火** — post-commit 再ビルドフックがインストール時の Python インタープリタをスクリプトに固定し、`nohup` の代わりに `subprocess` でデタッチするため、GUI の git クライアント（Sublime Merge、GitKraken）、CI ランナー、Windows といった、`codebeacon` ランチャーが `PATH` に無く旧フックが黙って何もしなかった環境でも動作します。`codebeacon hook install` を再実行すると修正が反映され、merge driver も同じ方式で固定されます。
+- **コメントアウトされた JS/TS import がエッジを作らない** — バレル re-export と `require()` の正規表現パスが、先に `//` と `/* */` コメントを（文字列リテラルを認識した上で）除去します。コメントアウトされた `export * from './legacy'` がファントムエッジと偽の import 循環を生んでいました。
+- **`from pkg import name` が本来のターゲットに結び付く（Python）** — import 抽出器が import された名前を捕捉するようになり、`from auth.services import UserService` は `UserService` ノードへ、`from src.services import enricher` はサブモジュールへリンクします。従来はモジュールパスの最終セグメントしか試さず、テストファイルがグラフから切り離されていました。エイリアス（`import x as y`）は真のシンボル名に解決されます。
+- **「High-Impact Files」が本当に high-impact に** — ハブランキング（CLAUDE.md、`analyze`）がエッジの `source_file`（常に import する側）経由で import の*ファンアウト*を数えていたため、エントリポイントがノード単位で水増しされたカウント（60 ファイルのリポジトリで「imported by 392 files」）で本物の共有モジュールを押しのけていました。両方のコピーが、import されるファイルごとに重複しない import 元ファイル数を数えるようになりました。
+- **DI `injects` エッジが実ファイルパスを持つ** — 解決済みの dependency-injection エッジが `source_file` にグラフノード ID（`proj::Name`）を刻んでいましたが、ソースノードの実際のファイルを持つようになりました。
+- **Ktor のネストした route プレフィックスが連結される** — `route("/api") { route("/v1") { get("/users") } }` が外側のプレフィックスをすべて落とす代わりに `/api/v1/users` を抽出します。
+- **同一パスのルートが両方マッチ** — 二つのサービスが同じ URL を公開する場合（gateway + upstream）、`calls_api` エンリッチメントが最後の一つだけを黙って残すことはなくなりました。
+- **設定がスパースな YAML を許容** — `output:` / `wave:` / `semantic:` を空のままにしても `AttributeError` でクラッシュしません。`projects:` 配下の裸の `-` は `TypeError` ではなく明確な設定エラーになります。
+- **言語検出が vendored ディレクトリをスキップ** — フォールバックの言語投票が `node_modules` / `.git` / `dist` を除外するため、vendored な JS を含む Python リポジトリが *javascript* と判定されません（discovery が数万の vendored ファイルをクロールすることもなくなりました）。
+- **wiki リンクがファイルと一致** — リンク先がジェネレータの書き出しと完全に同じファイル名変換を使うため、スペース、`#`、括弧、ジェネリクスを含むラベルがデッドリンクを生まなくなりました。
+- さらに: 決定的なエンリッチメントエッジ順序、`None` ラベルのビルドガード、スレッドセーフな抽出キャッシュ、FastAPI `Depends()` のゴースト参照の除去、Obsidian サービスフォルダ名のバイト上限。
+
+---
+
+## 0.6.2 の新機能
+
+- **決定的なコミュニティ ID** — 同サイズのコミュニティがパーティショナーの列挙順で番号付けされ、no-op の再スキャンで `beacon.json` の 77–88 % が入れ替わっていました。同一のグルーピングは常に同一の ID を得るようになりました。
+- **ノートファイル名のバイト上限** — 85 文字超の CJK クラス名がファイルシステムの 255 バイト制限を超え、`ENAMETOOLONG` で wiki / Obsidian エクスポート全体をクラッシュさせていました。UTF-8 200 バイトで上限を設け、衝突安全なハッシュサフィックスを付与します。
+- **FastAPI / Laravel / ASP.NET の DI エッジを復旧** — 解決済みの `Depends()` / `bind()` / `AddScoped<>` 参照がファイルパスでキー付けされる一方、ノードはプロジェクトでキー付けされていたため、エッジが黙って捨てられていました。最終ノード ID へ再マップされます。
+- **インターフェース → 実装の DI を復活** — `implements`/`extends` メタデータをどの抽出器も埋めておらず、インターフェース型の注入が一切解決されませんでした。Spring、ASP.NET、NestJS、Angular で配線されるようになりました。
+
+---
+
 ## 0.6.1 の新機能
 
 パッチリリース — 抽出の正確性と再現可能な出力。

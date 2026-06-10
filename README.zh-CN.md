@@ -27,6 +27,33 @@
 
 ---
 
+## 0.6.3 新功能
+
+缺陷修复版本 — 一次 graphify-parity 审计（上游 6 月 3–10 日）加上对 codebeacon 自身代码的独立审计：**16 项修复**，并以 47 个项目的 `--deep-dive` 工作区扫描（5,226 节点 / 8,715 边）做了端到端验证。
+
+- **Git 钩子在任何环境都能触发** — post-commit 重建钩子将安装时的 Python 解释器固定进脚本，并用 `subprocess` 而非 `nohup` 脱离父进程，因此在 GUI git 客户端（Sublime Merge、GitKraken）、CI runner 和 Windows 上均可工作——这些环境里 `codebeacon` 启动器不在 `PATH` 中，旧钩子会悄悄什么都不做。重新运行 `codebeacon hook install` 即可获得修复；merge driver 也以同样方式固定。
+- **注释掉的 JS/TS 导入不再产生边** — barrel re-export 与 `require()` 的正则扫描现在会先（在识别字符串字面量的前提下）剥离 `//` 与 `/* */` 注释。被注释的 `export * from './legacy'` 此前会产生幻影边和虚假的 import 循环。
+- **`from pkg import name` 绑定到真实目标（Python）** — 导入提取器现在捕获被导入的名称，因此 `from auth.services import UserService` 链接到 `UserService` 节点，`from src.services import enricher` 链接到子模块。此前只尝试模块路径的最后一段，导致测试文件与图断连。别名（`import x as y`）解析为真实符号名。
+- **"High-Impact Files" 真正高影响** — hub 排名（CLAUDE.md、`analyze`）此前经由边的 `source_file`（始终是导入方）统计 import 的*扇出*，使入口文件以按节点膨胀的计数（60 个文件的仓库里出现 "imported by 392 files"）压过真正的共享模块。两处副本现在都按被导入文件统计去重后的导入方文件数。
+- **DI `injects` 边携带真实文件路径** — 已解析的依赖注入边曾把图节点 ID（`proj::Name`）写进 `source_file`；现在携带源节点的实际文件。
+- **Ktor 嵌套 route 前缀正确拼接** — `route("/api") { route("/v1") { get("/users") } }` 提取出 `/api/v1/users`，而不是丢掉所有外层前缀。
+- **同路径路由都能匹配** — 当两个服务暴露相同 URL（gateway + upstream）时，`calls_api` 富化不再悄悄只保留最后一个。
+- **配置容忍稀疏 YAML** — `output:` / `wave:` / `semantic:` 留空不再以 `AttributeError` 崩溃；`projects:` 下游离的裸 `-` 抛出清晰的配置错误而非 `TypeError`。
+- **语言检测跳过 vendored 目录** — 回退语言投票会剪除 `node_modules` / `.git` / `dist`，因此含 vendored JS 的 Python 仓库不再被判定为 *javascript*（discovery 也不再爬取数万个 vendored 文件）。
+- **wiki 链接与文件一致** — 链接目标现在使用与生成器写文件时完全相同的文件名变换，含空格、`#`、括号或泛型的标签不再产生死链。
+- 另有：确定性的富化边顺序、`None` 标签构建守护、线程安全的提取缓存、移除 FastAPI `Depends()` 幻影引用，以及 Obsidian 服务文件夹名的字节上限。
+
+---
+
+## 0.6.2 新功能
+
+- **确定性的 community ID** — 等大小的 community 曾按分区器枚举顺序编号，一次 no-op 重扫会翻搅 `beacon.json` 的 77–88 %；相同的分组现在总是得到相同的 ID。
+- **笔记文件名字节上限** — 一个 85+ 字符的 CJK 类名超出文件系统 255 字节限制，以 `ENAMETOOLONG` 让整个 wiki/Obsidian 导出崩溃；现已限制为 200 个 UTF-8 字节并附加防碰撞哈希后缀。
+- **恢复 FastAPI / Laravel / ASP.NET 的 DI 边** — 已解析的 `Depends()` / `bind()` / `AddScoped<>` 引用按文件路径作键，而节点按项目作键，导致这些边被静默丢弃；现在重映射到最终节点 ID。
+- **复活接口 → 实现的 DI** — `implements`/`extends` 元数据从未被任何提取器填充，接口类型注入从未解析；Spring、ASP.NET、NestJS、Angular 现已接通。
+
+---
+
 ## 0.6.1 新功能
 
 补丁版本 — 提取正确性与可复现输出。

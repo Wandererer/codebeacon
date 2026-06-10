@@ -25,6 +25,33 @@
 
 ---
 
+## What's new in 0.6.3
+
+Bug-fix release — a graphify-parity audit (upstream Jun 3–10) plus an independent audit of codebeacon's own code: **16 fixes**, verified end-to-end with a 47-project `--deep-dive` workspace scan (5,226 nodes / 8,715 edges).
+
+- **Git hooks now fire everywhere** — the post-commit rebuild hook pins the installing Python interpreter into the script and detaches via `subprocess` instead of `nohup`, so it works in GUI git clients (Sublime Merge, GitKraken), CI runners, and on Windows — environments where the `codebeacon` launcher isn't on `PATH` and the old hook silently did nothing. Re-run `codebeacon hook install` to pick up the fix; the merge driver is pinned the same way.
+- **Commented-out JS/TS imports no longer create edges** — the barrel re-export and `require()` regex passes now strip `//` and `/* */` comments (string-literal aware) first. A commented `export * from './legacy'` used to produce a phantom edge and false import cycles.
+- **`from pkg import name` binds the real target (Python)** — the import extractor now captures the imported names, so `from auth.services import UserService` links to the `UserService` node and `from src.services import enricher` links to the submodule. Previously only the module path's last segment was tried, leaving test files disconnected. Aliases (`import x as y`) resolve to the true symbol name.
+- **"High-Impact Files" is actually high-impact** — the hub ranking (CLAUDE.md, `analyze`) counted import *fan-out* via the edge's `source_file` (always the importer), so entry points outranked real shared modules with per-node-inflated counts ("imported by 392 files" in a 60-file repo). Both copies now count distinct importing files per imported file.
+- **DI `injects` edges carry real file paths** — resolved dependency-injection edges stamped the graph node ID (`proj::Name`) into `source_file`; they now carry the source node's actual file.
+- **Ktor nested route prefixes concatenate** — `route("/api") { route("/v1") { get("/users") } }` extracts `/api/v1/users` instead of dropping every outer prefix.
+- **Same-path routes both matched** — when two services expose the same URL (gateway + upstream), `calls_api` enrichment no longer silently keeps only the last one.
+- **Config tolerates sparse YAML** — `output:` / `wave:` / `semantic:` left empty no longer crash with `AttributeError`; a stray bare `-` under `projects:` raises a clean config error instead of a `TypeError`.
+- **Language detection skips vendored dirs** — the fallback language vote prunes `node_modules` / `.git` / `dist`, so a Python repo with vendored JS is no longer detected as *javascript* (and discovery no longer crawls tens of thousands of vendored files).
+- **Wiki links match their files** — link targets now use the exact same filename transform the generator writes with, so labels containing spaces, `#`, parentheses, or generics no longer produce dead links.
+- Plus: deterministic enrichment edge order, a `None`-label build guard, a thread-safe extraction cache, FastAPI `Depends()` ghost refs removed, and Obsidian service-folder names byte-capped.
+
+---
+
+## What's new in 0.6.2
+
+- **Deterministic community IDs** — equal-sized communities were numbered by partitioner enumeration order, churning 77–88 % of `beacon.json` on a no-op rescan; identical groupings now always get identical IDs.
+- **Note filenames byte-capped** — an 85+-character CJK class name overflowed the 255-byte filesystem limit and crashed the whole wiki/Obsidian export with `ENAMETOOLONG`; capped at 200 UTF-8 bytes with a collision-safe hash suffix.
+- **DI edges restored for FastAPI / Laravel / ASP.NET** — resolved `Depends()` / `bind()` / `AddScoped<>` references were keyed by file path while nodes are keyed by project, so the edges were silently dropped; they're remapped onto final node IDs now.
+- **Interface → implementation DI revived** — `implements`/`extends` metadata was never populated by any extractor, so interface-typed injection never resolved; Spring, ASP.NET, NestJS, and Angular now wire it through.
+
+---
+
 ## What's new in 0.6.1
 
 Patch release — extraction correctness and reproducible output.

@@ -27,6 +27,33 @@
 
 ---
 
+## Neu in 0.6.3
+
+Bugfix-Release — ein graphify-Paritätsaudit (Upstream 3.–10. Juni) plus ein unabhängiges Audit von codebeacons eigenem Code: **16 Fixes**, Ende-zu-Ende verifiziert mit einem `--deep-dive`-Workspace-Scan über 47 Projekte (5.226 Knoten / 8.715 Kanten).
+
+- **Git-Hooks feuern jetzt überall** — der Post-Commit-Rebuild-Hook pinnt den installierenden Python-Interpreter ins Skript und löst sich per `subprocess` statt `nohup` vom Prozess, sodass er in GUI-Git-Clients (Sublime Merge, GitKraken), CI-Runnern und unter Windows funktioniert — Umgebungen, in denen der `codebeacon`-Launcher nicht auf dem `PATH` liegt und der alte Hook stillschweigend nichts tat. `codebeacon hook install` erneut ausführen, um den Fix zu übernehmen; der Merge-Driver wird auf dieselbe Weise gepinnt.
+- **Auskommentierte JS/TS-Imports erzeugen keine Kanten mehr** — die Regex-Durchläufe für Barrel-Reexports und `require()` entfernen jetzt zuerst `//`- und `/* */`-Kommentare (string-literal-bewusst). Ein auskommentiertes `export * from './legacy'` erzeugte zuvor eine Phantomkante und falsche Importzyklen.
+- **`from pkg import name` bindet das echte Ziel (Python)** — der Import-Extraktor erfasst nun die importierten Namen, sodass `from auth.services import UserService` auf den `UserService`-Knoten verlinkt und `from src.services import enricher` auf das Submodul. Zuvor wurde nur das letzte Segment des Modulpfads probiert, wodurch Testdateien unverbunden blieben. Aliase (`import x as y`) lösen zum wahren Symbolnamen auf.
+- **„High-Impact Files" sind tatsächlich high-impact** — das Hub-Ranking (CLAUDE.md, `analyze`) zählte Import-*Fan-out* über das `source_file` der Kante (immer der Importeur), sodass Einstiegspunkte echte geteilte Module mit pro Knoten aufgeblähten Zahlen überholten („imported by 392 files" in einem 60-Dateien-Repo). Beide Kopien zählen jetzt distinkte importierende Dateien pro importierter Datei.
+- **DI-`injects`-Kanten tragen echte Dateipfade** — aufgelöste Dependency-Injection-Kanten stempelten die Graphknoten-ID (`proj::Name`) in `source_file`; sie tragen jetzt die tatsächliche Datei des Quellknotens.
+- **Verschachtelte Ktor-Routenpräfixe werden verkettet** — `route("/api") { route("/v1") { get("/users") } }` extrahiert `/api/v1/users`, statt jedes äußere Präfix zu verwerfen.
+- **Routen mit gleichem Pfad matchen beide** — wenn zwei Services dieselbe URL exponieren (Gateway + Upstream), behält die `calls_api`-Anreicherung nicht mehr stillschweigend nur die letzte.
+- **Konfiguration toleriert spärliches YAML** — leer gelassene `output:` / `wave:` / `semantic:` stürzen nicht mehr mit `AttributeError` ab; ein verirrter nackter `-` unter `projects:` löst einen sauberen Konfigurationsfehler statt eines `TypeError` aus.
+- **Spracherkennung überspringt Vendor-Verzeichnisse** — die Fallback-Sprachabstimmung klammert `node_modules` / `.git` / `dist` aus, sodass ein Python-Repo mit vendored JS nicht mehr als *javascript* erkannt wird (und die Discovery nicht mehr Zehntausende Vendor-Dateien durchkriecht).
+- **Wiki-Links passen zu ihren Dateien** — Link-Ziele verwenden jetzt exakt dieselbe Dateinamen-Transformation, mit der der Generator schreibt, sodass Labels mit Leerzeichen, `#`, Klammern oder Generics keine toten Links mehr erzeugen.
+- Außerdem: deterministische Reihenfolge der Anreicherungskanten, ein Build-Guard gegen `None`-Labels, ein thread-sicherer Extraktions-Cache, FastAPI-`Depends()`-Geisterreferenzen entfernt und Obsidian-Service-Ordnernamen byte-begrenzt.
+
+---
+
+## Neu in 0.6.2
+
+- **Deterministische Community-IDs** — gleich große Communities wurden nach der Enumerationsreihenfolge des Partitionierers nummeriert, was bei einem No-op-Rescan 77–88 % von `beacon.json` umwälzte; identische Gruppierungen erhalten jetzt immer identische IDs.
+- **Notiz-Dateinamen byte-begrenzt** — ein über 85 Zeichen langer CJK-Klassenname sprengte das 255-Byte-Dateisystemlimit und ließ den gesamten Wiki-/Obsidian-Export mit `ENAMETOOLONG` abstürzen; jetzt bei 200 UTF-8-Bytes gekappt, mit kollisionssicherem Hash-Suffix.
+- **DI-Kanten für FastAPI / Laravel / ASP.NET wiederhergestellt** — aufgelöste `Depends()`- / `bind()`- / `AddScoped<>`-Referenzen waren nach Dateipfad indiziert, während Knoten nach Projekt indiziert sind, sodass die Kanten stillschweigend verworfen wurden; sie werden jetzt auf die finalen Knoten-IDs umgemappt.
+- **Interface-→-Implementierung-DI wiederbelebt** — `implements`/`extends`-Metadaten wurden von keinem Extraktor befüllt, sodass interface-typisierte Injektion nie aufgelöst wurde; Spring, ASP.NET, NestJS und Angular verdrahten sie jetzt durchgängig.
+
+---
+
 ## Neu in 0.6.1
 
 Patch-Release — Extraktionskorrektheit und reproduzierbare Ausgabe.

@@ -27,6 +27,33 @@
 
 ---
 
+## Novedades en 0.6.3
+
+Versión de corrección de errores — una auditoría de paridad con graphify (upstream 3–10 de junio) más una auditoría independiente del propio código de codebeacon: **16 correcciones**, verificadas de extremo a extremo con un escaneo de workspace `--deep-dive` de 47 proyectos (5.226 nodos / 8.715 aristas).
+
+- **Los hooks de git ahora se disparan en todas partes** — el hook de reconstrucción post-commit fija el intérprete de Python que hizo la instalación dentro del script y se desacopla vía `subprocess` en lugar de `nohup`, así funciona en clientes git con GUI (Sublime Merge, GitKraken), runners de CI y en Windows — entornos donde el lanzador `codebeacon` no está en el `PATH` y el hook antiguo no hacía nada en silencio. Vuelve a ejecutar `codebeacon hook install` para recoger la corrección; el merge driver se fija de la misma manera.
+- **Los imports JS/TS comentados ya no crean aristas** — las pasadas de regex de re-exports barrel y `require()` ahora eliminan primero los comentarios `//` y `/* */` (con conciencia de literales de cadena). Un `export * from './legacy'` comentado producía una arista fantasma y falsos ciclos de import.
+- **`from pkg import name` enlaza al objetivo real (Python)** — el extractor de imports ahora captura los nombres importados, así `from auth.services import UserService` enlaza al nodo `UserService` y `from src.services import enricher` enlaza al submódulo. Antes solo se probaba el último segmento de la ruta del módulo, dejando los archivos de test desconectados. Los alias (`import x as y`) se resuelven al nombre real del símbolo.
+- **"High-Impact Files" es realmente de alto impacto** — el ranking de hubs (CLAUDE.md, `analyze`) contaba el *fan-out* de imports vía el `source_file` de la arista (siempre el importador), así los puntos de entrada superaban a los módulos compartidos reales con recuentos inflados por nodo ("imported by 392 files" en un repo de 60 archivos). Ambas copias ahora cuentan archivos importadores distintos por archivo importado.
+- **Las aristas `injects` de DI llevan rutas de archivo reales** — las aristas de inyección de dependencias resueltas estampaban el ID del nodo del grafo (`proj::Name`) en `source_file`; ahora llevan el archivo real del nodo de origen.
+- **Los prefijos de rutas anidadas de Ktor se concatenan** — `route("/api") { route("/v1") { get("/users") } }` extrae `/api/v1/users` en lugar de descartar todos los prefijos exteriores.
+- **Las rutas con la misma URL coinciden ambas** — cuando dos servicios exponen la misma URL (gateway + upstream), el enriquecimiento `calls_api` ya no conserva en silencio solo la última.
+- **La configuración tolera YAML escaso** — dejar vacíos `output:` / `wave:` / `semantic:` ya no provoca un `AttributeError`; un `-` suelto bajo `projects:` lanza un error de configuración limpio en lugar de un `TypeError`.
+- **La detección de lenguaje omite directorios vendorizados** — el voto de lenguaje de respaldo poda `node_modules` / `.git` / `dist`, así un repo Python con JS vendorizado ya no se detecta como *javascript* (y el descubrimiento ya no rastrea decenas de miles de archivos vendorizados).
+- **Los enlaces del wiki coinciden con sus archivos** — los destinos de los enlaces ahora usan exactamente la misma transformación de nombre de archivo con la que escribe el generador, así las etiquetas con espacios, `#`, paréntesis o genéricos ya no producen enlaces muertos.
+- Además: orden determinista de las aristas de enriquecimiento, una guarda de build contra etiquetas `None`, una caché de extracción segura entre hilos, referencias fantasma de `Depends()` de FastAPI eliminadas, y nombres de carpetas de servicios de Obsidian limitados en bytes.
+
+---
+
+## Novedades en 0.6.2
+
+- **IDs de comunidad deterministas** — las comunidades del mismo tamaño se numeraban según el orden de enumeración del particionador, removiendo el 77–88 % de `beacon.json` en un re-escaneo sin cambios; agrupaciones idénticas ahora reciben siempre IDs idénticos.
+- **Nombres de archivo de notas limitados en bytes** — un nombre de clase CJK de más de 85 caracteres desbordaba el límite de 255 bytes del sistema de archivos y hacía fallar toda la exportación wiki/Obsidian con `ENAMETOOLONG`; ahora se limita a 200 bytes UTF-8 con un sufijo hash a prueba de colisiones.
+- **Aristas de DI restauradas para FastAPI / Laravel / ASP.NET** — las referencias resueltas de `Depends()` / `bind()` / `AddScoped<>` se indexaban por ruta de archivo mientras los nodos se indexan por proyecto, así las aristas se descartaban en silencio; ahora se remapean a los IDs finales de los nodos.
+- **DI interfaz → implementación revivida** — los metadatos `implements`/`extends` nunca eran poblados por ningún extractor, así la inyección tipada por interfaz nunca se resolvía; Spring, ASP.NET, NestJS y Angular ahora la conectan de extremo a extremo.
+
+---
+
 ## Novedades en 0.6.1
 
 Versión de parche — corrección de extracción y salida reproducible.
