@@ -25,6 +25,16 @@
 
 ---
 
+## What's new in 0.6.5
+
+`codebeacon upgrade` now works everywhere — it previously assumed a plain pip install and died silently on machines where that wasn't true.
+
+- **Install-manager detection** — the upgrade command detects how codebeacon was installed and runs the matching tool: `pip install --upgrade` for pip installs, `pipx upgrade codebeacon` for pipx, `uv tool upgrade codebeacon` for uv. pipx/uv tool venvs ship *without* a `pip` module, so the old unconditional `python -m pip` call failed before doing anything.
+- **Upgrade verification** — after the upgrade a fresh interpreter re-reads the installed version and reports `0.6.4 -> 0.6.5`. If the version didn't change but PyPI has a newer release, you get a warning that the `codebeacon` on your PATH may belong to a different Python environment — instead of a false "Upgrade complete".
+- **Actionable failures** — a pip-less environment prints the exact commands to run; a PEP 668 `externally-managed-environment` refusal explains the fix (pipx or a virtualenv) instead of dumping a raw pip error. The command also shows the current vs. latest-on-PyPI version up front.
+
+---
+
 ## What's new in 0.6.4
 
 Deep-dive cleanup — outputs land where you look for them, and two silent-data-loss bugs found while verifying it on a 47-project workspace.
@@ -308,7 +318,7 @@ Run **one** command from anywhere:
 codebeacon upgrade
 ```
 
-This pip-upgrades the package, then re-runs `codebeacon install` so `~/.claude/skills/codebeacon/SKILL.md` is overwritten with the new release's copy. Restart your Claude Code session for the new SKILL.md to load. If codebeacon is installed in editable mode (`pip install -e .`), the pip step is skipped — pass `--force` to upgrade anyway.
+This upgrades the package using whichever tool installed it (`pip`, `pipx upgrade`, or `uv tool upgrade` — detected automatically), verifies the installed version actually changed, then re-runs `codebeacon install` so `~/.claude/skills/codebeacon/SKILL.md` is overwritten with the new release's copy. Restart your Claude Code session for the new SKILL.md to load. If codebeacon is installed in editable mode (`pip install -e .`), the package step is skipped — pass `--force` to upgrade anyway.
 
 ### MCP Server
 

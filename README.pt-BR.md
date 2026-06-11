@@ -27,6 +27,16 @@
 
 ---
 
+## Novidades na 0.6.5
+
+`codebeacon upgrade` agora funciona em qualquer ambiente — antes ele presumia uma instalação pip comum e falhava silenciosamente em máquinas onde não era o caso.
+
+- **Detecção do gerenciador de instalação** — o comando upgrade detecta como o codebeacon foi instalado e executa a ferramenta correspondente: `pip install --upgrade` para instalações pip, `pipx upgrade codebeacon` para pipx, `uv tool upgrade codebeacon` para uv. Os venvs do pipx/uv tool vêm *sem* o módulo `pip`, então a antiga chamada incondicional a `python -m pip` morria antes de fazer qualquer coisa.
+- **Verificação do upgrade** — após o upgrade, um interpretador novo relê a versão instalada e reporta `0.6.4 -> 0.6.5`. Se a versão não mudou mas o PyPI tem uma release mais nova, você recebe um aviso de que o `codebeacon` no seu PATH pode pertencer a outro ambiente Python — em vez de um falso "Upgrade complete".
+- **Falhas acionáveis** — um ambiente sem pip imprime os comandos exatos a executar; uma recusa PEP 668 `externally-managed-environment` explica a solução (pipx ou um virtualenv) em vez de despejar um erro pip cru. O comando também mostra logo de início a versão atual e a mais recente no PyPI.
+
+---
+
 ## Novidades na 0.6.4
 
 Limpeza do deep-dive — as saídas caem onde você procura por elas, mais dois bugs de perda silenciosa de dados encontrados ao verificá-lo num workspace de 47 projetos.

@@ -27,6 +27,16 @@
 
 ---
 
+## 0.6.5 新功能
+
+`codebeacon upgrade` 现在在任何环境下都能工作 — 此前它假定是普通 pip 安装，在并非如此的机器上会静默失败、什么也不做。
+
+- **自动检测安装管理器** — upgrade 命令会检测 codebeacon 的安装方式并运行对应工具：pip 安装用 `pip install --upgrade`，pipx 用 `pipx upgrade codebeacon`，uv 用 `uv tool upgrade codebeacon`。pipx/uv tool 的 venv *不带* `pip` 模块，因此旧的无条件 `python -m pip` 调用在开始前就已失败。
+- **升级结果验证** — 升级后用全新解释器重新读取已安装版本并报告 `0.6.4 -> 0.6.5`。如果版本未变但 PyPI 上有更新版本，会警告 PATH 中的 `codebeacon` 可能属于另一个 Python 环境，而不是给出虚假的 "Upgrade complete"。
+- **可操作的失败提示** — 无 pip 的环境会打印应运行的确切命令；PEP 668 `externally-managed-environment` 拒绝时会解释解决方案（pipx 或 virtualenv），而不是抛出原始 pip 错误。命令开头还会并列显示当前版本与 PyPI 最新版本。
+
+---
+
 ## 0.6.4 新功能
 
 Deep-dive 清理 — 输出落在你查找它们的位置，外加在 47 个项目的工作区上验证时发现的两个静默数据丢失缺陷。

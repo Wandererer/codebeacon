@@ -27,6 +27,16 @@
 
 ---
 
+## 0.6.5 새 소식
+
+`codebeacon upgrade` 가 이제 어떤 환경에서도 동작합니다 — 이전에는 일반 pip 설치를 가정해서, 그렇지 않은 머신에서는 아무것도 못 하고 조용히 실패했습니다.
+
+- **설치 매니저 자동 감지** — upgrade 명령이 codebeacon 의 설치 방식을 감지해 맞는 도구를 실행합니다: pip 설치면 `pip install --upgrade`, pipx 면 `pipx upgrade codebeacon`, uv 면 `uv tool upgrade codebeacon`. pipx/uv tool 의 venv 에는 `pip` 모듈이 *없어서*, 기존의 무조건적인 `python -m pip` 호출은 시작도 못 하고 죽었습니다.
+- **업그레이드 검증** — 업그레이드 후 새 인터프리터로 설치된 버전을 다시 읽어 `0.6.4 -> 0.6.5` 처럼 보고합니다. 버전이 그대로인데 PyPI 에 더 새 릴리스가 있으면, 가짜 "Upgrade complete" 대신 PATH 의 `codebeacon` 이 다른 Python 환경 소속일 수 있다는 경고를 출력합니다.
+- **실패 메시지가 곧 해결책** — pip 없는 환경이면 실행할 정확한 명령을 안내하고, PEP 668 `externally-managed-environment` 거부에는 원시 pip 에러 대신 해결 방법(pipx 또는 virtualenv)을 설명합니다. 시작 시 현재 버전과 PyPI 최신 버전도 나란히 보여줍니다.
+
+---
+
 ## 0.6.4 새 소식
 
 Deep-dive 정리 — 출력물이 찾아보는 곳에 생성되도록 정돈하고, 47개 프로젝트 워크스페이스에서 이를 검증하던 중 발견한 조용한 데이터 손실 버그 2건 수정.
@@ -309,7 +319,7 @@ codebeacon install
 codebeacon upgrade
 ```
 
-이 명령은 pip 으로 패키지를 업그레이드한 뒤 `codebeacon install` 을 다시 실행해 `~/.claude/skills/codebeacon/SKILL.md` 을 새 릴리스의 사본으로 덮어씁니다. 새 SKILL.md 가 로드되려면 Claude Code 세션을 재시작하세요. editable 모드 (`pip install -e .`) 로 설치되어 있다면 pip 단계는 스킵됩니다 — 강제로 진행하려면 `--force` 를 붙이세요.
+이 명령은 설치에 사용된 도구(`pip`, `pipx upgrade`, `uv tool upgrade` — 자동 감지)로 패키지를 업그레이드하고, 설치된 버전이 실제로 바뀌었는지 검증한 뒤 `codebeacon install` 을 다시 실행해 `~/.claude/skills/codebeacon/SKILL.md` 을 새 릴리스의 사본으로 덮어씁니다. 새 SKILL.md 가 로드되려면 Claude Code 세션을 재시작하세요. editable 모드 (`pip install -e .`) 로 설치되어 있다면 패키지 단계는 스킵됩니다 — 강제로 진행하려면 `--force` 를 붙이세요.
 
 ### MCP 서버
 

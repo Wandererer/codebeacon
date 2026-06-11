@@ -337,43 +337,145 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_upgrade(args: argparse.Namespace) -> int:
-    """``codebeacon upgrade`` — pip upgrade the package + refresh SKILL.md.
+def _detect_install_kind() -> str:
+    """Classify how this codebeacon was installed.
 
-    Runs `pip install --upgrade codebeacon` in the current interpreter, then
-    reinvokes `codebeacon install` so ~/.claude/skills/codebeacon/SKILL.md is
-    refreshed to whatever shipped in the new release. Editable installs are
-    detected and skipped (pip upgrade would be a no-op anyway).
+    Returns one of ``"editable"``, ``"pipx"``, ``"uv-tool"``, or ``"pip"``.
+    pipx and uv-tool manage their own venvs (which usually ship *without* a
+    pip module), so ``python -m pip install --upgrade`` is the wrong tool
+    there — each needs its own upgrade command.
     """
+    try:
+        from importlib.metadata import Distribution
+        dist = Distribution.from_name("codebeacon")
+        direct_url = dist.read_text("direct_url.json") or ""
+        if '"editable": true' in direct_url:
+            return "editable"
+    except Exception:
+        pass
+
+    parts = Path(sys.prefix).resolve().parts
+    if "pipx" in parts:
+        return "pipx"
+    if "uv" in parts and "tools" in parts:
+        return "uv-tool"
+    return "pip"
+
+
+def _pypi_latest_version(timeout: float = 5.0) -> str | None:
+    """Best-effort lookup of the newest codebeacon release on PyPI."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            "https://pypi.org/pypi/codebeacon/json", timeout=timeout
+        ) as resp:
+            return json.load(resp)["info"]["version"]
+    except Exception:
+        return None
+
+
+def _installed_version(python: str) -> str | None:
+    """Read codebeacon.__version__ via a fresh interpreter.
+
+    The current process keeps running pre-upgrade code, so the only way to
+    see what an upgrade actually installed is to ask a new process.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [python, "-c", "import codebeacon; print(codebeacon.__version__)"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    """``codebeacon upgrade`` — upgrade the package + refresh SKILL.md.
+
+    Picks the upgrade command matching how codebeacon was installed
+    (pip / pipx / uv tool), verifies the installed version actually changed,
+    then reinvokes `codebeacon install` so ~/.claude/skills/codebeacon/SKILL.md
+    is refreshed to whatever shipped in the new release. Editable installs are
+    detected and skipped (a pip upgrade would clobber the dev checkout).
+    """
+    import shutil
     import subprocess
     import sys as _sys
     from codebeacon import __version__ as _current
 
     print(f"Current version: codebeacon {_current}", flush=True)
+    latest = _pypi_latest_version()
+    if latest:
+        print(f"Latest on PyPI:  codebeacon {latest}", flush=True)
 
-    is_editable = False
-    try:
-        from importlib.metadata import Distribution
-        dist = Distribution.from_name("codebeacon")
-        direct_url = dist.read_text("direct_url.json") or ""
-        if "\"editable\": true" in direct_url:
-            is_editable = True
-    except Exception:
-        pass
+    kind = _detect_install_kind()
 
-    if is_editable and not getattr(args, "force", False):
+    if kind == "editable" and not getattr(args, "force", False):
         print(
-            "Detected an editable (pip install -e .) install — skipping pip upgrade.\n"
+            "Detected an editable (pip install -e .) install — skipping package upgrade.\n"
             "Use `git pull` to get new code, or pass --force to upgrade anyway.",
             file=_sys.stderr,
         )
     else:
-        cmd = [_sys.executable, "-m", "pip", "install", "--upgrade", "codebeacon"]
+        if kind == "pipx":
+            cmd = [shutil.which("pipx") or "pipx", "upgrade", "codebeacon"]
+        elif kind == "uv-tool":
+            cmd = [shutil.which("uv") or "uv", "tool", "upgrade", "codebeacon"]
+        else:
+            import importlib.util
+            if importlib.util.find_spec("pip") is None:
+                print(
+                    "This Python environment has no pip module, so codebeacon "
+                    "cannot upgrade itself here.\n"
+                    "Upgrade with the tool that installed it, e.g.:\n"
+                    "  pipx upgrade codebeacon\n"
+                    "  uv tool upgrade codebeacon",
+                    file=_sys.stderr,
+                )
+                return 1
+            cmd = [_sys.executable, "-m", "pip", "install", "--upgrade", "codebeacon"]
+
         print(f"$ {' '.join(cmd)}")
-        rc = subprocess.call(cmd)
+        try:
+            rc = subprocess.call(cmd)
+        except FileNotFoundError:
+            print(f"Could not run `{cmd[0]}` — is it on your PATH?", file=_sys.stderr)
+            return 1
         if rc != 0:
-            print("pip upgrade failed.", file=_sys.stderr)
+            print("Upgrade command failed.", file=_sys.stderr)
+            if kind == "pip":
+                print(
+                    "If the error above mentions 'externally-managed-environment', "
+                    "this Python is managed by your OS or package manager. Install "
+                    "codebeacon with pipx (`pipx install codebeacon`) or inside a "
+                    "virtualenv instead.",
+                    file=_sys.stderr,
+                )
             return rc
+
+        # Verify the upgrade actually took effect — a "successful" command
+        # that leaves the old version in place should be reported, not hidden.
+        new_version = _installed_version(_sys.executable)
+        if new_version and new_version != _current:
+            print(f"Upgraded: codebeacon {_current} -> {new_version}", flush=True)
+        elif new_version == _current:
+            if latest and latest != _current:
+                print(
+                    f"Warning: still on codebeacon {_current} after the upgrade, "
+                    f"but PyPI has {latest}. The `codebeacon` on your PATH may "
+                    "belong to a different Python environment — check "
+                    "`which codebeacon` (or `where codebeacon` on Windows).",
+                    file=_sys.stderr,
+                )
+            else:
+                print("Already up to date.", flush=True)
 
     # Refresh SKILL.md by reinvoking the install command. We exec it in a
     # subprocess so the freshly-installed entry point is used (the current
