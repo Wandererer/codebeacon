@@ -199,9 +199,8 @@ class TestSemanticApplyIntegration:
         # known relation (should land), one hallucinated label (should
         # coerce + flag), one below threshold (should drop).
         # Pick any class node from the graph as the source.
-        import networkx.readwrite.json_graph as nxjson
-        beacon = json.loads((output_dir / "beacon.json").read_text())
-        G = nxjson.node_link_graph(beacon, directed=True, multigraph=False)
+        from codebeacon.graph.write import load_beacon
+        G, _ = load_beacon(output_dir / "beacon.json")
         class_nodes = [
             nid for nid, data in G.nodes(data=True) if data.get("type") == "class"
         ]
