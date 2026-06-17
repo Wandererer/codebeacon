@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.6.5"
+version = "0.6.7"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,14 +24,21 @@ classifiers = [
 dependencies = [
     "pyyaml>=6.0",
     "networkx>=3.0",
-    "tree-sitter>=0.23",
+    # tree-sitter grammars are pinned with UPPER BOUNDS: a 0.x minor bump renames
+    # AST node types, which silently breaks the .scm queries — run_query swallows
+    # the "Invalid node type" / "Impossible pattern" compile error to [] and a
+    # whole framework extracts nothing. Ceilings = next minor above the grammar
+    # version the shipped queries are validated against; if a bump ever outruns
+    # the queries, tests/test_graphify_parity_0_6_6.py fails loudly instead.
+    # (Ports graphify v0.8.39's "pin grammar upper bounds" fix.)
+    "tree-sitter>=0.23,<0.26",
     # Default grammars cover the most common mixed-team stack
     # (Python + JS/TS). Other languages live in extras — see below.
     # Rationale: pre-0.7.0 the default install pulled all 14 grammars
     # (~150MB) even for users who only scanned a Python repo.
-    "tree-sitter-python>=0.23",
-    "tree-sitter-javascript>=0.23",
-    "tree-sitter-typescript>=0.23",
+    "tree-sitter-python>=0.23,<0.26",
+    "tree-sitter-javascript>=0.23,<0.26",
+    "tree-sitter-typescript>=0.23,<0.24",
 ]
 
 [project.scripts]
@@ -39,54 +46,54 @@ codebeacon = "codebeacon.cli:main"
 
 [project.optional-dependencies]
 # ── Per-language grammars (slug matches codebeacon.extract.base._pip_extra) ──
-java    = ["tree-sitter-java>=0.23"]
-kotlin  = ["tree-sitter-kotlin>=0.23"]
-go      = ["tree-sitter-go>=0.23"]
-ruby    = ["tree-sitter-ruby>=0.23"]
-php     = ["tree-sitter-php>=0.23"]
-csharp  = ["tree-sitter-c-sharp>=0.23"]
-rust    = ["tree-sitter-rust>=0.23"]
-swift   = ["tree-sitter-swift>=0.0.1"]
-html    = ["tree-sitter-html>=0.23"]
-svelte  = ["tree-sitter-svelte>=0.23"]
+java    = ["tree-sitter-java>=0.23,<0.24"]
+kotlin  = ["tree-sitter-kotlin>=0.23,<1.2"]
+go      = ["tree-sitter-go>=0.23,<0.26"]
+ruby    = ["tree-sitter-ruby>=0.23,<0.24"]
+php     = ["tree-sitter-php>=0.23,<0.25"]
+csharp  = ["tree-sitter-c-sharp>=0.23,<0.24"]
+rust    = ["tree-sitter-rust>=0.23,<0.25"]
+swift   = ["tree-sitter-swift>=0.0.1,<0.8"]
+html    = ["tree-sitter-html>=0.23,<0.24"]
+svelte  = ["tree-sitter-svelte>=0.23,<1.1"]
 
 # ── Stack bundles ────────────────────────────────────────────────────────────
 # Pick the one that matches your team's primary stack. Default install
 # already covers Python + JS/TS; bundles fill in the gaps without forcing
 # every extra grammar onto every install.
 web     = [
-    "tree-sitter-html>=0.23",
-    "tree-sitter-svelte>=0.23",
+    "tree-sitter-html>=0.23,<0.24",
+    "tree-sitter-svelte>=0.23,<1.1",
 ]
 jvm     = [
-    "tree-sitter-java>=0.23",
-    "tree-sitter-kotlin>=0.23",
+    "tree-sitter-java>=0.23,<0.24",
+    "tree-sitter-kotlin>=0.23,<1.2",
 ]
 mobile  = [
-    "tree-sitter-kotlin>=0.23",
-    "tree-sitter-swift>=0.0.1",
+    "tree-sitter-kotlin>=0.23,<1.2",
+    "tree-sitter-swift>=0.0.1,<0.8",
 ]
-dotnet  = ["tree-sitter-c-sharp>=0.23"]
+dotnet  = ["tree-sitter-c-sharp>=0.23,<0.24"]
 backend = [
-    "tree-sitter-java>=0.23",
-    "tree-sitter-kotlin>=0.23",
-    "tree-sitter-go>=0.23",
-    "tree-sitter-ruby>=0.23",
-    "tree-sitter-php>=0.23",
-    "tree-sitter-c-sharp>=0.23",
-    "tree-sitter-rust>=0.23",
+    "tree-sitter-java>=0.23,<0.24",
+    "tree-sitter-kotlin>=0.23,<1.2",
+    "tree-sitter-go>=0.23,<0.26",
+    "tree-sitter-ruby>=0.23,<0.24",
+    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-c-sharp>=0.23,<0.24",
+    "tree-sitter-rust>=0.23,<0.25",
 ]
 full    = [
-    "tree-sitter-java>=0.23",
-    "tree-sitter-kotlin>=0.23",
-    "tree-sitter-go>=0.23",
-    "tree-sitter-ruby>=0.23",
-    "tree-sitter-php>=0.23",
-    "tree-sitter-c-sharp>=0.23",
-    "tree-sitter-rust>=0.23",
-    "tree-sitter-swift>=0.0.1",
-    "tree-sitter-html>=0.23",
-    "tree-sitter-svelte>=0.23",
+    "tree-sitter-java>=0.23,<0.24",
+    "tree-sitter-kotlin>=0.23,<1.2",
+    "tree-sitter-go>=0.23,<0.26",
+    "tree-sitter-ruby>=0.23,<0.24",
+    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-c-sharp>=0.23,<0.24",
+    "tree-sitter-rust>=0.23,<0.25",
+    "tree-sitter-swift>=0.0.1,<0.8",
+    "tree-sitter-html>=0.23,<0.24",
+    "tree-sitter-svelte>=0.23,<1.1",
 ]
 
 cluster = ["graspologic>=1.0"]
@@ -95,16 +102,16 @@ dev     = [
     "pytest-cov>=4.0",
     # Dev installs pull `[full]` so the test suite can exercise every
     # extractor without needing a separate "pip install codebeacon[full]".
-    "tree-sitter-java>=0.23",
-    "tree-sitter-kotlin>=0.23",
-    "tree-sitter-go>=0.23",
-    "tree-sitter-ruby>=0.23",
-    "tree-sitter-php>=0.23",
-    "tree-sitter-c-sharp>=0.23",
-    "tree-sitter-rust>=0.23",
-    "tree-sitter-swift>=0.0.1",
-    "tree-sitter-html>=0.23",
-    "tree-sitter-svelte>=0.23",
+    "tree-sitter-java>=0.23,<0.24",
+    "tree-sitter-kotlin>=0.23,<1.2",
+    "tree-sitter-go>=0.23,<0.26",
+    "tree-sitter-ruby>=0.23,<0.24",
+    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-c-sharp>=0.23,<0.24",
+    "tree-sitter-rust>=0.23,<0.25",
+    "tree-sitter-swift>=0.0.1,<0.8",
+    "tree-sitter-html>=0.23,<0.24",
+    "tree-sitter-svelte>=0.23,<1.1",
 ]
 
 [project.urls]

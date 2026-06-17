@@ -27,6 +27,29 @@
 
 ---
 
+## Novidades na 0.6.7
+
+Acompanhamento da auditoria de paridade com graphify da 0.6.6: a deriva de gramática agora falha de forma ruidosa em vez de silenciosa, e as negações no arquivo de ignore não deixam mais os scans lentos.
+
+- **A deriva de gramática é uma falha ruidosa, não um grafo vazio silencioso** — quando uma query do tree-sitter não compila contra uma gramática que *deveria* suportar (p. ex. um nó renomeado em uma futura atualização de gramática), `run_query` agora lança uma exceção e o arquivo é registrado como `ExtractionFailure` em vez de extrair silenciosamente nada. Junto com os limites superiores da 0.6.6 e o teste "cada query compila contra cada gramática que declara suportar", a deriva agora é detectada de três formas independentes.
+- **Uma única negação `!` no `.codebeaconignore` não força mais um percurso completo da árvore** — uma regra de negação em qualquer lugar desativava o pruning de diretórios *em todo lugar*, então o scanner descia em cada diretório excluído (`node_modules`, `build`, …) mesmo quando a negação não podia resgatar nada ali. Agora um diretório ignorado só é mantido se uma negação realmente puder reincluir um arquivo *abaixo dele*; regras `!` não relacionadas não custam nada.
+- **Globs de ignore são compilados uma única vez** — o matcher no estilo gitignore memoiza a regex compilada por padrão em vez de reconstruí-la a cada verificação de caminho (descoberta mais rápida em árvores profundas com arquivos de ignore grandes). Semântica inalterada.
+
+---
+
+## Novidades na 0.6.6
+
+Uma auditoria de paridade com graphify do upstream v0.8.37–v0.8.40 (e issues reportadas até #1362): uma varredura de "verificar e então refutar de forma adversária" sobre 32 candidatos confirmou **6 bugs reais**. O destaque — três extratores de framework produziam silenciosamente *nada*.
+
+- **Apps Express/Koa/Fastify em TypeScript agora extraem rotas** — `express.scm` fixava o nó de nome de classe do JavaScript, que é um "Impossible pattern" sob a gramática do TypeScript, então a query inteira não compilava e o erro era engolido: **apps Express em TS extraíam 0 rotas**. (Apps JavaScript funcionavam, e a única fixture de teste era `.js`, então passou despercebido.) A mesma causa atingia `vue.scm` (SFCs Vue com `<script>` simples → 0 componentes). Ambos agora usam um coringa de nó neutro de gramática que compila em JS e TS.
+- **Arquivos Kotlin em projetos Spring não dão mais erro** — `spring_boot.scm` é uma query de gramática Java mas tinha permissão de rodar contra Kotlin, emitindo `Invalid node type: marker_annotation` e descartando cada arquivo `.kt`. Kotlin agora é bloqueado de forma limpa (Kotlin Spring Boot precisaria de sua própria query).
+- **Gramáticas do tree-sitter têm limites superiores fixados** — `pyproject.toml` fixava as gramáticas sem limite superior (`>=0.23`), então um futuro release de gramática que renomeasse nós da AST poderia quebrar as queries silenciosamente de novo. Cada gramática agora tem um teto de faixa compatível, e um novo teste verifica que cada `.scm` distribuída compila contra cada gramática que declara suportar.
+- **O cache de extração é versionado** — após atualizar o codebeacon, um `--update` incremental podia reutilizar resultados extraídos pela versão *antiga* para arquivos inalterados (um hash de conteúdo não detecta que o extrator mudou). O cache agora carrega a versão do codebeacon e é descartado em caso de divergência.
+- **Nomes acentuados / não ASCII resolvem no macOS** — `codebeacon query` / `path` / MCP e `affected` agora normalizam rótulos e caminhos para Unicode NFC, de modo que um nome copiado de um nome de arquivo do macOS (armazenado como NFD) corresponde ao rótulo NFC no grafo (p. ex. `Auditoría`).
+- Além disso: um `cache.json` corrompido é salvo em backup e reconstruído em vez de ser silenciosamente resetado e sobrescrito.
+
+---
+
 ## Novidades na 0.6.5
 
 `codebeacon upgrade` agora funciona em qualquer ambiente — antes ele presumia uma instalação pip comum e falhava silenciosamente em máquinas onde não era o caso.

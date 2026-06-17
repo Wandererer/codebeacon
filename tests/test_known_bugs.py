@@ -144,21 +144,28 @@ class TestCacheRelativeKeys:
         assert c.get(str(f)) == {"answer": 42}
 
     def test_load_migrates_legacy_absolute_keys(self, tmp_path):
-        """A cache.json written by an older codebeacon (absolute keys)
-        is rewritten to relative form on load so the next save persists
-        the migration."""
+        """A same-version cache.json with absolute keys (e.g. one committed by
+        a contributor on a different machine) is rewritten to relative form on
+        load so the next save persists the migration. The cache must carry the
+        current version stamp — a foreign-version cache is discarded instead
+        (see test_graphify_parity_0_6_6)."""
+        from codebeacon import __version__
+
         repo = tmp_path / "repo"; repo.mkdir()
         src = repo / "src"; src.mkdir()
         f = src / "foo.py"; f.write_text("x=1")
 
         cache_dir = repo / ".codebeacon" / "cache"
         cache_dir.mkdir(parents=True)
-        # Legacy on-disk format: absolute path key
+        # Versioned wrapper format, absolute path key (cross-machine share).
         (cache_dir / "cache.json").write_text(json.dumps({
-            str(f.resolve()): {
-                "hash": "deadbeef", "result": {"legacy": True},
-                "ts": 0, "mtime_ns": 0, "size": 0,
-            }
+            "_cb_version": __version__,
+            "entries": {
+                str(f.resolve()): {
+                    "hash": "deadbeef", "result": {"legacy": True},
+                    "ts": 0, "mtime_ns": 0, "size": 0,
+                }
+            },
         }))
 
         c = Cache(str(repo / ".codebeacon"), project_root=str(repo))

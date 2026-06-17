@@ -21,6 +21,7 @@ from codebeacon.extract.base import (
     parse_file,
     parse_sfc_script,
     run_query,
+    GrammarQueryError,
 )
 
 
@@ -74,6 +75,8 @@ def extract_components(
 
     try:
         matches = run_query(lang, query_src, root)
+    except GrammarQueryError:
+        raise  # grammar drift on a supported grammar → surfaced as ExtractionFailure
     except Exception:
         return []
 

@@ -22,6 +22,7 @@ from codebeacon.extract.base import (
     node_text,
     parse_file,
     parse_sfc_script,
+    GrammarQueryError,
     run_query,
 )
 
@@ -145,6 +146,8 @@ def extract_routes(
     # 3. Run query once, then dispatch to per-framework interpreter
     try:
         matches = run_query(lang, query_src, root)
+    except GrammarQueryError:
+        raise  # grammar drift on a supported grammar → surfaced as ExtractionFailure
     except Exception:
         return convention
 

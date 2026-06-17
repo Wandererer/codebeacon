@@ -96,15 +96,20 @@
 ) @route.fastify_register
 
 ; ── Exported class (service) ──────────────────────────────────────────────────
+; The class-name node differs by grammar (JS: identifier, TS: type_identifier).
+; Hardcoding (identifier) made this query an "Impossible pattern" under the
+; TypeScript/TSX grammars (allowed by QUERY_GRAMMAR_ALLOWLIST), so run_query
+; silently returned [] and TS Express/Koa/Fastify apps yielded 0 routes.
+; The (_) wildcard compiles and captures the name under both grammars.
 
 (export_statement
   declaration: (class_declaration
-    name: (identifier) @service.name
+    name: (_) @service.name
   )
 ) @service.export_class
 
 (class_declaration
-  name: (identifier) @service.name
+  name: (_) @service.name
 ) @service.class
 
 ; ── imports ───────────────────────────────────────────────────────────────────

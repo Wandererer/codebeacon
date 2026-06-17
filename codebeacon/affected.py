@@ -17,6 +17,7 @@ Mirrors graphify #e44e6e9 ("v8 affected").
 from __future__ import annotations
 
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -94,8 +95,10 @@ def affected_from_paths(
 
     # Normalise seed paths to POSIX with forward slashes; node source_file may
     # be absolute or repo-relative depending on how it was extracted, so we
-    # match by suffix (a relative suffix of the absolute node path).
-    seeds = [str(p).replace("\\", "/") for p in changed_paths]
+    # match by suffix (a relative suffix of the absolute node path). NFC-
+    # normalise so a macOS git-diff path (NFD) with accented filenames still
+    # matches the NFC source_file stored in beacon.json (#1338).
+    seeds = [unicodedata.normalize("NFC", str(p)).replace("\\", "/") for p in changed_paths]
 
     def _suffix_match(a: str, b: str) -> bool:
         # True when one path is a *path-segment-aligned* suffix of the other,
@@ -108,7 +111,7 @@ def affected_from_paths(
 
     seed_node_ids: list[str] = []
     for node_id, data in G.nodes(data=True):
-        src = (data.get("source_file") or "").replace("\\", "/")
+        src = unicodedata.normalize("NFC", data.get("source_file") or "").replace("\\", "/")
         if not src:
             continue
         if any(_suffix_match(src, seed) for seed in seeds):

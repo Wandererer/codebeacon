@@ -21,6 +21,7 @@ zero-or-more directory segments.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +104,36 @@ class IgnoreMatcher:
                 last = rule
         return last is not None and last.negate
 
+    def could_unignore_under(self, rel_dir: str) -> bool:
+        """Return True if some negation (``!``) rule could re-include a path
+        strictly *under* ``rel_dir``.
+
+        The scanner uses this to decide whether descending into a directory that
+        is itself ignored is worthwhile: only if a ``!`` rule could rescue a
+        file beneath it. This replaces the old global "any negation anywhere →
+        descend into every ignored directory" flag, which wasted the entire
+        excluded subtree's traversal whenever a single *unrelated* ``!`` rule
+        existed (graphify #1274).
+
+        Conservative by construction — it returns True whenever a negation
+        *might* reach below ``rel_dir`` (always for unanchored ``!`` rules,
+        which match at any depth), so a directory is pruned only when no
+        negation could possibly rescue a file inside it. It never drops a file
+        that should have been re-included; at worst it descends needlessly.
+        Recall that a negation only re-includes via a *self*-match, never via an
+        ancestor match (see :meth:`is_ignored`), so an anchored ``!a/b/c`` can
+        only matter under ``a/``.
+        """
+        dir_segs = [s for s in rel_dir.split("/") if s]
+        for rule in self._rules:
+            if not rule.negate:
+                continue
+            if not rule.anchored:
+                return True  # unanchored negation can match a file at any depth
+            if _anchored_can_match_under(rule.pattern, dir_segs):
+                return True
+        return False
+
 
 # ── Internals ────────────────────────────────────────────────────────────────
 
@@ -166,6 +197,36 @@ def _matches(rule: _Rule, rel_path: str) -> bool:
     return False
 
 
+def _anchored_can_match_under(pattern: str, dir_segs: list[str]) -> bool:
+    """True if anchored glob ``pattern`` can match a path that has ``dir_segs``
+    as a *proper* prefix — i.e. some file/subpath beneath that directory.
+
+    Segment-wise alignment of the pattern against ``dir_segs`` with ``**``
+    consuming zero-or-more segments; the remaining pattern must be able to match
+    at least one further segment (the file). Used only by
+    :meth:`IgnoreMatcher.could_unignore_under`.
+    """
+    pat = pattern.split("/")
+
+    def rec(pi: int, si: int) -> bool:
+        if si == len(dir_segs):
+            # All directory segments consumed — the pattern must still be able
+            # to match >=1 further segment beneath rel_dir. Anything left in the
+            # pattern (a glob segment, or a trailing **) can. Nothing left means
+            # the pattern matches rel_dir itself, not something under it.
+            return pi < len(pat)
+        if pi == len(pat):
+            return False
+        seg = pat[pi]
+        if seg == "**":
+            return rec(pi + 1, si) or rec(pi, si + 1)  # ** matches 0+ segments
+        if _glob_match(seg, dir_segs[si]):
+            return rec(pi + 1, si + 1)
+        return False
+
+    return rec(0, 0)
+
+
 def _segment_glob_regex(segment: str) -> str:
     """Translate a single glob segment to regex where `*`/`?` do NOT cross `/`.
 
@@ -205,16 +266,27 @@ def _segment_glob_regex(segment: str) -> str:
     return "".join(out)
 
 
-def _glob_match(pattern: str, path: str) -> bool:
-    """Match ``path`` against a gitignore-style ``pattern`` with ``**`` support."""
+@functools.lru_cache(maxsize=4096)
+def _compile_glob(pattern: str) -> tuple[re.Pattern[str] | None, bool]:
+    """Compile a gitignore glob to a regex **once** (memoized per pattern).
+
+    Returns ``(compiled, use_fnmatch)``:
+      - ``(re.Pattern, False)`` — match with the compiled regex.
+      - ``(None, True)``  — non-``**`` pattern whose regex was invalid; the
+        caller falls back to :func:`fnmatch.fnmatchcase` (legacy behaviour).
+      - ``(None, False)`` — ``**`` pattern whose regex was invalid; never matches.
+
+    Previously the regex string was rebuilt and re-compiled on *every*
+    :func:`_glob_match` call (graphify #1261 — the dominant per-file cost when a
+    deep tree is matched against a large rule set). Patterns are few and bounded,
+    so an LRU cache collapses this to one compile per distinct pattern.
+    """
     if "**" not in pattern:
-        # Segment-aware match: `*`/`?` must not cross `/`. Falls back to plain
-        # fnmatch only if the translated regex is somehow invalid.
-        regex = "^" + _segment_glob_regex(pattern) + "$"
+        # Segment-aware match: `*`/`?` must not cross `/`.
         try:
-            return bool(re.match(regex, path))
+            return re.compile("^" + _segment_glob_regex(pattern) + "$"), False
         except re.error:
-            return fnmatch.fnmatchcase(path, pattern)
+            return None, True  # fall back to fnmatch
 
     # `**` means zero-or-more directory segments. Build a regex.
     parts = pattern.split("/")
@@ -233,6 +305,16 @@ def _glob_match(pattern: str, path: str) -> bool:
                 regex_parts.append("/")
     regex = "^" + "".join(regex_parts).replace("//", "/") + "$"
     try:
-        return bool(re.match(regex, path))
+        return re.compile(regex), False
     except re.error:
-        return False
+        return None, False  # invalid `**` regex → never matches
+
+
+def _glob_match(pattern: str, path: str) -> bool:
+    """Match ``path`` against a gitignore-style ``pattern`` with ``**`` support."""
+    compiled, use_fnmatch = _compile_glob(pattern)
+    if compiled is not None:
+        return bool(compiled.match(path))
+    if use_fnmatch:
+        return fnmatch.fnmatchcase(path, pattern)
+    return False

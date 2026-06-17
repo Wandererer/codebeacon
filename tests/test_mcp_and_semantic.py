@@ -71,6 +71,47 @@ class TestCasefoldQuery:
         assert idx.find_node_ids("用户") == ["p::用户"]
 
 
+# ── NFC/NFD label lookup (graphify #1338) ────────────────────────────────────
+
+class TestNfcLabelLookup:
+    """Labels and queries are NFC-normalised before casefolding, so an NFD
+    query (e.g. a label copied from a macOS APFS/HFS+ filename) matches an NFC
+    stored label and vice versa. casefold() alone does NOT normalise Unicode
+    form, so without this the same text in different forms never matched."""
+
+    def test_nfd_query_matches_nfc_stored_label(self, tmp_path):
+        import unicodedata
+        nfc = unicodedata.normalize("NFC", "Auditoría")
+        nfd = unicodedata.normalize("NFD", "Auditoría")
+        assert nfc != nfd, "fixture precondition: the two forms must differ"
+
+        G = nx.DiGraph()
+        G.add_node("p::Auditoría", label=nfc, project="p", type="class")
+        _write_beacon(tmp_path, G)
+
+        from codebeacon.export.mcp import BeaconIndex
+        idx = BeaconIndex(tmp_path)
+        idx.load()
+        assert idx.find_node_ids(nfd) == ["p::Auditoría"]  # was [] before #1338
+        assert idx.find_node_ids(nfc) == ["p::Auditoría"]
+
+    def test_nfc_query_matches_nfd_stored_label(self, tmp_path):
+        """The realistic macOS direction: the stored label is NFD (derived from
+        a filename) and the user types an NFC query."""
+        import unicodedata
+        nfc = unicodedata.normalize("NFC", "Auditoría")
+        nfd = unicodedata.normalize("NFD", "Auditoría")
+
+        G = nx.DiGraph()
+        G.add_node("p::n1", label=nfd, project="p", type="class")
+        _write_beacon(tmp_path, G)
+
+        from codebeacon.export.mcp import BeaconIndex
+        idx = BeaconIndex(tmp_path)
+        idx.load()
+        assert idx.find_node_ids(nfc) == ["p::n1"]  # was [] before #1338
+
+
 # ── Semantic neighbor context ───────────────────────────────────────────────
 
 class TestSemanticNeighborContext:

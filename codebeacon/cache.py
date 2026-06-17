@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -94,15 +95,52 @@ class Cache:
     def load(self) -> None:
         """Load cache from disk. Safe to call even if the cache file doesn't exist.
 
-        When ``project_root`` is set, any legacy absolute-path keys that
-        sit inside the project are rewritten to relative form. The first
-        save afterwards persists the migration.
+        On-disk format is a version-stamped wrapper::
+
+            {"_cb_version": "0.6.6", "entries": {key: entry, ...}}
+
+        A cache written by a *different* codebeacon version is discarded: the
+        extractor logic and the ``.scm`` queries change between releases, so
+        reusing an older version's result for an *unchanged* source file would
+        serve silently-stale output. The content hash can't catch this — the
+        file didn't change, the extractor did. (Mirrors graphify #1252.) A
+        legacy *flat* cache (pre-0.6.6, no wrapper) is unversioned and dropped
+        for the same reason.
+
+        When ``project_root`` is set, surviving absolute-path keys are rewritten
+        to relative form (graphify #777); the first save persists the migration.
         """
+        from codebeacon import __version__
+
+        raw: Any = None
         try:
             if self._cache_file.exists():
-                self._data = json.loads(self._cache_file.read_text(encoding="utf-8"))
+                raw = json.loads(self._cache_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            # Corrupt cache.json — preserve it (don't let the next save silently
+            # overwrite and destroy it) and rebuild from scratch. Mirrors the
+            # graphify v0.8.39 "manifest data-loss on corrupt JSON" fix.
+            self._backup_corrupt()
+            raw = None
+
+        if isinstance(raw, dict) and "_cb_version" in raw and "entries" in raw:
+            stored_version = raw.get("_cb_version")
+            entries = raw.get("entries") or {}
+        elif isinstance(raw, dict):
+            stored_version, entries = None, raw  # legacy flat (unversioned)
+        else:
+            stored_version, entries = __version__, {}  # nothing on disk
+
+        if stored_version != __version__:
+            # Discard a foreign-version / unversioned cache exactly once. Mark
+            # dirty only when there was something to drop, so the fresh,
+            # version-stamped cache is written on save().
             self._data = {}
+            if entries:
+                self._dirty = True
+            return
+
+        self._data = entries if isinstance(entries, dict) else {}
         if self._root is None or not self._data:
             return
         migrated: dict[str, dict] = {}
@@ -116,13 +154,33 @@ class Cache:
             self._data = migrated
             self._dirty = True
 
+    def _backup_corrupt(self) -> None:
+        """Move a corrupt ``cache.json`` aside so the next ``save()`` can't
+        silently overwrite it. Best-effort; the cache is reproducible."""
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = self._cache_file.with_name(f"{self._cache_file.name}.{ts}.corrupt")
+            self._cache_file.replace(backup)
+            print(
+                f"codebeacon: {self._cache_file} was corrupt; preserved as "
+                f"{backup.name} and rebuilt the cache.",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass
+
     def save(self) -> None:
         """Persist cache to disk. No-op if nothing has changed."""
         if not self._dirty:
             return
+        from codebeacon import __version__
+
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_file.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
+            json.dumps(
+                {"_cb_version": __version__, "entries": self._data},
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
         self._dirty = False

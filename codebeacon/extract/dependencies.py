@@ -25,6 +25,7 @@ from codebeacon.extract.base import (
     parse_file,
     parse_sfc_script,
     run_query,
+    GrammarQueryError,
 )
 
 
@@ -193,6 +194,8 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
 
     try:
         matches = run_query(lang, query_src, root)
+    except GrammarQueryError:
+        raise  # grammar drift on a supported grammar → surfaced as ExtractionFailure
     except Exception:
         return []
 

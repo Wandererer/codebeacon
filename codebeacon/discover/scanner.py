@@ -184,12 +184,9 @@ def collect_files(
     if extra_ignore:
         lines.extend(extra_ignore)
     matcher = IgnoreMatcher(lines)
-    # If any rule has `negate=True`, directory pruning is deferred to per-file
-    # checks so a negated file inside an ignored directory can still be reached.
-    has_negation = any(r.negate for r in matcher._rules)  # noqa: SLF001 — intentional internal access
 
     result: list[str] = []
-    _walk(root, root, 0, max_depth, matcher, has_negation, result)
+    _walk(root, root, 0, max_depth, matcher, result)
     return sorted(result)
 
 
@@ -199,7 +196,6 @@ def _walk(
     depth: int,
     max_depth: int,
     matcher: IgnoreMatcher,
-    has_negation: bool,
     result: list[str],
 ) -> None:
     if depth > max_depth:
@@ -223,12 +219,15 @@ def _walk(
             if not explicitly_included:
                 if _should_ignore_dir(entry.name):
                     continue
-                # Skip descent only when no negation rules could un-ignore a
-                # nested file. When `!pattern` exists, we must descend so that
-                # negated files inside ignored directories are still reachable.
-                if not has_negation and matcher.is_ignored(rel, is_dir=True):
+                # Prune an ignored directory only when no negation rule could
+                # re-include a file beneath it. A per-directory check (not a
+                # global "any negation → descend everywhere" flag) so an
+                # unrelated `!foo` rule doesn't force descent into every
+                # excluded subtree (graphify #1274). Unanchored negations are
+                # treated conservatively (descend), so no rescuable file is lost.
+                if matcher.is_ignored(rel, is_dir=True) and not matcher.could_unignore_under(rel):
                     continue
-            _walk(base, entry, depth + 1, max_depth, matcher, has_negation, result)
+            _walk(base, entry, depth + 1, max_depth, matcher, result)
         elif entry.is_file():
             if entry.suffix not in CODE_EXTENSIONS:
                 continue

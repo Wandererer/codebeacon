@@ -49,7 +49,11 @@
 (export_statement
   "default"
   (class_declaration
-    name: (type_identifier) @component.class_name
+    ; class-name node differs by grammar (JS: identifier, TS: type_identifier);
+    ; hardcoding (type_identifier) made this an "Invalid node type" under the
+    ; JavaScript grammar, so the whole vue.scm failed to compile and Vue SFCs
+    ; with a plain <script> (JS) yielded 0 components. (_) compiles under both.
+    name: (_) @component.class_name
   )
 ) @component.class
 

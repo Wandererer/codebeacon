@@ -63,7 +63,13 @@ QUERY_GRAMMAR_ALLOWLIST: dict[str, frozenset[str]] = {
     "django":      frozenset({"python"}),
     "flask":       frozenset({"python"}),
     # JVM families
-    "spring_boot": frozenset({"java", "kotlin"}),
+    # spring_boot.scm is a Java-grammar query (marker_annotation, modifiers,
+    # annotation_argument_list — none of which exist in the Kotlin grammar), so
+    # it can never compile against Kotlin: run_query was raising "Invalid node
+    # type: marker_annotation" and silently dropping every .kt file to []. Permit
+    # Java only, so Kotlin files are skipped cleanly by the gate rather than fed
+    # to an incompatible grammar. Kotlin Spring Boot would need its own query.
+    "spring_boot": frozenset({"java"}),
     "ktor":        frozenset({"kotlin"}),
     # Other single-language families
     "gin":         frozenset({"go"}),
@@ -194,13 +200,39 @@ def get_parser(grammar: str) -> Optional[Parser]:
 QueryMatch = tuple[int, dict[str, list[Node]]]  # (pattern_idx, captures)
 
 
+class GrammarQueryError(Exception):
+    """A tree-sitter query failed to **compile** against a grammar (e.g.
+    "Invalid node type" / "Impossible pattern").
+
+    This signals grammar *drift*: the ``.scm`` query references node types the
+    installed grammar version no longer has, so every file of that grammar
+    would otherwise silently extract nothing. It is raised — not swallowed —
+    so the wave pipeline records it as an :class:`~codebeacon.wave.ExtractionFailure`
+    instead of producing a silent partial graph. Because every extractor gates
+    on :func:`is_grammar_allowed` before calling :func:`run_query`, this only
+    fires for a grammar the query is *supposed* to support — i.e. a real
+    regression, not an expected skip. (Upper-bound grammar pins in pyproject and
+    the .scm compile test in tests/test_graphify_parity_0_6_6.py are the
+    first line of defence; this is the runtime backstop.)
+    """
+
+
 def run_query(language: Language, pattern: str, node: Node) -> list[QueryMatch]:
     """Run a tree-sitter query and return all matches.
 
     Returns list of (pattern_index, {capture_name: [Node, ...]}).
+
+    A *compile-time* failure (the query references node types the grammar does
+    not have) raises :class:`GrammarQueryError` so the caller can surface it as
+    a real extraction failure rather than an empty result. A *runtime* match
+    error on an otherwise-valid query is still swallowed to ``[]`` (legacy
+    behaviour — these are rare and per-node, not whole-framework).
     """
     try:
         q = Query(language, pattern)
+    except Exception as e:
+        raise GrammarQueryError(str(e)) from e
+    try:
         cursor = QueryCursor(q)
         return list(cursor.matches(node))
     except Exception as e:

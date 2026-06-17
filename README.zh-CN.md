@@ -27,6 +27,29 @@
 
 ---
 
+## 0.6.7 新功能
+
+对 0.6.6 graphify 对齐审计的后续:grammar 漂移现在会明确报错而非静默掩盖,ignore 文件中的否定规则也不再拖慢扫描。
+
+- **grammar 漂移是明确的失败,而非静默的空图** — 当 tree-sitter 查询无法对它*应当*支持的 grammar 编译时(例如未来 grammar 升级中重命名了节点类型),`run_query` 现在会抛出异常,该文件被记录为 `ExtractionFailure`,而不是静默地抽取出 0 项。配合 0.6.6 的上限固定以及"每个查询都能对它声明支持的每个 grammar 编译"的测试,漂移现在通过三种独立方式被发现。
+- **`.codebeaconignore` 中单个 `!` 否定不再强制全树遍历** — 任意位置的一条否定规则会*全局*禁用目录剪枝,导致扫描器即使该否定无法在其中救回任何文件,也会进入每个被排除的目录(`node_modules`、`build` 等)。现在只有当某条否定确实可能重新包含其*下方*的文件时,被忽略的目录才会被遍历;无关的 `!` 规则不再有任何开销。
+- **ignore glob 只编译一次** — gitignore 风格的匹配器会按模式缓存已编译的正则,而不是在每次路径检查时重建(在带有大型 ignore 文件的深层目录树上发现更快)。语义不变。
+
+---
+
+## 0.6.6 新功能
+
+对上游 v0.8.37–v0.8.40(以及截至 #1362 的报告 issue)的 graphify 对齐审计:以"先验证再对抗性反驳"的方式排查 32 个候选,确认了 **6 个真实 bug**。重点 — 三个框架抽取器在静默地*什么都不*产出。
+
+- **TypeScript 的 Express/Koa/Fastify 应用现在能抽取路由** — `express.scm` 硬编码了 JavaScript 的类名节点类型,这在 TypeScript grammar 下是 "Impossible pattern",于是整个查询无法编译且错误被吞掉:**TS 的 Express 应用抽取出 0 条路由**。(JavaScript 应用正常,而唯一的测试夹具是 `.js`,所以一直没被发现。)同样的根因也出现在 `vue.scm`(带普通 `<script>` 的 Vue SFC → 0 个组件)。两者现在都改用在 JS 与 TS 下都能编译的 grammar 中立节点通配符。
+- **Spring 项目中的 Kotlin 文件不再报错** — `spring_boot.scm` 是 Java grammar 查询,却被允许对 Kotlin 运行,抛出 `Invalid node type: marker_annotation` 并丢弃每个 `.kt` 文件。Kotlin 现在被干净地拦截(Kotlin Spring Boot 需要它自己的查询)。
+- **tree-sitter grammar 加上了版本上限** — `pyproject.toml` 此前对 grammar 不设上限地固定(`>=0.23`),因此未来某个重命名 AST 节点类型的 grammar 发布可能再次静默破坏查询。现在每个 grammar 都有一个兼容范围上限,并新增了一个测试,验证每个随附的 `.scm` 都能对它声明支持的每个 grammar 编译。
+- **抽取缓存带上了版本** — 升级 codebeacon 后,增量 `--update` 可能对未改动的文件复用*旧*版本抽取的结果(内容哈希无法察觉抽取器本身变了)。缓存现在带有 codebeacon 版本,版本不匹配时被丢弃。
+- **带重音 / 非 ASCII 的名称在 macOS 上能解析** — `codebeacon query` / `path` / MCP 与 `affected` 现在会把标签和路径做 Unicode NFC 规范化,因此从 macOS 文件名(以 NFD 存储)复制的名称能匹配图中的 NFC 标签(例如 `Auditoría`)。
+- 此外:损坏的 `cache.json` 会被备份并重建,而不是被静默重置后覆盖。
+
+---
+
 ## 0.6.5 新功能
 
 `codebeacon upgrade` 现在在任何环境下都能工作 — 此前它假定是普通 pip 安装，在并非如此的机器上会静默失败、什么也不做。

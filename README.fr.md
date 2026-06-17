@@ -27,6 +27,29 @@
 
 ---
 
+## Nouveautés en 0.6.7
+
+Suite de l'audit de parité graphify de 0.6.6 : la dérive de grammaire échoue désormais bruyamment au lieu de silencieusement, et les négations du fichier d'ignore ne ralentissent plus les scans.
+
+- **La dérive de grammaire est un échec bruyant, pas un graphe vide silencieux** — quand une requête tree-sitter ne compile pas contre une grammaire qu'elle est *censée* prendre en charge (p. ex. un nœud renommé dans une future mise à jour de grammaire), `run_query` lève désormais une exception et le fichier est enregistré comme `ExtractionFailure` au lieu de n'extraire silencieusement rien. Avec les bornes supérieures de 0.6.6 et le test « chaque requête compile contre chaque grammaire qu'elle revendique », la dérive est désormais détectée de trois façons indépendantes.
+- **Une seule négation `!` dans `.codebeaconignore` ne force plus un parcours complet de l'arbre** — une règle de négation où que ce soit désactivait l'élagage des répertoires *partout*, de sorte que le scanner descendait dans chaque répertoire exclu (`node_modules`, `build`, …) même si la négation ne pouvait rien y récupérer. Un répertoire ignoré n'est désormais conservé que si une négation pourrait réellement réinclure un fichier *en dessous* ; les règles `!` non liées ne coûtent rien.
+- **Les globs d'ignore sont compilés une seule fois** — le matcher de style gitignore mémorise la regex compilée par motif au lieu de la reconstruire à chaque vérification de chemin (découverte plus rapide sur les arbres profonds avec de gros fichiers d'ignore). Sémantique inchangée.
+
+---
+
+## Nouveautés en 0.6.6
+
+Un audit de parité graphify de l'upstream v0.8.37–v0.8.40 (et des issues signalées jusqu'à #1362) : un balayage « vérifier puis réfuter de façon adverse » sur 32 candidats a confirmé **6 vrais bugs**. L'essentiel — trois extracteurs de framework ne produisaient silencieusement *rien*.
+
+- **Les apps Express/Koa/Fastify en TypeScript extraient désormais des routes** — `express.scm` codait en dur le nœud de nom de classe de JavaScript, qui est un « Impossible pattern » sous la grammaire TypeScript ; toute la requête ne compilait pas et l'erreur était avalée : **les apps Express en TS extrayaient 0 route**. (Les apps JavaScript fonctionnaient, et la seule fixture de test était `.js`, donc c'est passé inaperçu.) La même cause touchait `vue.scm` (SFC Vue avec `<script>` simple → 0 composant). Les deux utilisent désormais un joker de nœud neutre vis-à-vis de la grammaire qui compile en JS et TS.
+- **Les fichiers Kotlin dans les projets Spring ne provoquent plus d'erreur** — `spring_boot.scm` est une requête de grammaire Java mais était autorisée à s'exécuter contre Kotlin, émettant `Invalid node type: marker_annotation` et écartant chaque fichier `.kt`. Kotlin est désormais proprement bloqué (Kotlin Spring Boot nécessiterait sa propre requête).
+- **Les grammaires tree-sitter sont épinglées avec des bornes supérieures** — `pyproject.toml` épinglait les grammaires sans limite supérieure (`>=0.23`), de sorte qu'une future version de grammaire renommant des nœuds de l'AST pouvait à nouveau casser les requêtes en silence. Chaque grammaire a désormais un plafond de plage compatible, et un nouveau test vérifie que chaque `.scm` livrée compile contre chaque grammaire qu'elle revendique.
+- **Le cache d'extraction est versionné** — après une mise à jour de codebeacon, un `--update` incrémental pouvait réutiliser des résultats extraits par l'*ancienne* version pour des fichiers inchangés (un hash de contenu ne détecte pas que l'extracteur a changé). Le cache porte désormais la version de codebeacon et est rejeté en cas de divergence.
+- **Les noms accentués / non-ASCII se résolvent sous macOS** — `codebeacon query` / `path` / MCP et `affected` normalisent désormais les libellés et chemins en Unicode NFC, de sorte qu'un nom copié depuis un nom de fichier macOS (stocké en NFD) correspond au libellé NFC dans le graphe (p. ex. `Auditoría`).
+- De plus : un `cache.json` corrompu est sauvegardé et reconstruit au lieu d'être silencieusement réinitialisé puis écrasé.
+
+---
+
 ## Nouveautés en 0.6.5
 
 `codebeacon upgrade` fonctionne désormais partout — il supposait auparavant une installation pip classique et échouait silencieusement sur les machines où ce n'était pas le cas.

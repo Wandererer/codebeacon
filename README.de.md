@@ -27,6 +27,29 @@
 
 ---
 
+## Neu in 0.6.7
+
+Folgearbeiten zum graphify-Parity-Audit aus 0.6.6: Grammar-Drift schlägt jetzt laut fehl statt stillschweigend, und Negationen in der Ignore-Datei verlangsamen Scans nicht mehr.
+
+- **Grammar-Drift ist ein lauter Fehler, kein stiller leerer Graph** — wenn eine tree-sitter-Query gegen eine Grammar, die sie unterstützen *soll*, nicht kompiliert (z. B. eine umbenannte Node-Art in einem künftigen Grammar-Update), wirft `run_query` jetzt eine Ausnahme und die Datei wird als `ExtractionFailure` erfasst, statt still nichts zu extrahieren. Zusammen mit den Obergrenzen-Pins aus 0.6.6 und dem Test „jede Query kompiliert gegen jede Grammar, die sie beansprucht" wird Drift nun auf drei unabhängige Weisen erkannt.
+- **Eine einzelne `!`-Negation in `.codebeaconignore` erzwingt keinen vollständigen Baum-Durchlauf mehr** — eine Negationsregel irgendwo hat das Verzeichnis-Pruning *überall* deaktiviert, sodass der Scanner in jedes ausgeschlossene Verzeichnis (`node_modules`, `build`, …) hinabstieg, selbst wenn die Negation dort nichts retten konnte. Ein ignoriertes Verzeichnis wird jetzt nur behalten, wenn eine Negation tatsächlich eine Datei *darunter* wieder einschließen könnte; nicht zugehörige `!`-Regeln kosten nichts.
+- **Ignore-Globs werden einmal kompiliert** — der gitignore-artige Matcher merkt sich die kompilierte Regex je Muster, statt sie bei jeder Pfadprüfung neu zu bauen (schnellere Erkennung bei tiefen Bäumen mit großen Ignore-Dateien). Semantik unverändert.
+
+---
+
+## Neu in 0.6.6
+
+Ein graphify-Parity-Audit von Upstream v0.8.37–v0.8.40 (und gemeldeten Issues bis #1362): ein „prüfen, dann adversarial widerlegen"-Durchlauf über 32 Kandidaten bestätigte **6 echte Bugs**. Der Hauptpunkt — drei Framework-Extraktoren produzierten still *nichts*.
+
+- **TypeScript-Express/Koa/Fastify-Apps extrahieren jetzt Routen** — `express.scm` hatte die JavaScript-Node-Art für Klassennamen fest verdrahtet, was unter der TypeScript-Grammar ein „Impossible pattern" ist; die gesamte Query kompilierte nicht und der Fehler wurde verschluckt: **TS-Express-Apps extrahierten 0 Routen**. (JavaScript-Apps funktionierten, und die einzige Test-Fixture war `.js`, daher blieb es unbemerkt.) Dieselbe Ursache traf `vue.scm` (Vue-SFCs mit reinem `<script>` → 0 Komponenten). Beide nutzen jetzt einen grammar-neutralen Node-Wildcard, der unter JS und TS kompiliert.
+- **Kotlin-Dateien in Spring-Projekten verursachen keinen Fehler mehr** — `spring_boot.scm` ist eine Java-Grammar-Query, durfte aber gegen Kotlin laufen und gab `Invalid node type: marker_annotation` aus, wobei jede `.kt`-Datei verworfen wurde. Kotlin wird jetzt sauber ausgeschlossen (Kotlin-Spring-Boot bräuchte eine eigene Query).
+- **tree-sitter-Grammars haben jetzt Versions-Obergrenzen** — `pyproject.toml` pinnte Grammars nach oben offen (`>=0.23`), sodass ein künftiges Grammar-Release, das AST-Node-Arten umbenennt, die Queries still wieder hätte brechen können. Jede Grammar hat nun eine kompatible Obergrenze, und ein neuer Test prüft, dass jede ausgelieferte `.scm` gegen jede beanspruchte Grammar kompiliert.
+- **Der Extraktions-Cache ist versioniert** — nach einem Upgrade konnte ein inkrementelles `--update` für unveränderte Dateien Ergebnisse der *alten* Version wiederverwenden (ein Content-Hash erkennt nicht, dass sich der Extraktor geändert hat). Der Cache trägt jetzt die codebeacon-Version und wird bei Abweichung verworfen.
+- **Akzentuierte / Nicht-ASCII-Namen werden unter macOS aufgelöst** — `codebeacon query` / `path` / MCP und `affected` normalisieren Labels und Pfade jetzt nach Unicode-NFC, sodass ein aus einem macOS-Dateinamen (als NFD gespeichert) kopierter Name das NFC-Label im Graphen trifft (z. B. `Auditoría`).
+- Außerdem: eine beschädigte `cache.json` wird gesichert und neu aufgebaut, statt still zurückgesetzt und überschrieben zu werden.
+
+---
+
 ## Neu in 0.6.5
 
 `codebeacon upgrade` funktioniert jetzt überall — bisher ging der Befehl von einer normalen pip-Installation aus und scheiterte auf anderen Maschinen stillschweigend.

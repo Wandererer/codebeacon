@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -58,8 +59,13 @@ class BeaconIndex:
         # German ß, Turkish i/İ, Greek σ/ς) round-trip correctly and
         # users searching in their own language get hits. Mirrors
         # graphify's #020cca2 / #c7a05d6 query-term hardening.
+        # NFC-normalise first: on macOS (APFS/HFS+) filenames — and labels
+        # derived from them — arrive in Unicode NFD, while a label stored in
+        # beacon.json may be NFC. casefold() does not normalise form, so an NFD
+        # "Auditoría" would never equal its NFC twin. Normalise both the stored
+        # key (here) and the query term (find_node_ids) so they meet. (#1338)
         for node_id, node_data in self.G.nodes(data=True):
-            label = node_data.get("label", node_id).casefold()
+            label = unicodedata.normalize("NFC", node_data.get("label", node_id)).casefold()
             self._label_to_ids.setdefault(label, []).append(node_id)
 
     def find_node_ids(self, name: str) -> list[str]:
@@ -71,8 +77,9 @@ class BeaconIndex:
         graphify #978.
         """
         # ``"`'`` are intentionally included so quoted queries (which agents
-        # often generate by reflex) hit the same label.
-        name_cf = name.casefold().strip(".,?!:;()[]{}<>\"'`")
+        # often generate by reflex) hit the same label. NFC-normalise to match
+        # the equally-normalised stored keys (see load(); #1338).
+        name_cf = unicodedata.normalize("NFC", name).casefold().strip(".,?!:;()[]{}<>\"'`")
         results: list[str] = []
         for label, ids in self._label_to_ids.items():
             if name_cf in label:

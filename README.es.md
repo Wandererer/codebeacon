@@ -27,6 +27,29 @@
 
 ---
 
+## Novedades en 0.6.7
+
+Seguimiento de la auditoría de paridad con graphify de 0.6.6: la deriva de gramática ahora falla de forma ruidosa en lugar de silenciosa, y las negaciones en el archivo de ignore ya no ralentizan los escaneos.
+
+- **La deriva de gramática es un fallo ruidoso, no un grafo vacío silencioso** — cuando una query de tree-sitter no compila contra una gramática que *debería* soportar (p. ej. un nodo renombrado en una futura actualización de gramática), `run_query` ahora lanza una excepción y el archivo se registra como `ExtractionFailure` en lugar de extraer silenciosamente nada. Junto con los topes superiores de 0.6.6 y el test «cada query compila contra cada gramática que declara soportar», la deriva se detecta ahora de tres formas independientes.
+- **Una sola negación `!` en `.codebeaconignore` ya no fuerza un recorrido completo del árbol** — una regla de negación en cualquier sitio desactivaba el pruning de directorios *en todas partes*, así que el escáner descendía a cada directorio excluido (`node_modules`, `build`, …) aunque la negación no pudiera rescatar nada allí. Ahora un directorio ignorado solo se conserva si una negación realmente podría reincluir un archivo *debajo de él*; las reglas `!` no relacionadas no cuestan nada.
+- **Los globs de ignore se compilan una sola vez** — el matcher estilo gitignore memoiza la regex compilada por patrón en lugar de reconstruirla en cada comprobación de ruta (descubrimiento más rápido en árboles profundos con archivos de ignore grandes). La semántica no cambia.
+
+---
+
+## Novedades en 0.6.6
+
+Una auditoría de paridad con graphify de upstream v0.8.37–v0.8.40 (e issues reportados hasta #1362): un barrido de «verificar y luego refutar de forma adversaria» sobre 32 candidatos confirmó **6 bugs reales**. Lo principal: tres extractores de framework producían silenciosamente *nada*.
+
+- **Las apps de Express/Koa/Fastify en TypeScript ahora extraen rutas** — `express.scm` fijaba el nodo de nombre de clase de JavaScript, que es un «Impossible pattern» bajo la gramática de TypeScript, así que toda la query no compilaba y el error se tragaba: **las apps de Express en TS extraían 0 rutas**. (Las apps de JavaScript funcionaban, y la única fixture de test era `.js`, así que pasó desapercibido.) La misma causa afectaba a `vue.scm` (SFC de Vue con `<script>` plano → 0 componentes). Ambos usan ahora un comodín de nodo neutral a la gramática que compila en JS y TS.
+- **Los archivos Kotlin en proyectos Spring ya no dan error** — `spring_boot.scm` es una query de gramática Java pero se permitía ejecutarla contra Kotlin, emitiendo `Invalid node type: marker_annotation` y descartando cada archivo `.kt`. Kotlin ahora se bloquea limpiamente (Kotlin Spring Boot necesitaría su propia query).
+- **Las gramáticas de tree-sitter están fijadas con topes superiores** — `pyproject.toml` fijaba las gramáticas sin límite superior (`>=0.23`), así que un futuro release de gramática que renombrara nodos del AST podría romper las queries de nuevo en silencio. Cada gramática tiene ahora un tope de rango compatible, y un nuevo test verifica que cada `.scm` distribuida compila contra cada gramática que declara soportar.
+- **La caché de extracción está versionada** — tras actualizar codebeacon, un `--update` incremental podía reutilizar resultados extraídos por la versión *antigua* para archivos sin cambios (un hash de contenido no detecta que el extractor cambió). La caché ahora lleva la versión de codebeacon y se descarta si no coincide.
+- **Los nombres acentuados / no ASCII se resuelven en macOS** — `codebeacon query` / `path` / MCP y `affected` ahora normalizan etiquetas y rutas a Unicode NFC, de modo que un nombre copiado de un nombre de archivo de macOS (guardado como NFD) coincide con la etiqueta NFC del grafo (p. ej. `Auditoría`).
+- Además: una `cache.json` corrupta se respalda y se reconstruye en lugar de resetearse y sobrescribirse en silencio.
+
+---
+
 ## Novedades en 0.6.5
 
 `codebeacon upgrade` ahora funciona en cualquier entorno — antes asumía una instalación pip normal y fallaba silenciosamente en máquinas donde no lo era.

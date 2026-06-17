@@ -25,6 +25,29 @@
 
 ---
 
+## What's new in 0.6.7
+
+Follow-ups to the 0.6.6 graphify-parity audit: grammar drift now fails loudly instead of silently, and ignore-file negations no longer slow scans down.
+
+- **Grammar drift is a loud failure, not a silent empty graph** — when a tree-sitter query can't compile against a grammar it's *supposed* to support (e.g. a node-type rename in a future grammar bump), `run_query` now raises and the file is recorded as an `ExtractionFailure` instead of silently extracting nothing. Together with the 0.6.6 upper-bound pins and the "every query compiles against every grammar it claims" test, drift is now caught three independent ways.
+- **A single `!` negation in `.codebeaconignore` no longer forces a full-tree walk** — one negation rule anywhere used to disable directory pruning *everywhere*, so the scanner descended into every excluded directory (`node_modules`, `build`, …) even when the negation couldn't possibly rescue anything there. Each ignored directory is now kept only if a negation could actually re-include a file beneath *it*; unrelated `!` rules cost nothing.
+- **Ignore globs compile once** — the gitignore-style matcher memoizes each pattern's compiled regex instead of rebuilding it on every path check, speeding up discovery on deep trees with large ignore files. (Semantics unchanged.)
+
+---
+
+## What's new in 0.6.6
+
+A graphify-parity audit of upstream v0.8.37–v0.8.40 (and reported issues through #1362): a verify-then-adversarially-refute sweep of 32 candidates confirmed **6 real bugs**. The headline — three framework extractors were silently producing *nothing*.
+
+- **TypeScript Express / Koa / Fastify apps now extract routes** — `express.scm` hard-coded the JavaScript class-name node type, which is an "Impossible pattern" under the TypeScript grammar, so the whole query failed to compile and the error was swallowed: **TS Express apps extracted 0 routes**. (JavaScript apps worked, and the only test fixture was `.js`, so it went unnoticed.) The identical root cause hit `vue.scm` (Vue SFCs with a plain `<script>` → 0 components). Both now use a grammar-neutral node wildcard that compiles under JS and TS.
+- **Kotlin files in Spring projects no longer error** — `spring_boot.scm` is a Java-grammar query but was allowed to run against Kotlin, emitting `Invalid node type: marker_annotation` and dropping every `.kt` file. Kotlin is now gated off cleanly (Kotlin Spring Boot would need its own query).
+- **Tree-sitter grammars are pinned with upper bounds** — `pyproject.toml` pinned grammars open-ended (`>=0.23`), so a future grammar release that renames AST node types could silently re-break the queries. Every grammar now has a compatible-range ceiling, and a new test asserts every shipped `.scm` compiles against every grammar it claims to support.
+- **The extraction cache is versioned** — after upgrading codebeacon, an incremental `--update` could reuse results extracted by the *old* version for unchanged files (a content hash can't detect that the extractor itself changed). The cache is now stamped with the codebeacon version and discarded on mismatch.
+- **Accented / non-ASCII names resolve on macOS** — `codebeacon query` / `path` / MCP and `affected` now Unicode-NFC-normalise labels and paths, so a name copied from a macOS filename (stored as NFD) matches the NFC label in the graph (e.g. `Auditoría`).
+- Plus: a corrupt extraction `cache.json` is backed up and rebuilt instead of being silently reset and then overwritten.
+
+---
+
 ## What's new in 0.6.5
 
 `codebeacon upgrade` now works everywhere — it previously assumed a plain pip install and died silently on machines where that wasn't true.
