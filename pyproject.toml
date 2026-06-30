@@ -31,7 +31,7 @@ dependencies = [
     # version the shipped queries are validated against; if a bump ever outruns
     # the queries, tests/test_graphify_parity_0_6_6.py fails loudly instead.
     # (Ports graphify v0.8.39's "pin grammar upper bounds" fix.)
-    "tree-sitter>=0.23,<0.26",
+    "tree-sitter>=0.23,<0.27",
     # Default grammars cover the most common mixed-team stack
     # (Python + JS/TS). Other languages live in extras — see below.
     # Rationale: pre-0.7.0 the default install pulled all 14 grammars
