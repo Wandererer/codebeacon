@@ -27,6 +27,20 @@
 
 ---
 
+## Nouveautés en 0.6.8
+
+Un audit de parité graphify de l'upstream v0.8.41–v0.9.3 (issues signalées jusqu'au #1568). Chaque candidat a été reproduit sur codebeacon avant correction, puis revérifié par une passe de revue adversariale ; **7 bugs réels** confirmés, avec en tête un piège à perte de données et une fuite de confidentialité.
+
+- **`--obsidian-dir` ne peut plus supprimer vos notes** — pointé vers un vault Obsidian existant, l'export balayait *tous* les `.md` en dessous avant de régénérer, pouvant ainsi vider un vrai vault. codebeacon refuse désormais tout répertoire qu'il ne possède pas (seul un répertoire réellement vide, ou portant son marqueur `.codebeacon-vault.json`, est adopté) et saute l'export avec un message clair au lieu de supprimer.
+- **`.gitignore` n'est plus désactivé silencieusement par `.codebeaconignore`** — ajouter un `.codebeaconignore` *remplaçait* auparavant le `.gitignore` du dépôt, si bien qu'un fichier exclu uniquement par `.gitignore` (un `prod-dump.sql`, `customer-data.*` au nom neutre) pouvait être indexé dans les artefacts `.codebeacon/` commités. Les deux sont désormais fusionnés (`.codebeaconignore` l'emporte en cas de conflit) ; l'ajouter ne peut que exclure *davantage*.
+- **Plus aucun chemin absolu machine dans les artefacts commités** — les valeurs `source_file` des edges/links (l'essentiel de `beacon.json`) et les lignes `Source:` des notes wiki/obsidian conservaient des chemins absolus `/Users/vous/...`, rendant l'index commité non portable et divulguant des chemins locaux. Tout est désormais relatif au projet (edges compris, ainsi que les fichiers `shares_db_entity` inter-projets).
+- **Des symboles homonymes dans des répertoires différents n'écrasent plus les notes l'un de l'autre** — les noms de fichiers wiki/obsidian étaient dérivés du label sans normalisation de casse, si bien que sur macOS/Windows `UserService` et `userService` entraient en collision et une note disparaissait silencieusement. Les noms de fichiers sont désormais salés anti-collision et normalisés en casse ; les labels tout en ponctuation (`@`) retombent sur `unnamed` au lieu d'un `@.md` cassé.
+- **Un `beacon.json` corrompu ne plante plus** — `codebeacon affected`, le serveur MCP et les exécutions `--wiki-only` sauvegardent désormais un graphe corrompu/tronqué et affichent un message clair « relancez scan » au lieu d'une trace brute.
+- **Davantage de composants React sont capturés** — `react.scm` manquait les composants en expression de fonction (`const X = function() {…}`), les HOC importés nus (`const X = forwardRef(…)` sans préfixe `React.`) et les composants `function X()` non exportés. Les trois sont désormais extraits.
+- **Les liens du wiki ne pointent plus jamais dans le vide** — un lien vers une page jamais écrite est rétrogradé en texte brut, et un lien vers un article dans un bucket voisin (un service → son entité) est réparé vers le bon chemin relatif au lieu de pointer vers un fichier manquant.
+
+---
+
 ## Nouveautés en 0.6.7
 
 Suite de l'audit de parité graphify de 0.6.6 : la dérive de grammaire échoue désormais bruyamment au lieu de silencieusement, et les négations du fichier d'ignore ne ralentissent plus les scans.

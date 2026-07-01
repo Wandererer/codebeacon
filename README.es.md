@@ -27,6 +27,20 @@
 
 ---
 
+## Novedades en 0.6.8
+
+Una auditoría de paridad con graphify del upstream v0.8.41–v0.9.3 (issues reportados hasta el #1568). Cada candidato se reprodujo contra codebeacon antes de corregirlo y se volvió a comprobar con una ronda de revisión adversarial; se confirmaron **7 bugs reales**, encabezados por una trampa de pérdida de datos y una fuga de privacidad.
+
+- **`--obsidian-dir` ya no puede borrar tus notas** — apuntando a un vault de Obsidian existente, la exportación barría *todos* los `.md` debajo antes de regenerar, pudiendo vaciar un vault real. codebeacon ahora rechaza cualquier directorio que no posea (solo se adopta un directorio genuinamente vacío, o uno que lleve su marcador `.codebeacon-vault.json`) y omite la exportación con un mensaje claro en vez de borrar.
+- **`.gitignore` ya no queda deshabilitado en silencio por `.codebeaconignore`** — añadir un `.codebeaconignore` solía *reemplazar* el `.gitignore` del repo, así que un archivo excluido solo por `.gitignore` (un `prod-dump.sql`, `customer-data.*` de nombre neutro) podía terminar indexado en los artefactos `.codebeacon/` que se commitean. Ahora ambos se fusionan (`.codebeaconignore` gana en conflicto); añadirlo solo puede excluir *más*.
+- **Sin rutas absolutas de máquina en los artefactos commiteados** — los valores `source_file` de edges/links (el grueso de `beacon.json`) y las líneas `Source:` en las notas de wiki/obsidian conservaban rutas absolutas `/Users/tu/...`, así que el índice commiteado no era portable y filtraba rutas locales. Ahora todas son relativas al proyecto (edges incluidos, y también los archivos `shares_db_entity` entre proyectos).
+- **Símbolos con el mismo nombre en directorios distintos ya no se sobrescriben las notas** — los nombres de archivo de wiki/obsidian se derivaban de la etiqueta sin normalizar mayúsculas/minúsculas, así que en macOS/Windows `UserService` y `userService` colisionaban y una nota se perdía en silencio. Ahora los nombres de archivo llevan sal anti-colisión y normalización de mayúsculas; las etiquetas solo de puntuación (`@`) recurren a `unnamed` en vez de un `@.md` roto.
+- **Un `beacon.json` corrupto ya no provoca un cuelgue** — `codebeacon affected`, el servidor MCP y las ejecuciones `--wiki-only` ahora respaldan un grafo corrupto/truncado y muestran un mensaje claro de "vuelve a ejecutar scan" en vez de un traceback en crudo.
+- **Se capturan más componentes de React** — `react.scm` pasaba por alto los componentes de expresión de función (`const X = function() {…}`), los HOC importados sin calificar (`const X = forwardRef(…)` sin el prefijo `React.`) y los componentes `function X()` no exportados. Los tres se extraen ahora.
+- **Los enlaces del wiki nunca quedan rotos** — un enlace a una página que nunca se escribió se degrada a texto plano, y un enlace a un artículo en un bucket hermano (un servicio → su entidad) se repara a la ruta relativa correcta en vez de apuntar a un archivo inexistente.
+
+---
+
 ## Novedades en 0.6.7
 
 Seguimiento de la auditoría de paridad con graphify de 0.6.6: la deriva de gramática ahora falla de forma ruidosa en lugar de silenciosa, y las negaciones en el archivo de ignore ya no ralentizan los escaneos.

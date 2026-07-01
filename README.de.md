@@ -27,6 +27,20 @@
 
 ---
 
+## Neu in 0.6.8
+
+Ein graphify-Parity-Audit von Upstream v0.8.41–v0.9.3 (gemeldete Issues bis #1568). Jeder Kandidat wurde vor der Behebung gegen codebeacon reproduziert und durch eine adversariale Review-Runde erneut geprüft; **7 echte Bugs** bestätigt, angeführt von einer Datenverlust-Falle und einem Privacy-Leak.
+
+- **`--obsidian-dir` kann keine Notizen mehr löschen** — bei einem bestehenden Obsidian-Vault fegte der Export vor der Neugenerierung *jede* `.md` darunter weg und konnte so ein echtes Vault leeren. codebeacon verweigert jetzt jedes Verzeichnis, das es nicht besitzt (nur ein wirklich leeres Verzeichnis oder eines mit seinem `.codebeacon-vault.json`-Marker wird übernommen) und überspringt den Export mit einer klaren Meldung statt zu löschen.
+- **`.gitignore` wird nicht mehr still durch `.codebeaconignore` deaktiviert** — das Hinzufügen einer `.codebeaconignore` *ersetzte* bisher die `.gitignore` des Repos, sodass eine nur durch `.gitignore` ausgeschlossene Datei (ein neutral benanntes `prod-dump.sql`, `customer-data.*`) in die committeten `.codebeacon/`-Artefakte indexiert werden konnte. Beide werden jetzt zusammengeführt (`.codebeaconignore` gewinnt bei Konflikten); das Hinzufügen kann nur *mehr* ausschließen.
+- **Keine maschinenabsoluten Pfade mehr in committeten Artefakten** — `source_file`-Werte an Edges/Links (der Großteil von `beacon.json`) und die `Source:`-Zeilen in Wiki-/Obsidian-Notizen behielten absolute `/Users/du/...`-Pfade, sodass der committete Index nicht portabel war und lokale Pfade preisgab. Alle sind jetzt projekt-relativ (inklusive Edges und projektübergreifender `shares_db_entity`-Dateien).
+- **Gleichnamige Symbole in unterschiedlichen Verzeichnissen überschreiben sich nicht mehr** — Wiki-/Obsidian-Dateinamen wurden ohne Groß-/Kleinschreibungs-Faltung aus dem Label abgeleitet, sodass unter macOS/Windows `UserService` und `userService` kollidierten und eine Notiz still verloren ging. Dateinamen sind jetzt kollisions-gesalzen und case-gefaltet; Labels aus reiner Interpunktion (`@`) fallen auf `unnamed` zurück statt auf ein kaputtes `@.md`.
+- **Ein beschädigtes `beacon.json` stürzt nicht mehr ab** — `codebeacon affected`, der MCP-Server und `--wiki-only`-Läufe sichern jetzt einen beschädigten/abgeschnittenen Graphen und melden eine klare „Scan erneut ausführen"-Meldung statt eines rohen Tracebacks.
+- **Mehr React-Komponenten werden erfasst** — `react.scm` übersah Function-Expression-Komponenten (`const X = function() {…}`), bare-importierte HOCs (`const X = forwardRef(…)` ohne `React.`-Präfix) und nicht exportierte `function X()`-Komponenten. Alle drei werden jetzt extrahiert.
+- **Wiki-Links laufen nie ins Leere** — ein Link auf eine nie geschriebene Seite wird zu reinem Text herabgestuft, und ein Link auf einen Artikel in einem Nachbar-Bucket (ein Service → seine Entity) wird auf den korrekten relativen Pfad repariert, statt auf eine fehlende Datei zu zeigen.
+
+---
+
 ## Neu in 0.6.7
 
 Folgearbeiten zum graphify-Parity-Audit aus 0.6.6: Grammar-Drift schlägt jetzt laut fehl statt stillschweigend, und Negationen in der Ignore-Datei verlangsamen Scans nicht mehr.

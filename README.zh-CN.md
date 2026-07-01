@@ -27,6 +27,20 @@
 
 ---
 
+## 0.6.8 新功能
+
+对上游 v0.8.41–v0.9.3 的 graphify 对齐审计(涵盖已报告的 issue,直到 #1568)。每个候选项在修复前都在 codebeacon 上实际复现,并通过对抗式复核再次确认;确认了 **7 个真实 bug**,以一个数据丢失陷阱和一个隐私泄露为首。
+
+- **`--obsidian-dir` 不会再删除你的笔记** — 指向一个已有的 Obsidian vault 时,导出会在重新生成前清空其下*所有* `.md` 文件,可能把一个真实的 vault 清空。codebeacon 现在会拒绝任何它不拥有的目录(只有真正为空的目录,或带有 `.codebeacon-vault.json` 标记的目录才会被采用),并以清晰的提示跳过导出,而不是删除。
+- **`.codebeaconignore` 不会再悄悄禁用 `.gitignore`** — 添加 `.codebeaconignore` 以前会*替换*仓库的 `.gitignore`,导致仅被 `.gitignore` 排除的文件(名称中立的 `prod-dump.sql`、`customer-data.*`)可能被索引进提交的 `.codebeacon/` 产物中。现在两者会合并(冲突时 `.codebeaconignore` 优先);添加它只会排除*更多*内容。
+- **提交的产物中不再有本机绝对路径** — 边/链接的 `source_file` 值(`beacon.json` 的绝大部分)以及 wiki/obsidian 笔记中的 `Source:` 行此前保留绝对路径 `/Users/you/...`,导致提交的索引不可移植且泄露本地路径。现在全部改为项目相对路径(包括边,以及跨项目的 `shares_db_entity` 文件)。
+- **不同目录下的同名符号不再互相覆盖笔记** — wiki/obsidian 的文件名此前直接由标签生成、不做大小写折叠,导致在 macOS/Windows 上 `UserService` 与 `userService` 冲突,一个笔记被静默丢失。文件名现在会做防冲突加盐和大小写折叠;仅由标点组成的标签(`@`)会回退为 `unnamed`,而不是生成损坏的 `@.md`。
+- **损坏的 `beacon.json` 不再导致崩溃** — `codebeacon affected`、MCP 服务器以及 `--wiki-only` 运行现在会备份损坏/截断的图,并给出清晰的"请重新运行 scan"提示,而不是抛出原始堆栈跟踪。
+- **捕获更多 React 组件** — `react.scm` 此前遗漏了函数表达式组件(`const X = function() {…}`)、未加 `React.` 前缀直接导入的 HOC(`const X = forwardRef(…)`),以及未导出的 `function X()` 组件。现在这三种都能被提取。
+- **wiki 链接不再指向空页面** — 指向从未写入的页面的链接会降级为纯文本,指向相邻分类目录中文章的链接(例如 service → 其 entity)会被修复为正确的相对路径,而不是指向一个不存在的文件。
+
+---
+
 ## 0.6.7 新功能
 
 对 0.6.6 graphify 对齐审计的后续:grammar 漂移现在会明确报错而非静默掩盖,ignore 文件中的否定规则也不再拖慢扫描。
