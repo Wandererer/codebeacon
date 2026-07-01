@@ -84,10 +84,11 @@ def write_beacon(
                     expected, so skip the shrink guard without disabling it
                     for other failure modes. Mirrors graphify #6fba4e4.
         project_roots: optional ``{project_name: absolute_root_path}`` map. When
-                    given, each node's absolute ``source_file`` is rewritten to a
-                    path relative to its project root in the serialised output,
-                    so ``beacon.json`` is byte-identical across machines that
-                    scan the same commit. Mirrors graphify #999.
+                    given, each node's AND edge's absolute ``source_file`` is
+                    rewritten to a path relative to its project root in the
+                    serialised output, so ``beacon.json`` is byte-identical
+                    across machines that scan the same commit. Mirrors graphify
+                    #999 / #1417 (edges were previously left absolute).
 
     Returns:
         WriteResult describing what was written. When the shrink guard fires,
@@ -164,9 +165,50 @@ def load_beacon(beacon_path: str | Path) -> tuple[nx.DiGraph, dict]:
     that an older file produced before the upgrade still loads.
     """
     path = Path(beacon_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    meta = data.pop("meta", {}) if isinstance(data, dict) else {}
+    text = path.read_text(encoding="utf-8")  # missing/unreadable → OSError, as before
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # A corrupt/truncated beacon.json must not crash `affected`, the MCP
+        # server, or diagnostics with a raw traceback. Preserve the bad file for
+        # debugging (so a later scan can't silently clobber it) and raise a
+        # clear, actionable error. Mirrors cache.py's corrupt-cache handling
+        # (graphify #1536).
+        _backup_corrupt_beacon(path)
+        raise ValueError(
+            f"{path} is corrupt or truncated ({exc}). It has been preserved with "
+            f"a .corrupt suffix; re-run `codebeacon scan` to rebuild it."
+        ) from exc
+    if not isinstance(data, dict):
+        # Valid JSON but not a beacon document (top-level null/list/string/number)
+        # — treat as corruption too, so downstream node_link_graph doesn't crash
+        # with a cryptic AttributeError (graphify #1536).
+        _backup_corrupt_beacon(path)
+        raise ValueError(
+            f"{path} is not a beacon document (top-level JSON is "
+            f"{type(data).__name__}, expected object). It has been preserved with "
+            f"a .corrupt suffix; re-run `codebeacon scan` to rebuild it."
+        )
+    meta = data.pop("meta", {})
     return _load_with_edge_compat(data), meta
+
+
+def _backup_corrupt_beacon(path: Path) -> None:
+    """Move a corrupt ``beacon.json`` aside so a later write can't overwrite it.
+
+    Best-effort; the graph is reproducible by re-scanning. Mirrors
+    ``cache.py._backup_corrupt`` (graphify #1536).
+    """
+    try:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.{ts}.corrupt")
+        path.replace(backup)
+        print(
+            f"codebeacon: {path} was corrupt; preserved as {backup.name}.",
+            file=sys.stderr,
+        )
+    except OSError:
+        pass
 
 
 def _load_with_edge_compat(data: dict) -> nx.DiGraph:
@@ -196,11 +238,42 @@ def _load_with_edge_compat(data: dict) -> nx.DiGraph:
     return nxjson.node_link_graph(data, directed=True, multigraph=False)
 
 
+def _rel_or_none(sf: Optional[str], root: Optional[str]) -> Optional[str]:
+    """Relative POSIX path of ``sf`` under ``root``, or ``None`` to leave as-is.
+
+    Returns ``None`` (meaning "don't rewrite") when ``sf`` is empty, not
+    absolute, has no known root, sits on a different drive (Windows), or lives
+    outside the root (a fragile ``../../`` path is worse than the absolute one).
+    """
+    if not sf or not os.path.isabs(sf) or not root:
+        return None
+    try:
+        rel = os.path.relpath(os.path.abspath(sf), root)
+    except ValueError:
+        return None
+    if rel == ".." or rel.startswith(".." + os.sep):
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def relativize_source_file(sf: Optional[str], project_root: Optional[str]) -> str:
+    """Public helper: source_file relative to ``project_root``, else unchanged.
+
+    Used by the wiki/obsidian generators at emit time so committed artifacts
+    (``.codebeacon/wiki``, ``.codebeacon/obsidian``) never embed machine-absolute
+    paths, without mutating the in-memory graph that ``analyze`` still needs
+    absolute (graphify #1417).
+    """
+    root = os.path.abspath(project_root) if project_root else None
+    rel = _rel_or_none(sf, root)
+    return rel if rel is not None else (sf or "")
+
+
 def _relativize_node_paths(
     payload: dict,
     project_roots: Optional[dict[str, str]],
 ) -> None:
-    """Rewrite absolute node ``source_file`` paths to project-relative POSIX paths.
+    """Rewrite absolute ``source_file`` paths on nodes AND links to project-relative.
 
     Mutates the serialised ``payload`` in place; the caller's in-memory graph is
     untouched. Absolute paths such as ``/Users/alice/repo/src/a.py`` make
@@ -208,32 +281,43 @@ def _relativize_node_paths(
     code is identical. Storing ``src/a.py`` (relative to the file's project
     root) makes the artifact byte-stable across machines. Mirrors graphify #999.
 
-    A node is rewritten only when (a) ``project_roots`` is supplied, (b) its
-    ``project`` has a known root, (c) the path is absolute, and (d) the file
-    actually lives under that root. Anything else is left exactly as-is, so
-    external stubs, cross-drive paths (Windows), and unmapped projects never
-    regress to a broken relative path.
+    Nodes carry an explicit ``project``; links (edges) do not, so a link's
+    project is inferred from its ``source`` node id (``project::name``). Before
+    this covered links too, every edge kept an absolute ``source_file`` — the
+    bulk of a repo's committed ``beacon.json`` leaked local paths (graphify
+    #1417). Anything without a known root / off-drive / outside the root is left
+    exactly as-is.
     """
     if not project_roots:
         return
     roots = {name: os.path.abspath(path) for name, path in project_roots.items()}
+    root_values = list(dict.fromkeys(roots.values()))
+
+    def _rel_any(sf: Optional[str], preferred_project: str) -> Optional[str]:
+        # Try the declared/inferred project's root first, then EVERY root, and
+        # keep the shortest relative path — i.e. the most-specific (deepest)
+        # containing root, so a file under a nested project isn't relativized
+        # against an ancestor root. This also relativizes edges whose source_file
+        # belongs to a different project than the source node (e.g.
+        # shares_db_entity edges carry the shared entity's file — graphify #1417
+        # [4]) and degrades gracefully when two projects share a basename [5].
+        best: Optional[str] = None
+        candidates = ([roots[preferred_project]] if preferred_project in roots else []) + root_values
+        for root in candidates:
+            r = _rel_or_none(sf, root)
+            if r is not None and (best is None or len(r) < len(best)):
+                best = r
+        return best
+
     for node in payload.get("nodes", []):
-        sf = node.get("source_file")
-        if not sf or not os.path.isabs(sf):
-            continue
-        root = roots.get(node.get("project", ""))
-        if not root:
-            continue
-        try:
-            rel = os.path.relpath(os.path.abspath(sf), root)
-        except ValueError:
-            # Different drive on Windows — no relative path exists.
-            continue
-        if rel == ".." or rel.startswith(".." + os.sep):
-            # Source lives outside its declared project root; a fragile
-            # ``../../`` path is worse than keeping the absolute one.
-            continue
-        node["source_file"] = rel.replace(os.sep, "/")
+        rel = _rel_any(node.get("source_file"), node.get("project", ""))
+        if rel is not None:
+            node["source_file"] = rel
+    for link in payload.get("links", []):
+        project = str(link.get("source", "")).split("::", 1)[0]
+        rel = _rel_any(link.get("source_file"), project)
+        if rel is not None:
+            link["source_file"] = rel
 
 
 def _prior_node_count(beacon_path: Path) -> int:

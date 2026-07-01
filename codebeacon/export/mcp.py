@@ -597,9 +597,12 @@ def serve(beacon_dir: str | Path) -> None:
 
     try:
         idx.load()
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
+        # FileNotFoundError: no beacon.json yet. ValueError: corrupt/truncated
+        # beacon.json (load_beacon backs it up + raises). Either way, still start
+        # the server so the client can connect and tools explain the error rather
+        # than crashing at startup with a traceback (graphify #1536).
         print(f"[codebeacon-mcp] {e}", file=sys.stderr)
-        # Still start server so MCP client can connect — tools will explain the error
 
     print(f"[codebeacon-mcp] serving from {beacon_dir}", file=sys.stderr)
 

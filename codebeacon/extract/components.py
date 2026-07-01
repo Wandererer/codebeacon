@@ -173,7 +173,10 @@ def _interpret_react(
                     parent_key = None
                     for k in ("component.export_func", "component.export_func_upper",
                               "component.export_default_func", "component.export_arrow",
-                              "component.local_arrow", "component.hoc"):
+                              "component.local_arrow", "component.hoc",
+                              "component.hoc_local", "component.hoc_bare_export",
+                              "component.hoc_bare_local", "component.export_fnexpr",
+                              "component.local_fnexpr", "component.local_func"):
                         if k in caps:
                             parent_key = k
                             break

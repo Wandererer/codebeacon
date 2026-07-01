@@ -25,6 +25,20 @@
 
 ---
 
+## What's new in 0.6.8
+
+A graphify-parity audit of upstream v0.8.41–v0.9.3 (reported issues through #1568). Every candidate was reproduced against codebeacon before fixing and re-checked by an adversarial review pass; **7 real bugs** confirmed, headlined by a data-loss trap and a privacy leak.
+
+- **`--obsidian-dir` can no longer delete your notes** — pointed at an existing Obsidian vault, the export swept *every* `.md` under it before regenerating, so it could wipe a real vault. codebeacon now refuses any directory it doesn't own (only a genuinely empty dir, or one carrying its `.codebeacon-vault.json` marker, is adopted) and skips the export with a clear message instead of deleting.
+- **`.gitignore` is no longer silently disabled by `.codebeaconignore`** — adding a `.codebeaconignore` used to *replace* the repo's `.gitignore`, so a file excluded only by `.gitignore` (a neutrally-named `prod-dump.sql`, `customer-data.*`) would get indexed into the committed `.codebeacon/` artifacts. The two are now merged (`.codebeaconignore` wins on conflict); adding it can only ever exclude *more*.
+- **No machine-absolute paths in committed artifacts** — edge/link `source_file` values (the bulk of `beacon.json`) and the `Source:` lines in wiki/obsidian notes kept absolute `/Users/you/...` paths, so the committed index wasn't portable and leaked local paths. All are now project-relative (edges included, and cross-project `shares_db_entity` files too).
+- **Same-named symbols in different directories no longer overwrite each other's notes** — wiki/obsidian filenames were derived from the label with no case-folding, so on macOS/Windows `UserService` and `userService` collided and one note was silently lost. Filenames are now collision-salted and case-folded; punctuation-only labels (`@`) fall back to `unnamed` instead of a broken `@.md`.
+- **A corrupt `beacon.json` no longer crashes** — `codebeacon affected`, the MCP server, and `--wiki-only` runs now back up a corrupt/truncated graph and report a clear "re-run scan" message instead of a raw traceback.
+- **More React components are captured** — `react.scm` missed function-expression components (`const X = function() {…}`), bare-imported HOCs (`const X = forwardRef(…)` without the `React.` prefix), and non-exported `function X()` components. All three are now extracted.
+- **Wiki links never dangle** — a link to a page that was never written is downgraded to plain text, and a link to an article in a sibling bucket (a service → its entity) is repaired to the correct relative path instead of pointing at a missing file.
+
+---
+
 ## What's new in 0.6.7
 
 Follow-ups to the 0.6.6 graphify-parity audit: grammar drift now fails loudly instead of silently, and ignore-file negations no longer slow scans down.

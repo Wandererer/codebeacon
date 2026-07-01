@@ -24,7 +24,11 @@ def _rel_link(label: str, project: str) -> str:
 
 
 def _back_link(project_name: str) -> str:
-    return f"_Back to [{project_name}/index.md](./index.md)_"
+    # Articles live one directory down (proj/<bucket>/<name>.md); the project
+    # index is at proj/index.md, so link up one level. `../` also keeps the
+    # dead-link downgrader (which only rewrites `./` targets) from touching it.
+    # graphify #1444.
+    return f"_Back to [{project_name}/index.md](../index.md)_"
 
 
 # ── Controller article ────────────────────────────────────────────────────────

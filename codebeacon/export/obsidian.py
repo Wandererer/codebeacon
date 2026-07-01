@@ -33,7 +33,8 @@ from typing import Any
 
 import networkx as nx
 
-from codebeacon.common.safety import cap_filename, escape_frontmatter_value, sanitize_label
+from codebeacon.common.safety import cap_filename, dedup_stem, escape_frontmatter_value, sanitize_label
+from codebeacon.graph.write import relativize_source_file
 
 
 # ── Regexes ────────────────────────────────────────────────────────────────────
@@ -53,6 +54,40 @@ _KEEP_RELS   = frozenset({"calls_api", "shares_db_entity"})  # always preserved 
 _JAVA_EXTS = frozenset({".java", ".kt"})
 _TS_EXTS   = frozenset({".ts", ".tsx", ".js", ".jsx"})
 
+# Ownership marker dropped into a vault codebeacon manages, so a later run knows
+# it may safely clear/regenerate the vault (graphify #1506).
+_VAULT_MARKER = ".codebeacon-vault.json"
+
+
+class VaultNotOwnedError(ValueError):
+    """Raised when ``--obsidian-dir`` points at a directory codebeacon does not
+    own (non-empty, no marker). Subclasses ValueError so existing broad handlers
+    still catch it, while callers that want to skip *only* the ownership refusal
+    (not any other ValueError from the 12-step export) can catch this precisely.
+    """
+
+
+def _is_codebeacon_owned_vault(vault: Path, is_default: bool) -> bool:
+    """True when it is safe for codebeacon to wipe & regenerate ``vault``.
+
+    Owned when it is the default ``output_dir/obsidian`` (we created it), when a
+    prior run left the ownership marker, or when it is GENUINELY EMPTY (nothing
+    but, at most, our marker) — a brand-new directory is safe to adopt. A
+    directory that merely holds no ``.md`` yet is NOT safe: a real Obsidian vault
+    starts with a ``.obsidian/`` config folder (and possibly ``.canvas`` /
+    attachments) and zero notes, so a ``.md``-count probe would wrongly adopt it,
+    stamp the marker, and delete the notes the user later authors. Probing errors
+    fail closed (refuse) — when in doubt, do not delete (graphify #1506).
+    """
+    if is_default:
+        return True
+    if (vault / _VAULT_MARKER).exists():
+        return True
+    try:
+        return not any(p.name != _VAULT_MARKER for p in vault.iterdir())
+    except OSError:
+        return False  # cannot prove it is empty → refuse rather than wipe
+
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
@@ -61,6 +96,7 @@ def generate_obsidian_vault(
     communities: dict[str, int],
     output_dir: str | Path,
     obsidian_dir: str | Path | None = None,
+    project_roots: dict[str, str] | None = None,
 ) -> int:
     """Generate a fully post-processed Obsidian vault.
 
@@ -73,8 +109,31 @@ def generate_obsidian_vault(
     Returns:
         Total number of notes written.
     """
+    is_default = obsidian_dir is None
     vault = Path(obsidian_dir) if obsidian_dir else Path(output_dir) / "obsidian"
     vault.mkdir(parents=True, exist_ok=True)
+
+    # Guard: never wipe a directory codebeacon does not own (graphify #1506).
+    # The sweep below deletes every *.md under `vault`; if a user points
+    # `--obsidian-dir` at their real Obsidian vault, that destroys all their
+    # notes. We only sweep a vault we created: the default `output_dir/obsidian`,
+    # a directory that still carries our ownership marker from a prior run, or a
+    # directory with no notes yet (safe to adopt). Anything else is refused
+    # loudly *before* a single unlink, so the user's data is untouched.
+    if not _is_codebeacon_owned_vault(vault, is_default):
+        raise VaultNotOwnedError(
+            f"Refusing to write the Obsidian vault into {vault}: it already "
+            f"contains .md notes but no {_VAULT_MARKER} marker, so it looks like "
+            f"a user-managed vault. codebeacon would delete every .md under it. "
+            f"Point --obsidian-dir at an empty or codebeacon-managed directory, "
+            f"or drop the flag to use the default .codebeacon/obsidian."
+        )
+    # Stamp the ownership marker so subsequent runs recognise this vault as ours.
+    # It is a dot-file, so the sweep below (which skips dot-paths) preserves it.
+    (vault / _VAULT_MARKER).write_text(
+        json.dumps({"tool": "codebeacon", "owns": "obsidian-vault"}),
+        encoding="utf-8",
+    )
 
     # Clear stale notes from previous runs so step 1 regenerates cleanly. The
     # whole vault is generated from the graph, so we sweep every *.md anywhere
@@ -88,7 +147,7 @@ def generate_obsidian_vault(
         md.unlink()
 
     # Step 1 — basic note generation
-    _step1_generate_notes(G, communities, vault)
+    _step1_generate_notes(G, communities, vault, project_roots)
 
     # Step 2 — broken wikilink normalisation
     _step2_fix_wikilinks(vault)
@@ -133,6 +192,7 @@ def _step1_generate_notes(
     G: nx.DiGraph,
     communities: dict[str, int],
     vault: Path,
+    project_roots: dict[str, str] | None = None,
 ) -> None:
     """One Obsidian note per graph node (skipping external stubs)."""
 
@@ -145,6 +205,11 @@ def _step1_generate_notes(
         out_edges[src].append((tgt, data))
         in_edges[tgt].append((src, data))
 
+    # Lowercased-stem → node_id, so two labels that differ only by case (or two
+    # same-labelled nodes across projects in the combined vault) don't overwrite
+    # each other's note on a case-insensitive filesystem (graphify #1453/#1504).
+    claimed: dict[str, str] = {}
+
     for node_id, data in G.nodes(data=True):
         ntype = data.get("type", "unknown")
         if ntype == "external":
@@ -152,11 +217,13 @@ def _step1_generate_notes(
 
         project   = data.get("project", "_unknown")
         label     = data.get("label", node_id)
-        source_file = data.get("source_file", "")
+        source_file = relativize_source_file(
+            data.get("source_file", ""), (project_roots or {}).get(project)
+        )
         framework = data.get("framework", "")
         community_id = communities.get(node_id, -1)
 
-        note_name = _safe_note_name(label)
+        note_name = dedup_stem(_safe_note_name(label), node_id, claimed)
         content   = _build_note(
             node_id    = node_id,
             label      = label,

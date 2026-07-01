@@ -92,7 +92,13 @@ def cap_filename(name: str, limit: int = 200) -> str:
     Truncation slices the UTF-8 byte string and decodes with ``"ignore"`` so a
     multi-byte character straddling the cut is dropped rather than producing
     mojibake. Short names are returned untouched. Mirrors graphify 690b4e5.
+
+    A stem with no alphanumeric character (empty, whitespace-only, or all
+    punctuation such as ``"@"`` or ``"***"``) would produce a broken or hidden
+    filename (``@.md``, ``.md``); it falls back to ``"unnamed"`` (graphify #1409).
     """
+    if not any(c.isalnum() for c in name):
+        return "unnamed"
     encoded = name.encode("utf-8")
     if len(encoded) <= limit:
         return name
@@ -100,6 +106,32 @@ def cap_filename(name: str, limit: int = 200) -> str:
     keep = max(limit - 9, 0)  # room for "_" + 8 hex chars
     truncated = encoded[:keep].decode("utf-8", "ignore")
     return f"{truncated}_{digest}"
+
+
+def dedup_stem(stem: str, node_id: str, claimed: dict[str, str], scope: str = "") -> str:
+    """Return a filesystem-unique, case-folded stem for ``stem``.
+
+    ``claimed`` maps a lowercased ``"<scope>/<stem>"`` key → the node_id that owns
+    it, and is mutated in place. When a DIFFERENT node would map to an
+    already-claimed key (a collision on a case-insensitive filesystem — macOS
+    APFS, Windows NTFS — where ``UserService`` and ``userService`` are the same
+    file), the stem is salted with a short stable hash of ``node_id`` so both
+    notes survive as distinct files instead of one silently overwriting the
+    other (graphify #1453/#1504/#1522).
+
+    The salt is prefixed ``_h`` so the suffix never looks like the ``_<digits>``
+    dedup markers other export steps strip. ``scope`` namespaces the claim (e.g.
+    the wiki subdirectory) so files in different directories never false-collide.
+    """
+    key = f"{scope}/{stem.lower()}" if scope else stem.lower()
+    owner = claimed.get(key)
+    if owner is None or owner == node_id:
+        claimed[key] = node_id
+        return stem
+    salted = f"{stem}_h{hashlib.sha1(node_id.encode('utf-8')).hexdigest()[:6]}"
+    salted_key = f"{scope}/{salted.lower()}" if scope else salted.lower()
+    claimed[salted_key] = node_id
+    return salted
 
 
 def safe_wiki_filename(label: str) -> str:

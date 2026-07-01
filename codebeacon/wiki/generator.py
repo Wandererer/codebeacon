@@ -22,12 +22,14 @@ Public API:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
-from codebeacon.common.safety import safe_wiki_filename
+from codebeacon.common.safety import dedup_stem, safe_wiki_filename
+from codebeacon.graph.write import relativize_source_file
 from codebeacon.wiki import templates
 
 
@@ -182,13 +184,18 @@ def generate_wiki(
     G: nx.DiGraph,
     communities: dict[str, int],
     output_dir: str | Path,
+    project_roots: dict[str, str] | None = None,
 ) -> None:
     """Generate full wiki from the knowledge graph.
 
     Args:
-        G:            built NetworkX DiGraph (output of graph/build.py + enrich.py)
-        communities:  node_id → community_id (output of graph/cluster.py)
-        output_dir:   root output directory (e.g. /path/to/project/.codebeacon)
+        G:             built NetworkX DiGraph (output of graph/build.py + enrich.py)
+        communities:   node_id → community_id (output of graph/cluster.py)
+        output_dir:    root output directory (e.g. /path/to/project/.codebeacon)
+        project_roots: optional project_name → absolute root path; when supplied,
+                       each article's ``source_file`` is emitted relative to its
+                       project root so committed wiki files stay machine-portable
+                       (graphify #1417).
     """
     wiki_dir = Path(output_dir) / "wiki"
     wiki_dir.mkdir(parents=True, exist_ok=True)
@@ -214,7 +221,8 @@ def generate_wiki(
 
     for project_name, type_map in sorted(projects.items()):
         proj_dir = wiki_dir / project_name
-        _write_project(G, project_name, type_map, routes_by_project, proj_dir)
+        project_root = (project_roots or {}).get(project_name)
+        _write_project(G, project_name, type_map, routes_by_project, proj_dir, project_root)
 
         # Collect summary stats
         route_count = len(routes_by_project.get(project_name, []))
@@ -271,6 +279,76 @@ def generate_wiki(
         total_stats=total_stats,
     )
 
+    # Every article is now on disk; downgrade any link whose target article was
+    # never written so navigation never lands on a missing page (graphify #1444).
+    _downgrade_dead_links(wiki_dir)
+
+
+# Matches a portable relative markdown link `[display](./stem.md)` as emitted by
+# templates._rel_link / _back_link (targets have no path separators or query).
+_REL_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(\./([^)/]+)\.md\)")
+
+
+def _downgrade_dead_links(wiki_dir: Path) -> None:
+    """Repair or downgrade ``[text](./X.md)`` links so none dangle.
+
+    ``templates._rel_link`` emits a ``./X.md`` link for every referenced label
+    (DI dependency types, callers/callees, imports), but articles are written
+    into per-type sub-buckets (controllers/services/entities/components) under a
+    project directory. So a link resolves three ways (graphify #1444):
+
+    * target article is in the SAME directory      → keep the link as-is;
+    * target article exists elsewhere in the SAME  → rewrite to the correct
+      project (a different bucket)                    relative path (e.g.
+                                                       ``../entities/X.md``);
+    * target article was never written (framework   → downgrade to plain text.
+      type, unresolved interface)
+
+    Resolution is scoped to the article's own project directory (the immediate
+    child of ``wiki_dir``; global files at the root form their own scope), so a
+    stem is never matched against an unrelated project. Cosmetic: no graph/data
+    change. ``../`` links (e.g. the back-link) are not matched by the regex and
+    are left untouched.
+    """
+    # Group every article by its project scope (immediate child dir of wiki_dir;
+    # global root-level files share the "" scope).
+    by_scope: dict[str, list[Path]] = {}
+    for md in wiki_dir.rglob("*.md"):
+        rel = md.relative_to(wiki_dir)
+        scope = rel.parts[0] if len(rel.parts) > 1 else ""
+        by_scope.setdefault(scope, []).append(md)
+
+    for files in by_scope.values():
+        # stem → the on-disk article. Two buckets can share a stem (an entity
+        # `Order` and a component `Order`); first-writer-wins, but iterate in a
+        # SORTED order so the winner is deterministic across platforms — rglob
+        # order is unspecified, and a non-deterministic repair target would break
+        # the byte-stable-artifact guarantee (#1417). Salted stems are unique.
+        files = sorted(files)
+        stem_to_path: dict[str, Path] = {}
+        for md in files:
+            stem_to_path.setdefault(md.stem, md)
+
+        for md in files:
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            def _repl(m: "re.Match[str]") -> str:
+                stem = m.group(2)
+                if (md.parent / f"{stem}.md").exists():
+                    return m.group(0)  # same directory → keep
+                other = stem_to_path.get(stem)
+                if other is not None and other.exists():
+                    rel_target = os.path.relpath(other, md.parent).replace(os.sep, "/")
+                    return f"[{m.group(1)}]({rel_target})"  # repair cross-bucket
+                return m.group(1)  # dangling → plain text
+
+            new = _REL_MD_LINK_RE.sub(_repl, text)
+            if new != text:
+                md.write_text(new, encoding="utf-8")
+
 
 # ── Per-project writer ────────────────────────────────────────────────────────
 
@@ -280,9 +358,16 @@ def _write_project(
     type_map: dict[str, list[tuple[str, dict]]],
     routes_by_project: dict[str, list[dict[str, Any]]],
     proj_dir: Path,
+    project_root: str | None = None,
 ) -> None:
     """Write all wiki files for one project."""
     proj_dir.mkdir(parents=True, exist_ok=True)
+
+    # Lowercased "<bucket>/<stem>" → node_id, so two same-bucket labels differing
+    # only by case don't overwrite each other on a case-insensitive filesystem
+    # (graphify #1453/#1504). Filenames are keyed on the label, not the node id;
+    # a real collision salts the second file so both articles survive.
+    claimed: dict[str, str] = {}
 
     controllers: list[str] = []
     services: list[str] = []
@@ -293,7 +378,7 @@ def _write_project(
         annotations = data.get("annotations", [])
         methods = data.get("methods", [])
         dependencies = data.get("dependencies", [])
-        source_file = data.get("source_file", "")
+        source_file = relativize_source_file(data.get("source_file", ""), project_root)
         framework = data.get("framework", "")
 
         called_by = _predecessors_labels(G, node_id, _CALL_RELATIONS)
@@ -314,7 +399,8 @@ def _write_project(
                 calls=calls,
                 project_name=project_name,
             )
-            _write_file(proj_dir / "controllers" / f"{_safe_filename(label)}.md", content)
+            stem = dedup_stem(_safe_filename(label), node_id, claimed, "controllers")
+            _write_file(proj_dir / "controllers" / f"{stem}.md", content)
         else:
             services.append(label)
             entities = _related_entities(G, node_id)
@@ -329,7 +415,8 @@ def _write_project(
                 annotations=annotations,
                 project_name=project_name,
             )
-            _write_file(proj_dir / "services" / f"{_safe_filename(label)}.md", content)
+            stem = dedup_stem(_safe_filename(label), node_id, claimed, "services")
+            _write_file(proj_dir / "services" / f"{stem}.md", content)
 
     # Entity nodes
     entity_names: list[str] = []
@@ -339,7 +426,7 @@ def _write_project(
         table_name = data.get("table_name", "")
         fields = data.get("fields", [])
         relations = data.get("relations", [])
-        source_file = data.get("source_file", "")
+        source_file = relativize_source_file(data.get("source_file", ""), project_root)
         framework = data.get("framework", "")
         used_by = _predecessors_labels(G, node_id, frozenset({"imports", "imports_from", "calls"}))
 
@@ -353,7 +440,8 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        _write_file(proj_dir / "entities" / f"{_safe_filename(label)}.md", content)
+        stem = dedup_stem(_safe_filename(label), node_id, claimed, "entities")
+        _write_file(proj_dir / "entities" / f"{stem}.md", content)
 
     # Component nodes
     component_names: list[str] = []
@@ -365,7 +453,7 @@ def _write_project(
         imports_list = data.get("imports", [])
         is_page = data.get("is_page", False)
         route_path = data.get("route_path", "")
-        source_file = data.get("source_file", "")
+        source_file = relativize_source_file(data.get("source_file", ""), project_root)
         framework = data.get("framework", "")
 
         content = templates.component_article(
@@ -379,7 +467,8 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        _write_file(proj_dir / "components" / f"{_safe_filename(label)}.md", content)
+        stem = dedup_stem(_safe_filename(label), node_id, claimed, "components")
+        _write_file(proj_dir / "components" / f"{stem}.md", content)
 
     # Detect framework from any node in this project
     framework = ""

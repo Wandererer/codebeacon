@@ -82,7 +82,11 @@ def run_pipeline(projects, output_dir: str, args) -> int:
             return 1
 
         from codebeacon.graph.write import load_beacon
-        G, meta = load_beacon(beacon_path)
+        try:
+            G, meta = load_beacon(beacon_path)
+        except ValueError as exc:  # corrupt beacon.json (graphify #1536)
+            print(f"  Error: {exc}", file=sys.stderr)
+            return 1
         print(f"  Loaded graph from {beacon_path}")
         print(f"    Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
 
@@ -230,17 +234,26 @@ def run_pipeline(projects, output_dir: str, args) -> int:
         except (OSError, ValueError) as exc:
             print(f"    Warning: callflow HTML failed: {exc}", file=sys.stderr)
 
+    # project_name → absolute root, so wiki/obsidian emit relative source paths (#1417)
+    project_roots = {p.name: p.path for p in projects}
+
     # Wiki generation (always runs — whether full scan or --wiki-only)
     print("  Generating wiki ...")
     from codebeacon.wiki.generator import generate_wiki
-    generate_wiki(G, communities, output_dir)
+    generate_wiki(G, communities, output_dir, project_roots=project_roots)
     print(f"    Wiki written to {output_dir}/wiki/")
 
     # Obsidian vault generation
     obsidian_dir = getattr(args, "obsidian_dir", None)
     print("  Generating Obsidian vault ...")
-    from codebeacon.export.obsidian import generate_obsidian_vault
-    n_notes = generate_obsidian_vault(G, communities, output_dir, obsidian_dir=obsidian_dir)
+    from codebeacon.export.obsidian import generate_obsidian_vault, VaultNotOwnedError
+    try:
+        n_notes = generate_obsidian_vault(
+            G, communities, output_dir, obsidian_dir=obsidian_dir, project_roots=project_roots
+        )
+    except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
+        print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
+        n_notes = 0
     print(f"    {n_notes} notes written to {obsidian_dir or output_dir + '/obsidian'}/")
 
     # Context Map generation (CLAUDE.md / .cursorrules / AGENTS.md)
@@ -454,7 +467,11 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 )
                 continue
 
-            G, meta = load_beacon(beacon_path)
+            try:
+                G, meta = load_beacon(beacon_path)
+            except ValueError as exc:  # corrupt group beacon → skip, keep going (#1536)
+                print(f"  Warning: {exc} — skipping {label}.", file=sys.stderr)
+                continue
             communities: dict = {}
             for node_id, node_data in G.nodes(data=True):
                 if "community" in node_data:
@@ -541,7 +558,11 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 file=sys.stderr,
             )
             return 1
-        G_all, meta_all = load_beacon(beacon_path)
+        try:
+            G_all, meta_all = load_beacon(beacon_path)
+        except ValueError as exc:  # corrupt combined beacon.json (graphify #1536)
+            print(f"  Error: {exc}", file=sys.stderr)
+            return 1
         print(f"  Loaded combined graph from {beacon_path}")
         print(f"    Nodes: {G_all.number_of_nodes()}, Edges: {G_all.number_of_edges()}")
         communities_all: dict = {}
@@ -601,14 +622,21 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
         except (OSError, ValueError) as exc:
             print(f"    Warning: workspace HTML export failed: {exc}", file=sys.stderr)
 
+    workspace_roots = {p.name: p.path for p in projects}
     print("  Generating combined wiki ...")
-    generate_wiki(G_all, communities_all, workspace_output_dir)
+    generate_wiki(G_all, communities_all, workspace_output_dir, project_roots=workspace_roots)
     print(f"    Wiki written to {workspace_output_dir}/wiki/")
 
+    from codebeacon.export.obsidian import VaultNotOwnedError
     print("  Generating combined Obsidian vault ...")
-    n_notes = generate_obsidian_vault(
-        G_all, communities_all, workspace_output_dir, obsidian_dir=obsidian_dir
-    )
+    try:
+        n_notes = generate_obsidian_vault(
+            G_all, communities_all, workspace_output_dir,
+            obsidian_dir=obsidian_dir, project_roots=workspace_roots,
+        )
+    except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
+        print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
+        n_notes = 0
     print(f"    {n_notes} notes written to {obsidian_dir or workspace_output_dir + '/obsidian'}/")
 
     print("  Generating combined context map ...")
@@ -650,12 +678,15 @@ def write_project_artifact_outputs(
 
     projects = list(projects)
     label = label or (projects[0].name if projects else "?")
+    project_roots = {p.name: p.path for p in projects}
 
     print(f"  [{label}] Generating wiki ...")
-    generate_wiki(G, communities, proj_output_dir)
+    generate_wiki(G, communities, proj_output_dir, project_roots=project_roots)
 
     print(f"  [{label}] Generating Obsidian vault ...")
-    generate_obsidian_vault(G, communities, proj_output_dir, obsidian_dir=None)
+    generate_obsidian_vault(
+        G, communities, proj_output_dir, obsidian_dir=None, project_roots=project_roots
+    )
 
     print(f"  [{label}] Generating context map ...")
     written = generate_context_map(

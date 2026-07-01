@@ -255,16 +255,20 @@ class TestDotFolderNegation:
 
 
 class TestGitignoreFallback:
-    """Mirrors graphify #9e6192a. When .codebeaconignore is absent, fall
-    back to .gitignore so users don't have to maintain two ignore files."""
+    """Mirrors graphify #9e6192a and #1363. When .codebeaconignore is absent,
+    fall back to .gitignore; when BOTH are present they are MERGED (gitignore
+    first, .codebeaconignore last so it wins on conflict) — never replaced, so a
+    gitignore-only exclusion is not silently dropped."""
 
-    def test_reads_codebeaconignore_when_present(self, tmp_path):
+    def test_merges_gitignore_and_codebeaconignore_when_both_present(self, tmp_path):
         from codebeacon.discover.scanner import read_ignore_file
 
         (tmp_path / ".codebeaconignore").write_text("primary/\n")
         (tmp_path / ".gitignore").write_text("fallback/\n")
         lines = read_ignore_file(tmp_path)
-        assert lines == ["primary/"], "primary ignore must win when present"
+        # #1363: both apply; .gitignore's exclusion survives, .codebeaconignore
+        # is appended last so its patterns win on conflict.
+        assert lines == ["fallback/", "primary/"], "both ignore sources must merge"
 
     def test_falls_back_to_gitignore_when_codebeaconignore_absent(self, tmp_path):
         from codebeacon.discover.scanner import read_ignore_file

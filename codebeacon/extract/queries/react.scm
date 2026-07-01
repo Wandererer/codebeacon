@@ -96,6 +96,63 @@
   )
 ) @component.hoc_local
 
+; ── Bare-imported HOC: import { forwardRef, memo } from 'react' ───────────────
+; const Button = forwardRef((props, ref) => ...) — callee is a bare identifier,
+; not a React.* member_expression, so the patterns above miss it (graphify #1322).
+
+(export_statement
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @component.memo_name
+      value: (call_expression
+        function: (identifier) @_hoc_bare
+        (#match? @_hoc_bare "^(memo|forwardRef|lazy)$")
+      )
+    )
+  )
+) @component.hoc_bare_export
+
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @component.memo_name
+    (#match? @component.memo_name "^[A-Z]")
+    value: (call_expression
+      function: (identifier) @_hoc_bare_l
+      (#match? @_hoc_bare_l "^(memo|forwardRef|lazy)$")
+    )
+  )
+) @component.hoc_bare_local
+
+; ── Function-expression component: const Foo = function () { return <jsx/> } ──
+; (arrow patterns above only match value: (arrow_function); graphify #1322)
+
+(export_statement
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @component.arrow_name
+      (#match? @component.arrow_name "^[A-Z]")
+      value: (function_expression)
+    )
+  )
+) @component.export_fnexpr
+
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @component.arrow_name
+    (#match? @component.arrow_name "^[A-Z]")
+    value: (function_expression)
+  )
+) @component.local_fnexpr
+
+; ── Non-exported function-declaration component: function Foo () { ... } ──────
+; The function_declaration patterns above are all export_statement-wrapped, so a
+; local (non-exported) uppercase function component was never captured.
+
+(function_declaration
+  name: (identifier) @component.func_name
+  (#match? @component.func_name "^[A-Z]")
+) @component.local_func
+
 ; ── Hook usage ────────────────────────────────────────────────────────────────
 
 (call_expression

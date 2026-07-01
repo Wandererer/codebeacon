@@ -195,7 +195,7 @@ def _cmd_query(args: argparse.Namespace) -> int:
     idx = BeaconIndex(beacon_dir)
     try:
         idx.load()
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(tool_beacon_query(idx, {"term": args.term, "limit": int(getattr(args, "limit", 20))}))
@@ -210,7 +210,7 @@ def _cmd_path(args: argparse.Namespace) -> int:
     idx = BeaconIndex(beacon_dir)
     try:
         idx.load()
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(tool_beacon_path(idx, {"source": args.source, "target": args.target}))
@@ -503,7 +503,7 @@ def _cmd_semantic_prepare(args: argparse.Namespace) -> int:
             max_tasks=args.max_tasks,
             chunk_size=args.chunk_size,
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(
@@ -546,7 +546,7 @@ def _cmd_affected(args: argparse.Namespace) -> int:
             limit=int(getattr(args, "limit", 100)),
             include_wiki_paths=(output_format == "wiki"),
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -574,7 +574,7 @@ def _cmd_semantic_apply(args: argparse.Namespace) -> int:
         min_conf = DEFAULT_MIN_CONFIDENCE_SCORE
     try:
         result = apply(beacon_dir, min_confidence=min_conf)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(

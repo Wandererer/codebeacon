@@ -133,30 +133,42 @@ def read_ignore_file(
     *,
     gitignore_fallback: bool = True,
 ) -> list[str]:
-    """Return the raw lines of the project's ignore file (no filtering).
+    """Return the raw lines of the project's ignore rules (no filtering).
 
-    Looks for ``.codebeaconignore`` first; if absent and ``gitignore_fallback``
-    is True, falls back to the repo's ``.gitignore`` so users don't have to
-    duplicate already-curated patterns.
+    Reads ``.gitignore`` first (when ``gitignore_fallback``) and appends
+    ``.codebeaconignore`` last, so the two are **merged** rather than one
+    replacing the other. Because :class:`~codebeacon.discover.ignore.IgnoreMatcher`
+    uses gitignore last-match-wins semantics, ``.codebeaconignore`` patterns win
+    on conflict (including ``!`` negations), yet adding a ``.codebeaconignore``
+    can only ever exclude *more* — it never silently drops the repo's existing
+    ``.gitignore`` exclusions.
+
+    This matters for privacy: a file excluded only by ``.gitignore`` (e.g. a
+    neutrally-named ``prod-dump.sql`` or ``customer-data.*``) must keep being
+    skipped even after a ``.codebeaconignore`` is added, or it would get indexed
+    into the committed ``.codebeacon/`` artifacts (graphify #1363).
 
     Pattern parsing is delegated to :class:`codebeacon.discover.ignore.IgnoreMatcher`,
     which implements gitignore semantics (negation, dir-only, anchored, trailing
     whitespace handling).
     """
     root_path = Path(root)
-    primary = root_path / filename
+    lines: list[str] = []
+
+    # .gitignore first (lower precedence).
+    if gitignore_fallback:
+        try:
+            lines.extend((root_path / ".gitignore").read_text(encoding="utf-8").splitlines())
+        except (FileNotFoundError, OSError):
+            pass
+
+    # .codebeaconignore last, so its patterns win on conflict and only ever add.
     try:
-        return primary.read_text(encoding="utf-8").splitlines()
+        lines.extend((root_path / filename).read_text(encoding="utf-8").splitlines())
     except (FileNotFoundError, OSError):
         pass
 
-    if gitignore_fallback:
-        gi = root_path / ".gitignore"
-        try:
-            return gi.read_text(encoding="utf-8").splitlines()
-        except (FileNotFoundError, OSError):
-            pass
-    return []
+    return lines
 
 
 def _should_ignore_dir(name: str) -> bool:
