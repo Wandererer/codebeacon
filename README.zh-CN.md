@@ -27,6 +27,23 @@
 
 ---
 
+## 0.6.9 新功能
+
+迄今为止规模最大的审计版本:一次双重的上游对齐扫查(对 codesight 追踪器的首次完整审计,外加 graphify v0.9.4–v0.9.12 / issue 直到 #1776),并结合了一次针对 codebeacon 自身的独立多智能体查错。每个候选项在修复前都先复现,每个修复都做了 mutation 测试,随后一轮对抗式二次复核又反过来攻击这些修复本身——在发布前又抓出 18 个漏洞。**修复 48 个真实 bug。**
+
+- **你的 CLAUDE.md 现在安全了** — 对于手写的 CLAUDE.md(例如来自 `/init`),合并步骤可能把用户自己的 `## Architecture` / `## Common Commands` 小节误认为 codebeacon 的输出并删除。现在剥离只在能确切识别为 codebeacon 生成的文件上运行,并锚定到生成块——你的小节会保留下来。`codebeacon.yaml` 现在也以原子方式写入(并可穿过符号链接、保留文件模式),因此中断的写入无法破坏手工维护的配置。
+- **文件不再从索引中悄悄消失** — 大写扩展名(`App.PY`、`Page.TSX`)被跳过了;以凭据命名的源码模块(`api_key_manager.go`、`access_token_service.py`)被密钥文件启发式规则丢弃了;`.gitignore` 中的一个非 UTF-8 字节会让整个 scan 崩溃;而在名为 `build/` 或 `dist/` 的文件夹下检出的仓库,会因为产物过滤器匹配到祖先目录而**整张图被抹除**。全部修复;被跳过的符号链接现在会给出一条分组的警告,而不是保持沉默。
+- **`.gitignore` 的处理现在与 git 完全一致** — 否定语义(`dir/` + `!dir/keep.txt`)针对每一种规则形态都与 `git check-ignore` 做了差分测试;和 git 完全一样,被排除目录下的文件无法再被重新包含。标准的救援惯用法 `dir/*` + `!dir/keep` 一如既往地有效。
+- **同名项目可以共存** — 两个(或三个)都叫 `frontend` 的子项目过去会塌缩成一个:冲突的节点 ID 会悄悄丢弃路由,它们的 wiki/obsidian 文件夹也会互相覆盖。现在重名会用父目录前缀自动消歧。
+- **路由提取做了一次正确性大修** — Express 的 `app.use('/api', router)` 挂载前缀会被应用,链式的 `router.route(x).get().post()` 会产出每一个动词;Flask 的 `register_blueprint` / FastAPI 的 `include_router` 前缀不再取决于它们在文件中出现的位置;Spring 的 `@RequestMapping(method = RequestMethod.X)` 会记录真实动词而不是 `ANY`;Next.js 的 catch-all 段(`[...slug]`)不再被弄乱,`@slot` 并行路由会从 URL 中剥除;Laravel 教科书式的 `class X extends Model` 终于能生成一个实体了(此前只有完全限定的基类才会匹配——而且 `ViewModel` 不再混进来)。
+- **消除幽灵图边** — 像 `CONFIG` 这样的小写 import 不再通过大小写折叠错连到无关的 `Config` 类(即假 god-node 模式),import 绝不会跨语言边界绑定(`import time` → `time.ts`),DI 绑定会优先选择注册它的项目,而不是任意位置上第一个同名类,同一目录下同名的 service + entity 也不再塌缩成单个节点。
+- **导出对 Windows 稳健、对崩溃稳健** — obsidian 笔记名会剥除 Windows 上全部的非法字符集(Flask 的 `<string:id>` 路由过去会在 Windows 上破坏导出),并防范保留设备名;`None` 标签不再让 wiki、call-flow HTML 或 obsidian 导出器崩溃;git hook 以 LF 换行写入,以便在 Windows 上执行;过长的项目名也不会在导出途中冲破文件系统的限制。
+- **一个坏输入无法再杀死长时间运行的进程** — MCP 服务器面对格式错误的 JSON-RPC 消息会存活而不是死掉;损坏的 `beacon.json` 或 AST 缓存(包括无效 UTF-8 以及 null/畸形的集合)会被备份并报告,而不是让 `affected`、`serve` 或合并驱动崩溃。
+- **逐字节可复现的输出** — 节点顺序不再跟随线程完成顺序,共享实体注解也会排序,因此对未改动的树扫描两次会产出逐字节相同的 `beacon.json`、wiki 和 CLAUDE.md。此前因 graspologic API 变更而悄悄损坏(*从未*运行过)的 Leiden 聚类后端也重新恢复服务。
+- **你写下的配置就是实际运行的配置** — 已文档化的 `codebeacon.yaml` 设置(`wave.*`、`output.wiki/obsidian`、`context_map.targets`、`semantic.enabled`)此前只被解析然后被忽略;现在它们真正驱动流水线,`--list-only` 在工作区内会被尊重,`codebeacon upgrade` 会为 uv venv 安装给出正确的命令。附带的一致性:CLAUDE.md 的 Projects 表、Notes 列和 Architecture 小节现在在单一的"Services"计数上达成一致,并与 wiki 相符。
+
+---
+
 ## 0.6.8 新功能
 
 对上游 v0.8.41–v0.9.3 的 graphify 对齐审计(涵盖已报告的 issue,直到 #1568)。每个候选项在修复前都在 codebeacon 上实际复现,并通过对抗式复核再次确认;确认了 **7 个真实 bug**,以一个数据丢失陷阱和一个隐私泄露为首。
