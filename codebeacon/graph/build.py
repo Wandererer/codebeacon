@@ -23,6 +23,7 @@ import networkx as nx
 from codebeacon.common.types import Edge, Node, UnresolvedRef
 from codebeacon.common.symbols import SymbolTable
 from codebeacon.common.filters import (
+    families_compatible,
     filter_build_artifacts,
     filter_cross_language,
     filter_cross_service,
@@ -49,11 +50,17 @@ def build_graph(
     all_unresolved: list[UnresolvedRef] = []
     # node_id → project name, used by cross-service filter
     service_roots: dict[str, str] = {}
-    # raw_id → first source_file that claimed it. Used to disambiguate
-    # same-name-different-directory collisions (graphify #952 / #949).
-    # Shared across all waves so a name colliding between projects still
-    # produces stable distinct ids.
-    claimed_ids: dict[str, str] = {}
+    # project name → absolute root path, so the artifact / shared-lib filters
+    # judge only the segments BELOW the project root, never machine-specific
+    # ancestor directories (which may coincidentally be named build/, core/…).
+    project_roots: dict[str, str] = {
+        w.project.name: w.project.path for w in wave_results if w.project
+    }
+    # raw_id → (first source_file, node_type) that claimed it. Used to
+    # disambiguate same-name collisions across directories AND node types
+    # (graphify #952 / #949). Shared across all waves so a name colliding
+    # between projects still produces stable distinct ids.
+    claimed_ids: dict[str, tuple[str, str]] = {}
 
     for wave in wave_results:
         project_name = wave.project.name
@@ -93,14 +100,24 @@ def build_graph(
 
     # Filter pass
     if apply_filters:
-        all_nodes, all_edges = filter_build_artifacts(all_nodes, all_edges)
+        all_nodes, all_edges = filter_build_artifacts(
+            all_nodes, all_edges, project_roots
+        )
         node_dict = {n.id: n for n in all_nodes}
         all_edges = filter_cross_language(all_edges, node_dict)
-        all_edges = filter_cross_service(all_edges, node_dict, service_roots)
+        all_edges = filter_cross_service(
+            all_edges, node_dict, service_roots, project_roots
+        )
     else:
         node_dict = {n.id: n for n in all_nodes}
 
-    # Construct NetworkX DiGraph
+    # Construct NetworkX DiGraph. Insert nodes in stable id order so the node
+    # sequence — and therefore beacon.json plus every insertion-order-derived
+    # surface (e.g. contextmap's example-note pick) — is byte-reproducible
+    # run-to-run. Without this the order tracks ThreadPoolExecutor wave-completion
+    # order, which flips even at a fixed PYTHONHASHSEED (#48 node-order
+    # non-determinism).
+    all_nodes = sorted(all_nodes, key=lambda n: n.id)
     return _build_nx_graph(all_nodes, all_edges, node_dict)
 
 
@@ -113,7 +130,7 @@ def _ingest_wave(
     all_edges: list[Edge],
     all_unresolved: list[UnresolvedRef],
     service_roots: dict[str, str],
-    claimed_ids: dict[str, str],
+    claimed_ids: dict[str, tuple[str, str]],
 ) -> None:
     """Convert one WaveResult's extraction data into Node/Edge/UnresolvedRef objects."""
 
@@ -142,7 +159,7 @@ def _ingest_wave(
     # Services → class nodes + unresolved DI refs
     for svc in wave.services:
         node_id, label = _disambiguate_decl(
-            project_name, svc.class_name, svc.source_file, claimed_ids,
+            project_name, svc.class_name, svc.source_file, "class", claimed_ids,
         )
         node = Node(
             id=node_id,
@@ -175,7 +192,7 @@ def _ingest_wave(
     # Entities → entity nodes
     for ent in wave.entities:
         node_id, label = _disambiguate_decl(
-            project_name, ent.name, ent.source_file, claimed_ids,
+            project_name, ent.name, ent.source_file, "entity", claimed_ids,
         )
         node = Node(
             id=node_id,
@@ -197,7 +214,7 @@ def _ingest_wave(
     # Components → component nodes
     for comp in wave.components:
         node_id, label = _disambiguate_decl(
-            project_name, comp.name, comp.source_file, claimed_ids,
+            project_name, comp.name, comp.source_file, "component", claimed_ids,
         )
         node = Node(
             id=node_id,
@@ -227,10 +244,11 @@ def _disambiguate_decl(
     project_name: str,
     name: str,
     source_file: str,
-    claimed: dict[str, str],
+    node_type: str,
+    claimed: dict[str, tuple[str, str]],
 ) -> tuple[str, str]:
     """Return ``(node_id, label)`` for a declaration, disambiguating same-name
-    collisions across different directories.
+    collisions across different directories **or node types**.
 
     Mirrors graphify #952 / #949: before this guard, ``auth/User.py`` and
     ``admin/User.py`` both produced ``project::User`` so NetworkX silently
@@ -239,36 +257,54 @@ def _disambiguate_decl(
 
     Rule:
       * first declaration claims ``project::Name`` and keeps the bare label.
-      * a second declaration in the **same directory** is allowed to share
-        the id — this is the genuine cross-file declaration case (Swift
-        ``extension Foo``, C# ``partial class``, Ruby reopened classes).
-        The merge step will union their list-valued metadata.
+      * a second declaration in the **same directory AND of the same node
+        type** is allowed to share the id — this is the genuine cross-file
+        declaration case (Swift ``extension Foo``, C# ``partial class``, Ruby
+        reopened classes). The merge step will union their list-valued metadata.
       * a declaration in a **different directory** gets a directory-hinted
         id (``project::auth/User``) and a label suffixed with the parent
         dir (``"User (auth)"``) so the wiki / query / MCP layers can tell
         the two classes apart.
+      * a same-directory declaration of a **different node type** (e.g. a Go
+        GORM model extracted as both a ``class`` service and an ``entity``)
+        is a distinct symbol, not a reopened declaration, so it gets a
+        type-hinted id (``project::entity/User``) instead of collapsing onto —
+        and silently erasing — the first node's identity.
+
+    ``claimed`` maps id → (source_file, node_type) of whichever declaration
+    first claimed it.
     """
     raw_id = f"{project_name}::{name}"
     new_parent = Path(source_file).parent
     if raw_id not in claimed:
-        claimed[raw_id] = source_file
+        claimed[raw_id] = (source_file, node_type)
         return raw_id, name
 
-    existing_parent = Path(claimed[raw_id]).parent
+    existing_file, existing_type = claimed[raw_id]
+    existing_parent = Path(existing_file).parent
+    if existing_parent == new_parent and existing_type == node_type:
+        # same dir + same type → genuine cross-file declaration; merge unions
+        return raw_id, name
+
     if existing_parent == new_parent:
-        # same dir → genuine cross-file declaration; merge step will union
-        return raw_id, name
-
-    # Different directory — distinct symbol that just happens to share a name.
-    hint = new_parent.name or "root"
+        # same dir, different node type — a service/entity/component that just
+        # happens to share a name; hint the id with the node type.
+        hint = node_type
+    else:
+        # different directory — distinct symbol that just happens to share a name.
+        hint = new_parent.name or "root"
     disambiguated = f"{project_name}::{hint}/{name}"
-    # Rare double collision: same parent-name but in a different ancestry.
-    # Fall back to a short content-stable hash of the full directory path.
-    if disambiguated in claimed and Path(claimed[disambiguated]).parent != new_parent:
-        import hashlib
-        h = hashlib.sha1(str(new_parent).encode("utf-8")).hexdigest()[:6]
-        disambiguated = f"{project_name}::{hint}@{h}/{name}"
-    claimed[disambiguated] = source_file
+    # Rare double collision: same hint but in a different ancestry (or a
+    # different type). Reopen (merge) only when the prior claimer of the
+    # disambiguated id is the SAME dir and type; otherwise fall back to a
+    # short content-stable hash of the full directory path.
+    if disambiguated in claimed:
+        prev_file, prev_type = claimed[disambiguated]
+        if Path(prev_file).parent != new_parent or prev_type != node_type:
+            import hashlib
+            h = hashlib.sha1(str(new_parent).encode("utf-8")).hexdigest()[:6]
+            disambiguated = f"{project_name}::{hint}@{h}/{name}"
+    claimed.setdefault(disambiguated, (source_file, node_type))
     return disambiguated, f"{name} ({hint})"
 
 
@@ -284,6 +320,16 @@ def _bare_name(node_id: str) -> str:
     real ``ref_name``.
     """
     return node_id.rsplit("::", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _shared_path_depth(a: str, b: str) -> int:
+    """Number of shared leading path components between two file paths."""
+    depth = 0
+    for x, y in zip(Path(a).parts, Path(b).parts):
+        if x != y:
+            break
+        depth += 1
+    return depth
 
 
 def _remap_unresolved_sources(
@@ -308,10 +354,12 @@ def _remap_unresolved_sources(
     before — no regression, only recovery.
     """
     node_ids = {n.id for n in all_nodes}
+    node_files: dict[str, str] = {}
     by_file_name: dict[tuple[str, str], str] = {}
     by_name: dict[str, list[str]] = {}
     for n in all_nodes:
         bare = _bare_name(n.id)
+        node_files.setdefault(n.id, n.source_file or "")
         by_file_name.setdefault((n.source_file, bare), n.id)
         by_name.setdefault(bare, []).append(n.id)
 
@@ -325,7 +373,23 @@ def _remap_unresolved_sources(
         new_id = by_file_name.get((file_part, name_part))
         if new_id is None:
             candidates = by_name.get(name_part)
-            new_id = candidates[0] if candidates else None
+            if candidates:
+                # The same name may be declared in several projects. ``file_part``
+                # is the registration site (a Startup/ServiceProvider file); bind
+                # to the candidate whose source file shares the deepest directory
+                # prefix with it, so a binding registered under shipping/ resolves
+                # to shipping's impl rather than an unrelated same-named class in
+                # billing/. On a shared-depth TIE, break it by the lexicographically
+                # smallest node id — ``max`` returns the first element at the max, so
+                # feeding it ``sorted(candidates)`` makes the winner deterministic and
+                # independent of wave/insertion order (the raw ``candidates`` list is
+                # built in node order, which is not stable run-to-run).
+                new_id = max(
+                    sorted(candidates),
+                    key=lambda nid: _shared_path_depth(file_part, node_files.get(nid, "")),
+                )
+            else:
+                new_id = None
         if new_id is not None:
             ref.source_node_id = new_id
 
@@ -398,14 +462,20 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
     # casefold() (not lower()) is used so non-ASCII labels — CJK, Cyrillic,
     # German ß — round-trip correctly. Mirrors graphify #86109e9.
     label_cf_to_nodes: dict[str, list[str]] = {}
+    # node_id → source-file extension (language-family guard) and → label
+    # (case-collision guard).
+    node_ext: dict[str, str] = {}
+    node_label: dict[str, str] = {}
 
     for node in all_nodes:
         file_to_nodes.setdefault(node.source_file, []).append(node.id)
+        node_ext[node.id] = Path(node.source_file).suffix.lower() if node.source_file else ""
         # A node with a None/empty label (defective extractor output, replayed
         # semantic archive) must not abort the whole build — graphify #1194
         # crashed in exactly this spot via `None.casefold()`.
         if not node.label:
             continue
+        node_label[node.id] = node.label
         label_to_nodes.setdefault(node.label, []).append(node.id)
         label_cf_to_nodes.setdefault(node.label.casefold(), []).append(node.id)
 
@@ -434,16 +504,43 @@ def _remap_import_edges(all_nodes: list[Node], all_edges: list[Edge]) -> list[Ed
         # edges in mixed-language repos. Mirrors graphify #4dce16f.
         target_label = _import_to_label(edge.target)
         target_ids = label_to_nodes.get(target_label)
-        if not target_ids and len(target_label) > 2:
-            target_ids = label_cf_to_nodes.get(target_label.casefold(), [])
+        if not target_ids and len(target_label) > 2 and not target_label.isupper():
+            # Skip the casefold fallback for SCREAMING_SNAKE import tokens
+            # (CONFIG / PATH / LOGGER): those are module-level constants imported
+            # by name, and folding them onto a same-spelled declaration (class
+            # Config) fabricates a false god-node hub (graphify #1581).
+            #
+            # When the fallback does run, PREFER non-all-caps candidates so a
+            # lowercase alias ``path`` binds the declaration ``Path`` rather than
+            # the constant ``PATH``. But when the ONLY candidates are all-caps we
+            # KEEP them — an all-caps label is just as often a legitimate acronym
+            # *type* (API / HTTP / URL / PDF) as a module constant, and a blanket
+            # isupper() filter silently erased real ``import { API } from './api'``
+            # dependency edges. Never filter to zero.
+            cf_candidates = label_cf_to_nodes.get(target_label.casefold(), [])
+            non_caps = [
+                tid for tid in cf_candidates if not node_label.get(tid, "").isupper()
+            ]
+            target_ids = non_caps or cf_candidates
         if not target_ids:
             continue
 
         for src_id in source_ids:
             src_project = src_id.split("::")[0] if "::" in src_id else ""
+            src_ext = node_ext.get(src_id, "")
+            # Drop candidates from a different language family. A bare-name
+            # collision across languages (Python `import time` vs a TS `time`
+            # component) must never fabricate an edge — prefer no edge over a
+            # cross-family binding (graphify G04).
+            candidates = [
+                tid for tid in target_ids
+                if families_compatible(src_ext, node_ext.get(tid, ""))
+            ]
+            if not candidates:
+                continue
             # Prefer same-project target
-            target_id = target_ids[0]
-            for tid in target_ids:
+            target_id = candidates[0]
+            for tid in candidates:
                 if tid.startswith(src_project + "::"):
                     target_id = tid
                     break

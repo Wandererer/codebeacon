@@ -116,10 +116,13 @@ class Cache:
         try:
             if self._cache_file.exists():
                 raw = json.loads(self._cache_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             # Corrupt cache.json — preserve it (don't let the next save silently
             # overwrite and destroy it) and rebuild from scratch. Mirrors the
             # graphify v0.8.39 "manifest data-loss on corrupt JSON" fix.
+            # UnicodeDecodeError (a ValueError, not an OSError) fires when a
+            # crash/disk-full truncated a write mid multi-byte sequence, leaving
+            # invalid UTF-8 that read_text can't decode — self-heal it too.
             self._backup_corrupt()
             raw = None
 

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 from codebeacon.common.types import ProjectInfo
+
+# Separator joining a parent-dir prefix onto a colliding project name. Must be
+# filesystem-safe (it becomes a wiki/obsidian folder) and free of the graph
+# node-id delimiters ("::", "/", "@"), which rules out a slash.
+_NAME_SEP = "-"
 
 
 # ── Signature files → (framework, language) ─────────────────────────────────
@@ -135,6 +142,40 @@ def _refine_gradle_framework(project_dir: Path) -> tuple[str, str]:
     return ("spring-boot", "java")
 
 
+# Language families for multi-manifest tie-breaking: a signature's declared
+# primary_language and the dominant source language only need to agree at the
+# family level (a package.json says "typescript" but the code may be plain JS;
+# build.gradle says "java" but may be Kotlin).
+_LANG_FAMILY: dict[str, str] = {
+    "typescript": "js", "javascript": "js",
+    "java": "jvm", "kotlin": "jvm",
+    "python": "python", "go": "go", "ruby": "ruby",
+    "php": "php", "csharp": "csharp", "rust": "rust", "swift": "swift",
+}
+
+
+def _resolve_signature(
+    project_dir: Path, sig: str, fw: str, lang: str
+) -> tuple[str, str, str]:
+    """Refine a chosen signature into a concrete (framework, language, path)."""
+    if sig == "*.csproj":
+        csproj_files = list(project_dir.glob("*.csproj"))
+        return ("aspnet", "csharp", str(csproj_files[0]))
+    sig_path = project_dir / sig
+    if fw == "node":
+        return (_refine_node_framework(project_dir), "typescript", str(sig_path))
+    if fw == "python":
+        return (_refine_python_framework(project_dir), "python", str(sig_path))
+    if fw == "go":
+        return (_refine_go_framework(project_dir), "go", str(sig_path))
+    if fw == "rust":
+        return (_refine_rust_framework(project_dir), "rust", str(sig_path))
+    if sig in ("build.gradle.kts", "build.gradle"):
+        fw, lang = _refine_gradle_framework(project_dir)
+        return (fw, lang, str(sig_path))
+    return (fw, lang, str(sig_path))
+
+
 def detect_framework(project_dir: str | Path) -> tuple[str, str, str]:
     """Detect the framework, language and signature file for a project directory.
 
@@ -143,37 +184,44 @@ def detect_framework(project_dir: str | Path) -> tuple[str, str, str]:
     """
     project_dir = Path(project_dir)
 
-    # Check for *.csproj (glob-style)
-    csproj_files = list(project_dir.glob("*.csproj"))
-    if csproj_files:
-        return ("aspnet", "csharp", str(csproj_files[0]))
-
+    # Collect every signature present at this root, in priority order
+    # (csproj first, then SIGNATURE_MAP). A single manifest keeps the old
+    # first-match-wins behavior exactly.
+    present: list[tuple[str, str, str]] = []
+    if list(project_dir.glob("*.csproj")):
+        present.append(("*.csproj", "aspnet", "csharp"))
     for sig, fw, lang in SIGNATURE_MAP:
         if sig.startswith("*"):
             # glob handled above
             continue
-        sig_path = project_dir / sig
-        if sig_path.exists():
-            # Refine generic frameworks
-            if fw == "node":
-                fw = _refine_node_framework(project_dir)
-                return (fw, "typescript", str(sig_path))
-            if fw == "python":
-                fw = _refine_python_framework(project_dir)
-                return (fw, "python", str(sig_path))
-            if fw == "go":
-                fw = _refine_go_framework(project_dir)
-                return (fw, "go", str(sig_path))
-            if fw == "rust":
-                fw = _refine_rust_framework(project_dir)
-                return (fw, "rust", str(sig_path))
-            if sig in ("build.gradle.kts", "build.gradle"):
-                fw, lang = _refine_gradle_framework(project_dir)
-                return (fw, lang, str(sig_path))
-            return (fw, lang, str(sig_path))
+        if (project_dir / sig).exists():
+            present.append((sig, fw, lang))
 
-    # No signature file found — try to guess from code files
-    return ("unknown", "unknown", "")
+    if not present:
+        # No signature file found — try to guess from code files
+        return ("unknown", "unknown", "")
+
+    # Multi-manifest tie-break, NARROWED to the incidental-manifest case it
+    # targets: only fire when the highest-priority signature is package.json.
+    # In practice that manifest is often stray dev-tooling (prettier/husky/
+    # tailwind) sitting on top of a Python backend, so plain first-match-wins
+    # would misdetect the repo as node. Every strong backend manifest precedes
+    # package.json in SIGNATURE_MAP (go.mod, Gemfile, pom.xml, build.gradle,
+    # Cargo.toml, composer.json, Package.swift, *.csproj, …), so a Rails/Spring/
+    # Go repo with a colocated, file-heavy JS frontend keeps its backend
+    # framework by order regardless of source-file counts — the language vote
+    # never overrides it.
+    if len(present) > 1 and present[0][0] == "package.json":
+        dominant = _detect_language_from_files(project_dir)
+        dom_family = _LANG_FAMILY.get(dominant)
+        if dom_family is not None:
+            for cand in present:
+                if _LANG_FAMILY.get(cand[2]) == dom_family:
+                    sig, fw, lang = cand
+                    return _resolve_signature(project_dir, sig, fw, lang)
+
+    sig, fw, lang = present[0]
+    return _resolve_signature(project_dir, sig, fw, lang)
 
 
 def _has_project_signature(directory: Path) -> bool:
@@ -227,7 +275,7 @@ def _detect_language_from_files(directory: Path) -> str:
                 d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")
             ]
             for fname in filenames:
-                ext = os.path.splitext(fname)[1]
+                ext = os.path.splitext(fname)[1].lower()
                 if ext in ext_to_lang:
                     lang = ext_to_lang[ext]
                     counts[lang] = counts.get(lang, 0) + 1
@@ -257,6 +305,41 @@ def _iter_subdirs(directory: Path) -> list[Path]:
         return []
 
 
+def _disambiguate_project_names(projects: list[ProjectInfo]) -> list[ProjectInfo]:
+    """Make every project ``name`` unique in place.
+
+    A project's name is its identity for every downstream surface — the graph
+    node-ID prefix and ``project`` attr, the wiki/obsidian folder, the
+    contextmap stats key and ``project_roots`` — all of which key off it and
+    silently last-wins on a clash. Two projects sharing a directory name
+    (e.g. appA/frontend + appB/frontend) would otherwise conflate: merged
+    folders, collapsed route nodes, summed stat rows, leaked absolute paths.
+
+    Colliding names get a parent-dir prefix (``appA-frontend``); a short path
+    hash breaks any residual (second-order) clash. Unique names are untouched.
+    """
+    counts = Counter(p.name for p in projects)
+    if all(c == 1 for c in counts.values()):
+        return projects
+
+    # Pass 1: parent-dir prefix for names shared by 2+ projects.
+    for p in projects:
+        if counts[p.name] > 1:
+            parent = Path(p.path).parent.name
+            if parent:
+                p.name = f"{parent}{_NAME_SEP}{p.name}"
+
+    # Pass 2: any name still shared (e.g. x/foo/frontend + y/foo/frontend, or a
+    # rewrite that collided with an already-unique name) gets a path hash so the
+    # result is guaranteed unique.
+    recounts = Counter(p.name for p in projects)
+    for p in projects:
+        if recounts[p.name] > 1:
+            digest = hashlib.sha1(p.path.encode("utf-8")).hexdigest()[:6]
+            p.name = f"{p.name}{_NAME_SEP}{digest}"
+    return projects
+
+
 def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     """Main entry point: given a list of input paths, return discovered projects.
 
@@ -268,7 +351,7 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
       aptscore/frontend, murmur/landing).
     """
     if len(paths) > 1:
-        return _multi_from_paths(paths)
+        return _disambiguate_project_names(_multi_from_paths(paths))
 
     single_path = Path(paths[0]).resolve()
 
@@ -304,7 +387,7 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
                     seen_paths.add(str(nested))
 
     if subprojects:
-        return subprojects
+        return _disambiguate_project_names(subprojects)
 
     # No project signatures found anywhere: try generic mode
     lang = _detect_language_from_files(single_path)
@@ -433,7 +516,7 @@ def _fs_routes_from_dir(file_dir: Path, base_dir: Path) -> list[str]:
     """Convert Next.js / Nuxt pages directory files to route strings."""
     routes = []
     for f in file_dir.rglob("*"):
-        if f.is_file() and f.suffix in {".tsx", ".ts", ".jsx", ".js", ".vue"}:
+        if f.is_file() and f.suffix.lower() in {".tsx", ".ts", ".jsx", ".js", ".vue"}:
             rel = f.relative_to(base_dir)
             parts = list(rel.parts)
             # Remove extension from last part
@@ -459,6 +542,7 @@ def _app_router_path(page_file: Path, app_dir: Path) -> str:
     parts = list(rel.parts)
     route = "/" + "/".join(parts) if parts else "/"
     route = re.sub(r"\(.*?\)/", "", route)   # route groups: (group)/
+    route = re.sub(r"/@[^/]+", "", route)    # parallel-route slots: @team/ etc.
     route = re.sub(r"\[\.\.\.(\w+)\]", "*", route)
     route = re.sub(r"\[(\w+)\]", r":\1", route)
     return route or "/"

@@ -131,9 +131,12 @@ def _render_community(G: nx.DiGraph, cid: int, node_ids: list[str]) -> str:
             ))
 
     rows = "".join(
+        # `or ''` (not a .get default) so an explicit None value — the graph
+        # tolerates None labels/fields — coerces to "" instead of crashing
+        # html.escape, which the missing-key default would not do.
         f"<tr><td>{html.escape(G.nodes[nid].get('label', nid) or '(unnamed)')}</td>"
-        f"<td>{html.escape(G.nodes[nid].get('type', ''))}</td>"
-        f"<td><code>{html.escape(G.nodes[nid].get('source_file', ''))}</code></td></tr>"
+        f"<td>{html.escape(G.nodes[nid].get('type') or '')}</td>"
+        f"<td><code>{html.escape(G.nodes[nid].get('source_file') or '')}</code></td></tr>"
         for nid in node_ids[:_MAX_NODES_PER_COMMUNITY]
     )
 

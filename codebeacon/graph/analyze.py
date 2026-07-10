@@ -205,8 +205,9 @@ def surprising_connections(
 ) -> list[SurprisingConnection]:
     """Find cross-community edges that may indicate unexpected coupling.
 
-    Expected cross-service relations (calls_api, shares_db_entity) are excluded
-    because they are intentional architectural connections.
+    Expected cross-service relations (calls_api, shares_db_entity,
+    invokes_command) are excluded because they are intentional architectural
+    connections.
 
     Args:
         G: the knowledge graph
@@ -216,8 +217,11 @@ def surprising_connections(
     Returns:
         List of SurprisingConnection sorted by relation type (most surprising first).
     """
-    # Relations that are expected to cross communities
-    expected_relations = frozenset({"calls_api", "shares_db_entity"})
+    # Relations that are expected to cross communities. invokes_command is a
+    # deliberate frontend→backend IPC link (Tauri/Electron) that enrich_ipc_invoke
+    # only creates ACROSS projects — exactly like calls_api — so it is expected
+    # coupling, not a surprising connection.
+    expected_relations = frozenset({"calls_api", "shares_db_entity", "invokes_command"})
     # Priority: lower = more surprising
     priority = {"injects": 0, "calls": 1, "imports": 2, "imports_from": 3}
 

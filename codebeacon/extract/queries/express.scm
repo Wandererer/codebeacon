@@ -25,25 +25,32 @@
   )
 ) @route.call
 
-; ── router.route("/path").get(handler).post(handler) ─────────────────────────
+; ── router.route("/path").get(handler).post(handler)... ──────────────────────
+; A verb chain is left-nested: ((router.route(p)).get(h)).post(h). Anchoring on
+; identifier.route(p) matched ONLY the innermost .get(...) node and dropped every
+; later verb. Instead capture the .route(p) anchor once, then capture EVERY
+; chained verb call (receiver is itself a call_expression); routes.py correlates
+; each verb to the anchor whose byte range it encloses.
 
 (call_expression
   function: (member_expression
-    object: (call_expression
-      function: (member_expression
-        object: (identifier) @route.object
-        property: (property_identifier) @_route_kw
-        (#eq? @_route_kw "route")
-      )
-      arguments: (arguments
-        .
-        (string) @route.path
-      )
-    )
-    property: (property_identifier) @route.method
-    (#match? @route.method "^(get|post|put|patch|delete|options|head|all)$")
+    object: (identifier) @route.chain_object
+    property: (property_identifier) @_route_kw
+    (#eq? @_route_kw "route")
   )
-) @route.chained
+  arguments: (arguments
+    .
+    (string) @route.chain_path
+  )
+) @route.chain_anchor
+
+(call_expression
+  function: (member_expression
+    object: (call_expression)
+    property: (property_identifier) @route.chain_method
+    (#match? @route.chain_method "^(get|post|put|patch|delete|options|head|all)$")
+  )
+) @route.chain_verb
 
 ; ── app.use("/prefix", router) — prefix mounting ─────────────────────────────
 
@@ -58,7 +65,7 @@
       .
       (string) @route.use_prefix
       .
-      _
+      (identifier) @route.mount_router
     )
   )
 ) @route.use_mount

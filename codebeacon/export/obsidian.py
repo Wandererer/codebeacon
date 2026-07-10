@@ -54,6 +54,14 @@ _KEEP_RELS   = frozenset({"calls_api", "shares_db_entity"})  # always preserved 
 _JAVA_EXTS = frozenset({".java", ".kt"})
 _TS_EXTS   = frozenset({".ts", ".tsx", ".js", ".jsx"})
 
+# Windows reserved device names: a bare stem matching one of these (case-
+# insensitive) is un-writable on Windows even with a valid `.md` extension.
+_WIN_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
 # Ownership marker dropped into a vault codebeacon manages, so a later run knows
 # it may safely clear/regenerate the vault (graphify #1506).
 _VAULT_MARKER = ".codebeacon-vault.json"
@@ -211,12 +219,15 @@ def _step1_generate_notes(
     claimed: dict[str, str] = {}
 
     for node_id, data in G.nodes(data=True):
-        ntype = data.get("type", "unknown")
+        ntype = data.get("type") or "unknown"  # `or` so an explicit None coerces too
         if ntype == "external":
             continue  # skip stub nodes
 
         project   = data.get("project", "_unknown")
-        label     = data.get("label", node_id)
+        # `or node_id` (not a .get default) so a tolerated None label (build.py
+        # keeps the node) falls back to the node_id everywhere — filename,
+        # heading, and every wikilink pointing here — instead of crashing.
+        label     = data.get("label") or node_id
         source_file = relativize_source_file(
             data.get("source_file", ""), (project_roots or {}).get(project)
         )
@@ -308,7 +319,7 @@ def _build_note(
         tgt_data = G.nodes.get(tgt_id, {})
         if tgt_data.get("type") == "external":
             continue
-        tgt_label = tgt_data.get("label", tgt_id)
+        tgt_label = tgt_data.get("label") or tgt_id
         tgt_name  = _safe_note_name(tgt_label)
         relation  = edata.get("relation", "")
         conf      = edata.get("confidence", "EXTRACTED")
@@ -319,7 +330,7 @@ def _build_note(
         src_data = G.nodes.get(src_id, {})
         if src_data.get("type") == "external":
             continue
-        src_label = src_data.get("label", src_id)
+        src_label = src_data.get("label") or src_id
         src_name  = _safe_note_name(src_label)
         relation  = edata.get("relation", "")
         conf      = edata.get("confidence", "EXTRACTED")
@@ -441,7 +452,7 @@ def _type_display(ntype: str, data: dict, framework: str) -> str:
                 return "Repository"
             if "component" in al:
                 return "Component"
-        label = data.get("label", "")
+        label = data.get("label") or ""  # tolerate a None label (build.py keeps it)
         if label.endswith("Controller"):
             return "Controller"
         if label.endswith("Repository"):
@@ -477,9 +488,22 @@ def _safe_note_name(label: str) -> str:
     wikilink target is generated through this same function, the note's
     filename and the links pointing at it stay byte-for-byte consistent even
     after truncation.
+
+    A ``None``/empty label collapses to ``"unnamed"`` — the graph tolerates a
+    None label (build.py keeps the node), so the exporter must too rather than
+    passing None into ``re.sub``.
     """
-    # Replace characters that confuse Obsidian wikilinks
-    cleaned = re.sub(r'[/\\#^|[\]]', "_", label).strip()
+    if not label:
+        return "unnamed"
+    # Replace characters that confuse Obsidian wikilinks OR are illegal in a
+    # Windows filename (< > : " ? * in addition to the / \ # ^ | [ ] we already
+    # stripped). Flask typed converters (``<int:id>``), Express ``:id``,
+    # wildcards, and query strings all embed these; an unstripped one makes
+    # ``write_text`` raise WinError 123 and abort the whole export on Windows.
+    cleaned = re.sub(r'[/\\#^|[\]<>:"?*]', "_", label).strip()
+    # Windows reserved device names are un-writable even with the .md suffix.
+    if cleaned.upper() in _WIN_RESERVED:
+        return "unnamed"
     return cap_filename(cleaned)
 
 
@@ -579,7 +603,11 @@ def _step5_move_to_subfolders(vault: Path) -> None:
     for md in list(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
         m = _PROJECT_RE.search(content)
-        folder = m.group(1) if m and m.group(1) else "_unknown"
+        # Cap the folder name (mirrors step 8) so a very long / multi-byte
+        # project name can't overflow the 255-byte filesystem limit and crash
+        # mkdir mid-export — this is the hot path every note passes through, so
+        # an uncapped name here aborts before step 8's cap can ever run.
+        folder = cap_filename(m.group(1)) if m and m.group(1) else "_unknown"
 
         dest_dir = vault / folder
         dest_dir.mkdir(exist_ok=True)
@@ -736,6 +764,21 @@ def _step9_hub_notes(vault: Path) -> None:
         svc = svc_dir.name
         notes = sorted(svc_dir.glob("*.md"), key=lambda f: f.name)
 
+        # The hub normally lives at <svc>/<svc>.md. But a real extracted note can
+        # legitimately share the service's own name — a class/entity labelled
+        # identically to its project/module (plausible in DDD / PascalCase-module
+        # layouts). Writing the hub over it would silently destroy that note
+        # (BH-O2). When the collision exists, keep the real note where every
+        # wikilink already points and salt the hub's own filename instead.
+        real_stems = {n.stem for n in notes}
+        hub_stem = svc
+        if hub_stem in real_stems:
+            hub_stem = f"{svc}_index"
+            suffix = 2
+            while hub_stem in real_stems:
+                hub_stem = f"{svc}_index_{suffix}"
+                suffix += 1
+
         # Hub note content
         safe_svc = escape_frontmatter_value(svc)
         display_svc = sanitize_label(svc) or "(unnamed)"
@@ -756,16 +799,16 @@ def _step9_hub_notes(vault: Path) -> None:
             "",
         ]
         for note in sorted(notes, key=lambda f: f.stem):
-            if note.stem != svc:
+            if note.stem != hub_stem:
                 lines.append(f"- [[{svc}/{note.stem}]]")
 
         lines += ["", f"#codebeacon/folder-index #community/{svc}"]
-        hub_path = svc_dir / f"{svc}.md"
+        hub_path = svc_dir / f"{hub_stem}.md"
         hub_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         # Add back-link from each note → service hub
         for note in notes:
-            if note.stem == svc:
+            if note.stem == hub_stem:
                 continue
             content = note.read_text(errors="ignore")
             if f"[[{svc}]]" not in content:

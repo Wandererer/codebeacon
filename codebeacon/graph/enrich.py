@@ -160,7 +160,11 @@ def enrich_shared_db(G: nx.DiGraph) -> int:
     if not entity_ids:
         return 0
 
-    for entity_id in entity_ids:
+    # Sorted so both the shared_entities accumulation order and the singular
+    # shared_entity are deterministic across runs (a set's iteration order is
+    # PYTHONHASHSEED-dependent and would otherwise churn beacon.json). Mirrors
+    # the precedent in _extract_api_urls / _extract_ipc_commands (graphify #1090).
+    for entity_id in sorted(entity_ids):
         entity_data = G.nodes[entity_id]
         entity_src = entity_data.get("source_file", "")
 

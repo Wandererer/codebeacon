@@ -186,7 +186,10 @@ def _install_post_commit(repo: Path) -> None:
         # that merely mentions codebeacon is the user's — leave it alone.
         if "codebeacon: incremental rebuild" not in existing and "codebeacon" in existing:
             return
-    hook.write_text(content, encoding="utf-8")
+    # newline="\n" pins LF so Python's default newline translation doesn't turn
+    # every '\n' into '\r\n' on Windows — a CRLF shebang (`env: bash\r`) and a
+    # CRLF heredoc terminator both make the shell hook unrunnable there.
+    hook.write_text(content, encoding="utf-8", newline="\n")
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 

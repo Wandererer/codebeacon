@@ -30,7 +30,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         config_path = find_config(paths[0])
         if not config_path:
             config_path = find_config(paths[0], walk_up=True)
-        if config_path:
+        # --list-only is a read-only "what would be scanned" query. Never let
+        # the sync auto-switch turn it into a full extraction (which writes
+        # outputs and can rewrite codebeacon.yaml via auto-rediscovery); fall
+        # through to plain discovery + listing instead.
+        if config_path and not args.list_only:
             print(f"Found {config_path} — switching to sync mode")
             args.config = str(config_path)
             return _cmd_sync(args)
@@ -74,6 +78,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     output_dir = str(output_base / ".codebeacon")
     print(f"  Output: {output_dir}")
 
+    # --list-only lists detected projects and stops before writing anything —
+    # no auto-generated codebeacon.yaml, no extraction, no context-map files.
+    if args.list_only:
+        return 0
+
     deep_dive = getattr(args, "deep_dive", False)
 
     # Auto-generate codebeacon.yaml on multi-project first scan
@@ -82,9 +91,6 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         if not yaml_path.exists():
             generate_config(projects, output_dir, yaml_path, deep_dive=deep_dive)
             print(f"  Generated {yaml_path} — next time run: codebeacon sync")
-
-    if args.list_only:
-        return 0
 
     if deep_dive:
         return run_deep_dive_pipeline(projects, output_dir, args)
@@ -124,6 +130,19 @@ def _cmd_sync(args: argparse.Namespace) -> int:
                 print(f"  + {p.name:<20}  {p.framework:<15}  {p.path}")
             append_projects_to_yaml(config.config_file, new_projects)
             config = load_config(config.config_file)
+
+    # Wire parsed codebeacon.yaml settings through to the pipeline via `args`,
+    # honoring precedence: explicit CLI flags > codebeacon.yaml > built-in
+    # defaults. The pipeline reads these with getattr(..., <default>) so the
+    # `scan` path (no config) keeps its defaults and run_pipeline's positional
+    # signature stays unchanged. --semantic on the CLI OR semantic.enabled in
+    # the yaml turns the semantic step on.
+    args.semantic = getattr(args, "semantic", False) or config.semantic.enabled
+    args.wave_chunk_size = config.wave.chunk_size
+    args.wave_max_parallel = config.wave.max_parallel
+    args.output_wiki = config.output.wiki
+    args.output_obsidian = config.output.obsidian
+    args.context_map_targets = config.output.context_map_targets
 
     print(f"Using {config.config_file}")
     print(f"Processing {len(config.projects)} project(s)...")
@@ -362,6 +381,24 @@ def _detect_install_kind() -> str:
     return "pip"
 
 
+def _is_uv_venv() -> bool:
+    """True when this interpreter runs inside a ``uv venv``-created environment.
+
+    uv stamps a ``uv = <version>`` line into the venv's ``pyvenv.cfg``. Such a
+    venv ships without a pip module by default, yet — unlike a pipx/uv-tool
+    managed venv — it is NOT upgraded with ``pipx``/``uv tool``; the right
+    command is ``uv pip install --upgrade`` targeting the venv itself.
+    """
+    cfg = Path(sys.prefix) / "pyvenv.cfg"
+    try:
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            if line.split("=", 1)[0].strip().lower() == "uv":
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _pypi_latest_version(timeout: float = 5.0) -> str | None:
     """Best-effort lookup of the newest codebeacon release on PyPI."""
     import json
@@ -431,14 +468,27 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
         else:
             import importlib.util
             if importlib.util.find_spec("pip") is None:
-                print(
-                    "This Python environment has no pip module, so codebeacon "
-                    "cannot upgrade itself here.\n"
-                    "Upgrade with the tool that installed it, e.g.:\n"
-                    "  pipx upgrade codebeacon\n"
-                    "  uv tool upgrade codebeacon",
-                    file=_sys.stderr,
-                )
+                if _is_uv_venv():
+                    # A `uv venv` has no pip module, but `pipx`/`uv tool` don't
+                    # manage it either — both fail with "not installed". The
+                    # working command is `uv pip install` into this venv.
+                    print(
+                        "This environment was created by `uv venv` and has no "
+                        "pip module, so codebeacon cannot upgrade itself "
+                        "in-process.\n"
+                        "Upgrade it with uv (run inside this environment):\n"
+                        "  uv pip install --upgrade codebeacon",
+                        file=_sys.stderr,
+                    )
+                else:
+                    print(
+                        "This Python environment has no pip module, so codebeacon "
+                        "cannot upgrade itself here.\n"
+                        "Upgrade with the tool that installed it, e.g.:\n"
+                        "  pipx upgrade codebeacon\n"
+                        "  uv tool upgrade codebeacon",
+                        file=_sys.stderr,
+                    )
                 return 1
             cmd = [_sys.executable, "-m", "pip", "install", "--upgrade", "codebeacon"]
 

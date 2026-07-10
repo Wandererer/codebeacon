@@ -107,6 +107,30 @@
   name: (identifier) @route.method_name_with_path
 ) @route.method_with_path
 
+; Pre-4.3 idiom: @RequestMapping(method = RequestMethod.X) — the explicit HTTP
+; verb lives in a `method` element_value_pair, so without this capture the route
+; was recorded as the annotation's default "ANY" instead of the declared verb.
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @_vann
+      (#eq? @_vann "RequestMapping")
+      arguments: (annotation_argument_list
+        (element_value_pair
+          key: (identifier) @_vkey
+          (#eq? @_vkey "method")
+          value: (field_access
+            object: (identifier) @_vreqmethod
+            (#eq? @_vreqmethod "RequestMethod")
+            field: (identifier) @route.request_method
+          )
+        )
+      )
+    )
+  )
+  name: (identifier) @route.method_name_verb
+) @route.method_with_verb
+
 ; ── Service / Component / Repository ─────────────────────────────────────────
 
 (class_declaration

@@ -276,9 +276,14 @@ def _convention_routes(file_path: str, framework: str, project_path: str) -> lis
 
 def _seg(part: str) -> str:
     """Convert a file path segment to a URL segment (handle [param], [...catch])."""
-    name = Path(part).stem  # strip extension
+    # Strip only real code extensions. Path(part).stem mis-parses the dots inside
+    # a catch-all directory like "[...all]" as an extension (stem → "[.."), so the
+    # catch-all regex below never fired.
+    name = re.sub(r"\.(mjs|cjs|mts|cts|tsx?|jsx?|vue|svelte)$", "", part)
     if re.match(r"^\(.*\)$", name):
         return ""  # Next.js route group
+    if name.startswith("@"):
+        return ""  # Next.js parallel-route slot (@modal) — never part of the URL
     name = re.sub(r"\[\.\.\.(\w+)\]", r"*", name)
     name = re.sub(r"\[(\w+)\]", r":\1", name)
     return name if name not in ("index",) else ""
@@ -369,6 +374,16 @@ def _interpret_spring_boot(file_path: str, matches: list, framework: str) -> lis
                 if handler and not methods[key]["handler"]:
                     methods[key]["handler"] = handler
 
+        # Pre-4.3 idiom: @RequestMapping(method = RequestMethod.X) — explicit verb
+        if "route.method_with_verb" in caps and "route.request_method" in caps:
+            m = caps["route.method_with_verb"][0]
+            key = m.start_byte
+            verb = node_text(caps["route.request_method"][0])
+            if key not in methods:
+                methods[key] = {"ann": "", "handler": "", "path": "", "line": m.start_point[0] + 1, "end": m.end_byte, "verb": verb}
+            else:
+                methods[key]["verb"] = verb
+
     # Combine
     routes: list[RouteInfo] = []
     for start, minfo in methods.items():
@@ -379,8 +394,13 @@ def _interpret_spring_boot(file_path: str, matches: list, framework: str) -> lis
                 class_prefix = c["prefix"]
                 class_name = c["name"]
                 break
+        method = _norm_method(minfo["ann"])
+        # @RequestMapping normalises to "ANY"; a captured method=RequestMethod.X
+        # attribute is the declared verb and takes precedence.
+        if method == "ANY" and minfo.get("verb"):
+            method = minfo["verb"].upper()
         routes.append(RouteInfo(
-            method=_norm_method(minfo["ann"]),
+            method=method,
             path=_join(class_prefix, minfo["path"]),
             handler=f"{class_name}.{minfo['handler']}",
             source_file=file_path,
@@ -391,9 +411,36 @@ def _interpret_spring_boot(file_path: str, matches: list, framework: str) -> lis
 
 
 def _interpret_express(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
-    """Express / Koa / Fastify route extraction."""
+    """Express / Koa / Fastify route extraction.
+
+    Handles three shapes:
+      - app.METHOD("/path", handler)
+      - router.route("/path").get(h).post(h)…  — every verb in the chain
+      - app.use("/prefix", router) mount prefixes, applied to that router's routes
+    """
+    # Pass 1 — router mount prefixes: app.use("/prefix", router)
+    mount_prefixes: dict[str, str] = {}
+    for _idx, caps in matches:
+        if "route.use_mount" in caps and "route.mount_router" in caps:
+            router = node_text(caps["route.mount_router"][0])
+            prefix = _clean(node_text(caps["route.use_prefix"][0])) if "route.use_prefix" in caps else ""
+            if router:
+                mount_prefixes[router] = prefix
+
+    # Chained-route anchors: identifier.route("/path") with byte range for verb correlation
+    anchors: list[tuple[int, int, str, str]] = []  # (start, end, path, object)
+    for _idx, caps in matches:
+        if "route.chain_anchor" in caps and "route.chain_path" in caps:
+            node = caps["route.chain_anchor"][0]
+            anchors.append((
+                node.start_byte, node.end_byte,
+                _clean(node_text(caps["route.chain_path"][0])),
+                node_text(caps["route.chain_object"][0]) if "route.chain_object" in caps else "",
+            ))
+
     routes: list[RouteInfo] = []
 
+    # Pass 2 — app.METHOD("/path", handler)
     for _idx, caps in matches:
         if "route.path" not in caps:
             continue
@@ -408,12 +455,32 @@ def _interpret_express(file_path: str, matches: list, framework: str) -> list[Ro
 
         routes.append(RouteInfo(
             method=_norm_method(method_str),
-            path=path if path.startswith("/") else "/" + path,
+            path=_join(mount_prefixes.get(obj, ""), path),
             handler=obj,
             source_file=file_path,
             line=line,
             framework=framework,
         ))
+
+    # Pass 3 — chained verbs: correlate each verb to the .route(path) anchor whose
+    # byte range it encloses (the anchor is the innermost node of the chain).
+    for _idx, caps in matches:
+        if "route.chain_verb" not in caps or "route.chain_method" not in caps:
+            continue
+        vnode = caps["route.chain_verb"][0]
+        method_str = node_text(caps["route.chain_method"][0]).lower()
+        for astart, aend, apath, aobj in anchors:
+            if vnode.start_byte <= astart and aend <= vnode.end_byte:
+                routes.append(RouteInfo(
+                    method=_norm_method(method_str),
+                    path=_join(mount_prefixes.get(aobj, ""), apath),
+                    handler=aobj,
+                    source_file=file_path,
+                    line=vnode.start_point[0] + 1,
+                    framework=framework,
+                ))
+                break
+
     return routes
 
 
@@ -495,6 +562,9 @@ def _interpret_fastapi(file_path: str, matches: list, framework: str) -> list[Ro
     router_prefixes: dict[str, str] = {}  # router_var_name → prefix
     routes: list[RouteInfo] = []
 
+    # Pass 1 — collect ALL router prefixes first. app.include_router(router, prefix=…)
+    # usually appears AFTER the @router.get handlers, so a single interleaved pass
+    # resolved the prefix too late and silently dropped it (order-dependent).
     for _idx, caps in matches:
         # APIRouter(prefix="/api/v1")
         if "route.router_decl" in caps and "route.prefix" in caps:
@@ -508,6 +578,8 @@ def _interpret_fastapi(file_path: str, matches: list, framework: str) -> list[Ro
             if "router.include_prefix" in caps:
                 router_prefixes[name] = _clean(node_text(caps["router.include_prefix"][0]))
 
+    # Pass 2 — emit routes with fully-populated prefix map.
+    for _idx, caps in matches:
         # @app.get("/path") or @router.post("/path")
         if "route.handler" in caps and "route.path" in caps:
             path = _clean(node_text(caps["route.path"][0]))
@@ -552,6 +624,9 @@ def _interpret_flask(file_path: str, matches: list, framework: str) -> list[Rout
     register_prefixes: dict[str, str] = {} # bp var name → registered prefix
     routes: list[RouteInfo] = []
 
+    # Pass 1 — collect ALL prefixes first. register_blueprint(bp, url_prefix=…)
+    # usually appears AFTER the @bp.route decorators, so a single interleaved pass
+    # resolved the override too late and silently dropped it (order-dependent).
     for _idx, caps in matches:
         if "blueprint.decl" in caps and "blueprint.name" in caps:
             name = node_text(caps["blueprint.name"][0])
@@ -559,10 +634,18 @@ def _interpret_flask(file_path: str, matches: list, framework: str) -> list[Rout
             bp_prefixes[name] = prefix
 
         if "app.register" in caps and "app.register_bp" in caps:
-            name = node_text(caps["app.register_bp"][0])
-            prefix = _clean(node_text(caps["app.register_prefix"][0])) if "app.register_prefix" in caps else ""
-            register_prefixes[name] = prefix
+            # Only record a register-time prefix when one is actually captured —
+            # guarding the write exactly like the FastAPI sibling above. An
+            # unconditional register_prefixes[name] = "" would shadow the
+            # blueprint's OWN url_prefix in pass 2 (the resolver's fallback to
+            # bp_prefixes never fires once the key exists), breaking the dominant
+            # `app.register_blueprint(bp)` no-override idiom.
+            if "app.register_prefix" in caps:
+                name = node_text(caps["app.register_bp"][0])
+                register_prefixes[name] = _clean(node_text(caps["app.register_prefix"][0]))
 
+    # Pass 2 — emit routes with fully-populated prefix maps.
+    for _idx, caps in matches:
         if "route.handler" in caps and "route.path" in caps:
             path = _clean(node_text(caps["route.path"][0]))
             obj = node_text(caps["route.object"][0]) if "route.object" in caps else ""

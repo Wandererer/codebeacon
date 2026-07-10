@@ -47,6 +47,7 @@ import json
 import os
 import re
 import shutil
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +115,36 @@ def _original_dir(beacon_dir: Path) -> Path:
     return _semantic_root(beacon_dir) / ORIGINAL_SUBDIR
 
 
+def _archive_entry_key(line: str) -> str:
+    """Stable dedup key for one archive JSONL line.
+
+    Prefers ``task_id`` — the archive's natural primary key, mirrored by the
+    ``done_task_ids`` set in :func:`prepare` — so re-running a merge cannot
+    reintroduce an entry that is already present. Falls back to the raw text
+    for lines without a task_id so non-conforming rows still dedupe exactly.
+
+    Design note (BH-S4): because :func:`_migrate_legacy_archive` dedups legacy
+    entries against the migration target on this key, two entries that share a
+    ``task_id`` are treated as ONE — the target copy wins and the legacy copy
+    is dropped whole. If a non-deterministic LLM re-analysed the same unchanged
+    file/node/excerpt across a 0.3.x run and a newer run, both entries carry the
+    same task_id but may carry DIVERGENT edge sets; those divergent edges are
+    intentionally NOT unioned. task_id is the archive's primary key, so a single
+    winner keeps the archive consistent with ``done_task_ids``, and any edges
+    lost from the dropped copy are regenerable inferred edges on the next
+    prepare/apply cycle.
+    """
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return line
+    if isinstance(obj, dict):
+        tid = obj.get("task_id")
+        if tid:
+            return f"tid:{tid}"
+    return line
+
+
 def _migrate_legacy_archive(beacon_dir: Path) -> None:
     """If a 0.3.x single-file archive exists, move it to original/_legacy.jsonl.
 
@@ -125,11 +156,40 @@ def _migrate_legacy_archive(beacon_dir: Path) -> None:
     target = _original_dir(beacon_dir) / LEGACY_MIGRATED_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        # Merge: append legacy after target (preserves both)
-        with open(legacy, encoding="utf-8") as src, open(target, "a", encoding="utf-8") as dst:
-            for line in src:
-                if line.strip():
-                    dst.write(line if line.endswith("\n") else line + "\n")
+        # Merge legacy into target. This must be BOTH crash-safe and
+        # idempotent: a plain append-then-unlink double-appends every legacy
+        # entry if the process dies after the append but before the unlink,
+        # because the re-run re-enters this branch and appends again (BH-S4).
+        # Fix: build the merged content in memory (skipping legacy entries
+        # already present in target, keyed on task_id), write it to a temp
+        # file, os.replace it onto target atomically, and only then unlink
+        # the legacy source. A crash anywhere in that sequence leaves target
+        # either untouched or fully merged — never doubled — so re-running is
+        # a no-op that finishes the migration.
+        merged: list[str] = []
+        seen: set[str] = set()
+        with open(target, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                merged.append(line)
+                seen.add(_archive_entry_key(line))
+        with open(legacy, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                key = _archive_entry_key(line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(line)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for line in merged:
+                fh.write(line + "\n")
+        os.replace(tmp, target)
         legacy.unlink()
     else:
         shutil.move(str(legacy), str(target))
@@ -399,6 +459,23 @@ def _label_index(G: nx.DiGraph) -> dict[str, str]:
     return out
 
 
+def _code_source_files(G: nx.DiGraph) -> set[str]:
+    """Set of ``source_file`` strings owned by real (AST) code nodes.
+
+    LLM-minted node types (concept/document/paper) are excluded — they have
+    no AST owner, so their ``source_file`` must never be allowed to collide
+    with a code node's (see the G12 guard in :func:`_merge_node`).
+    """
+    out: set[str] = set()
+    for _node_id, data in G.nodes(data=True):
+        if (data.get("type") or "") in ALLOWED_LLM_NODE_TYPES:
+            continue
+        sf = data.get("source_file")
+        if sf:
+            out.add(sf)
+    return out
+
+
 # Graphify-aligned relation taxonomy. Anything outside this set falls back to
 # ``references`` so a hallucinating LLM cannot inject novel edge labels into
 # beacon.json (downstream wiki/MCP code assumes a closed set).
@@ -519,6 +596,7 @@ def _merge_node(
     label: str,
     file_type: str,
     source_file: str,
+    protected_source_files: Optional[set[str]] = None,
 ) -> bool:
     """Add an LLM-contributed node iff its file_type is non-code and the id is fresh.
 
@@ -528,6 +606,10 @@ def _merge_node(
 
     Updates ``label_idx`` in place when the node is added so subsequent edges
     in the same chunk can resolve targets by label.
+
+    ``protected_source_files`` is the set of code nodes' ``source_file``
+    values (see :func:`_code_source_files`); when ``None`` it is derived from
+    ``G`` on the fly. It powers the G12 guard below.
     """
     ftype = (file_type or "").strip().lower()
     if ftype not in ALLOWED_LLM_NODE_TYPES:
@@ -536,11 +618,26 @@ def _merge_node(
         return False
     if node_id in G:
         return False
+    # G12 guard: a concept/document/paper node's source_file is an
+    # unverifiable LLM string. If it is an absolute path, or collides with a
+    # real code node's source_file, obsidian's Step-6 "same source_file"
+    # dedup would group the LLM note with the real code note and delete the
+    # loser — and the LLM note can win _pick_primary, destroying the real
+    # file's note. Blank those out (a legitimate relative doc path such as
+    # "docs/oauth.md" is kept). This also stops foreign paths (e.g.
+    # /etc/passwd) from being stored verbatim in the graph.
+    sf = source_file or ""
+    if sf:
+        protected = protected_source_files
+        if protected is None:
+            protected = _code_source_files(G)
+        if os.path.isabs(sf) or sf in protected:
+            sf = ""
     G.add_node(
         node_id,
         label=label,
         type=ftype,
-        source_file=source_file or "",
+        source_file=sf,
         line=0,
         project="",
     )
@@ -563,6 +660,9 @@ def _reapply_archive(G: nx.DiGraph, archive: list[dict]) -> tuple[int, list[dict
     pending schema work.
     """
     label_idx = _label_index(G)
+    # Snapshot code nodes' source_files once so replayed concept/document/
+    # paper nodes get the same G12 source_file guard as a fresh apply().
+    protected_sf = _code_source_files(G)
     reapplied = 0
     kept: list[dict] = []
     # Pass 1: replay nodes so subsequent edge targets can resolve to them.
@@ -577,6 +677,7 @@ def _reapply_archive(G: nx.DiGraph, archive: list[dict]) -> tuple[int, list[dict
                 label=node.get("label", ""),
                 file_type=node.get("file_type", ""),
                 source_file=node.get("source_file", ""),
+                protected_source_files=protected_sf,
             )
     # Pass 2: replay edges, drop entries whose source is missing.
     for entry in archive:
@@ -839,6 +940,10 @@ def apply(
 
     G, _meta = load_beacon(beacon_path)
     label_idx = _label_index(G)
+    # Snapshot code nodes' source_files once for the G12 _merge_node guard.
+    # The LLM can only add concept/document/paper nodes (never code nodes),
+    # so this set is stable for the whole apply run.
+    protected_sf = _code_source_files(G)
 
     applied = 0
     skipped = 0
@@ -862,10 +967,36 @@ def apply(
                 if tid:
                     pending_tasks[tid] = task
 
+        # G12 guard 2: the set of source_node_ids actually dispatched in this
+        # chunk. A result row may only attach edges to a node that was
+        # dispatched here — otherwise a mis-attributed row (LLM or manual
+        # edit) could inject edges onto an arbitrary unrelated node. Empty
+        # when there is no pending file (manual-edit / legacy path), in which
+        # case we keep the defensive "archive from results alone" behaviour.
+        dispatched_sources = {
+            t.get("source_node_id")
+            for t in pending_tasks.values()
+            if t.get("source_node_id")
+        }
+
         archive_lines: list[dict] = []
 
         # Pass 1 within this chunk: register LLM-contributed nodes BEFORE
         # edges, so edges in the same result can reference fresh concept ids.
+        #
+        # Accepted-leak note (G12): Pass 1 merges nodes for EVERY result row,
+        # including a row whose source_node_id is later skipped as out-of-scope
+        # by Guard 2 in the Pass-2 loop below. Such a row's concept node
+        # therefore lands in G, and if another in-scope row in this chunk makes
+        # applied>0 it is persisted to beacon.json even though the out-of-scope
+        # row itself is never archived (so _reapply_archive never replays or
+        # prunes it). This leak is intentionally tolerated: the node is edgeless
+        # (Guard 2 drops the row's edges) and any source_file colliding with a
+        # real code node was already blanked by the G12 guard in _merge_node, so
+        # it drives NO obsidian note deletion — the cost is at most one
+        # disconnected, harmless concept node per skipped row. Deferring node
+        # registration until Guard 2 confirms scope would close the leak but
+        # adds cross-pass coupling for no correctness gain.
         kept_nodes_by_tid: dict[str, list[dict]] = {}
         for tid, obj in results_by_tid.items():
             kept_nodes: list[dict] = []
@@ -879,12 +1010,16 @@ def apply(
                     label=node.get("label", ""),
                     file_type=node.get("file_type", ""),
                     source_file=node.get("source_file", ""),
+                    protected_source_files=protected_sf,
                 ):
                     kept_nodes.append({
                         "id": nid,
                         "label": node.get("label", ""),
                         "file_type": node.get("file_type", ""),
-                        "source_file": node.get("source_file", ""),
+                        # Archive the sanitized source_file the graph actually
+                        # stored (G12 may have blanked it) so replay can't
+                        # reintroduce a collision.
+                        "source_file": G.nodes[nid].get("source_file", ""),
                     })
             if kept_nodes:
                 kept_nodes_by_tid[tid] = kept_nodes
@@ -892,6 +1027,17 @@ def apply(
         for tid, obj in results_by_tid.items():
             source = obj.get("source_node_id")
             if not source or source not in G:
+                skipped += 1
+                continue
+            if dispatched_sources and source not in dispatched_sources:
+                # Out-of-scope: this source_node_id was never dispatched in
+                # this chunk. Skip the whole row so its edges can't land on
+                # an unrelated node (G12 guard 2).
+                warnings.warn(
+                    f"semantic-apply: {chunk_name} result row source_node_id "
+                    f"{source!r} was not dispatched in this chunk — skipping.",
+                    stacklevel=2,
+                )
                 skipped += 1
                 continue
             task_spec = pending_tasks.get(tid) or {}

@@ -89,9 +89,15 @@ def _extract_file(
     """
     # Check cache before parsing. Keyed by framework too: one cache can serve
     # several projects in a repo group, and the same file extracted under a
-    # different framework yields different results.
+    # different framework yields different results. The `semantic` flag is also
+    # part of the key: a semantic run folds extra 'references' edges into the
+    # same result dict, so a semantic entry is NOT interchangeable with a plain
+    # one for an unchanged file — without this, `--update --semantic` reuses a
+    # plain cache hit and silently drops the semantic edges (and the reverse
+    # leaks references edges into a plain scan).
+    cache_ns = f"{framework}::semantic" if semantic else framework
     if cache is not None:
-        cached = cache.get(file_path, framework=framework)
+        cached = cache.get(file_path, framework=cache_ns)
         if cached is not None:
             return {"_cache_hit": True, **cached}
 
@@ -125,7 +131,7 @@ def _extract_file(
 
         if cache is not None:
             fh = cache.file_hash(file_path)
-            cache.put(file_path, result, fh, framework=framework)
+            cache.put(file_path, result, fh, framework=cache_ns)
 
         return result
 

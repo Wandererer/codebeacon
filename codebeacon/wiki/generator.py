@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,56 @@ def _safe_filename(label: str) -> str:
     return safe_wiki_filename(label)
 
 
+def _project_type_map(
+    G: nx.DiGraph, project_name: str
+) -> dict[str, list[tuple[str, dict]]]:
+    """Rebuild the ``type → [(node_id, data)]`` map for one project in graph order.
+
+    Mirrors the grouping ``generate_wiki`` performs up front, so the resolver
+    (``node_to_wiki_path``) can replay the writer's dedup over the exact same
+    node set and iteration order.
+    """
+    type_map: dict[str, list[tuple[str, dict]]] = {}
+    for node_id, data in G.nodes(data=True):
+        if data.get("project", "_unknown") != project_name:
+            continue
+        ntype = data.get("type", "unknown")
+        type_map.setdefault(ntype, []).append((node_id, data))
+    return type_map
+
+
+def _iter_project_articles(
+    G: nx.DiGraph,
+    project_name: str,
+    type_map: dict[str, list[tuple[str, dict]]],
+) -> Iterator[tuple[str, dict, str, str]]:
+    """Yield ``(node_id, data, bucket, stem)`` for every per-node article of a
+    project, in write order, replaying the collision-salting.
+
+    Single source of truth for on-disk article filenames: both the writer
+    (``_write_project``) and the resolver (``node_to_wiki_path``) consume it, so
+    the salted stem a colliding node lands on can never drift between the two
+    (BH-W2). ``dedup_stem`` salts the *second* distinct node that maps to an
+    already-claimed ``<bucket>/<stem>`` key, so the class → entity → component
+    order below must match the writer's exactly.
+    """
+    claimed: dict[str, str] = {}
+    for node_id, data in type_map.get("class", []):
+        label = data.get("label") or node_id
+        annotations = data.get("annotations") or []
+        bucket = "controllers" if _is_controller(label, annotations) else "services"
+        stem = dedup_stem(_safe_filename(label), node_id, claimed, bucket)
+        yield node_id, data, bucket, stem
+    for node_id, data in type_map.get("entity", []):
+        label = data.get("label") or node_id
+        stem = dedup_stem(_safe_filename(label), node_id, claimed, "entities")
+        yield node_id, data, "entities", stem
+    for node_id, data in type_map.get("component", []):
+        label = data.get("label") or node_id
+        stem = dedup_stem(_safe_filename(label), node_id, claimed, "components")
+        yield node_id, data, "components", stem
+
+
 def node_to_wiki_path(G: nx.DiGraph, node_id: str) -> str | None:
     """Map a graph node to its wiki article path (relative to ``wiki/``).
 
@@ -88,19 +139,19 @@ def node_to_wiki_path(G: nx.DiGraph, node_id: str) -> str | None:
         return None
     data = G.nodes[node_id]
     ntype = data.get("type", "")
-    project = data.get("project", "") or "_"
-    label = data.get("label", node_id)
-    filename = f"{_safe_filename(label)}.md"
-
-    if ntype == "class":
-        annotations = data.get("annotations", []) or []
-        bucket = "controllers" if _is_controller(label, annotations) else "services"
-        return f"{project}/{bucket}/{filename}"
-    if ntype == "entity":
-        return f"{project}/entities/{filename}"
-    if ntype == "component":
-        return f"{project}/components/{filename}"
-    # route, external, concept, document, paper — no dedicated wiki article
+    if ntype not in ("class", "entity", "component"):
+        # route, external, concept, document, paper — no dedicated wiki article
+        return None
+    project = data.get("project", "_unknown")
+    # Replay the writer's per-project dedup so the returned filename matches the
+    # file actually on disk. Deriving the stem statelessly from the label alone
+    # would always return the FIRST (unsalted) article, silently handing back the
+    # wrong node's documentation when two same-bucket nodes share a label (BH-W2).
+    for nid, _d, bucket, stem in _iter_project_articles(
+        G, project, _project_type_map(G, project)
+    ):
+        if nid == node_id:
+            return f"{project}/{bucket}/{stem}.md"
     return None
 
 
@@ -111,31 +162,44 @@ _ENTITY_TYPES = frozenset({"entity"})
 
 
 def _predecessors_labels(G: nx.DiGraph, node_id: str, relations: frozenset[str]) -> list[str]:
-    """Labels of predecessors connected via the given relation types."""
+    """Labels of predecessors connected via the given relation types.
+
+    A ``None`` / empty label falls back to the node id (never ``None``), so the
+    templates that ``sorted()``/format this list can't hit a str-vs-None
+    TypeError (G06).
+    """
     result = []
     for pred in G.predecessors(node_id):
         edge_data = G.edges[pred, node_id]
         if edge_data.get("relation") in relations:
-            result.append(G.nodes[pred].get("label", pred))
+            result.append(G.nodes[pred].get("label") or pred)
     return result
 
 
 def _successors_labels(G: nx.DiGraph, node_id: str, relations: frozenset[str]) -> list[str]:
-    """Labels of successors connected via the given relation types."""
+    """Labels of successors connected via the given relation types.
+
+    ``None``/empty labels coerce to the node id so downstream sort/format never
+    sees ``None`` (G06).
+    """
     result = []
     for succ in G.successors(node_id):
         edge_data = G.edges[node_id, succ]
         if edge_data.get("relation") in relations:
-            result.append(G.nodes[succ].get("label", succ))
+            result.append(G.nodes[succ].get("label") or succ)
     return result
 
 
 def _related_entities(G: nx.DiGraph, node_id: str) -> list[str]:
-    """Entity node labels reachable via imports/calls edges."""
+    """Entity node labels reachable via imports/calls edges.
+
+    ``None``/empty labels coerce to the node id so downstream sort/format never
+    sees ``None`` (G06).
+    """
     result = []
     for succ in G.successors(node_id):
         if G.nodes[succ].get("type") in _ENTITY_TYPES:
-            result.append(G.nodes[succ].get("label", succ))
+            result.append(G.nodes[succ].get("label") or succ)
     return result
 
 
@@ -233,7 +297,9 @@ def generate_wiki(
 
         for node_id, data in type_map.get("class", []):
             annotations = data.get("annotations", [])
-            if not _is_controller(data.get("label", ""), annotations):
+            # Coerce a None label to the node id before _is_controller so one
+            # mis-shaped node can't abort the whole export (G06).
+            if not _is_controller(data.get("label") or node_id, annotations):
                 service_count += 1
             fw = data.get("framework", "")
             if fw:
@@ -350,6 +416,33 @@ def _downgrade_dead_links(wiki_dir: Path) -> None:
                 md.write_text(new, encoding="utf-8")
 
 
+# ── Controller route matching ─────────────────────────────────────────────────
+
+# Method separators across frameworks: Spring/NestJS/ASP.NET ``Class.method``,
+# ``Class#method``, Laravel ``Class@method``. A bare ``Class`` (Laravel array
+# syntax ``[UserController::class, 'index']``, invokable / bare-function
+# handlers) has none of these.
+_HANDLER_METHOD_SEPS = (".", "#", "@")
+
+
+def _route_handler_class(handler: str) -> str:
+    """Declaring-class segment of a route handler, for controller route matching.
+
+    Route node labels are built as ``<handler> [<VERB> <path>]`` (build.py:137).
+    ``<handler>`` is ``Class.method`` / ``Class#method`` / ``Class@method`` or a
+    bare ``Class``. Strip the ``[VERB path]`` suffix first, then peel off the
+    method after any separator, so a controller lists its OWN routes for every
+    framework — not just dot-handler ones. Matching on ``split(".")[0]`` alone
+    left the whole ``"UserController [GET /users]"`` label intact for a non-dot
+    handler, so it never equalled the bare ``UserController`` class label and the
+    controller article silently dropped every route (BH-W3).
+    """
+    pre = handler.split(" [", 1)[0]
+    for sep in _HANDLER_METHOD_SEPS:
+        pre = pre.split(sep, 1)[0]
+    return pre
+
+
 # ── Per-project writer ────────────────────────────────────────────────────────
 
 def _write_project(
@@ -363,19 +456,23 @@ def _write_project(
     """Write all wiki files for one project."""
     proj_dir.mkdir(parents=True, exist_ok=True)
 
-    # Lowercased "<bucket>/<stem>" → node_id, so two same-bucket labels differing
-    # only by case don't overwrite each other on a case-insensitive filesystem
-    # (graphify #1453/#1504). Filenames are keyed on the label, not the node id;
-    # a real collision salts the second file so both articles survive.
-    claimed: dict[str, str] = {}
+    # node_id → (bucket, on-disk stem), computed via the same iterator
+    # node_to_wiki_path replays. Salting the second of two same-bucket labels
+    # that collide on a case-insensitive filesystem (graphify #1453/#1504) now
+    # happens in exactly one place, so writer and resolver can never disagree on
+    # which file a node owns (BH-W2).
+    stem_of = {
+        nid: (bucket, stem)
+        for nid, _d, bucket, stem in _iter_project_articles(G, project_name, type_map)
+    }
 
     controllers: list[str] = []
     services: list[str] = []
 
     # Class nodes → controller or service
     for node_id, data in type_map.get("class", []):
-        label = data.get("label", node_id)
-        annotations = data.get("annotations", [])
+        label = data.get("label") or node_id
+        annotations = data.get("annotations") or []
         methods = data.get("methods", [])
         dependencies = data.get("dependencies", [])
         source_file = relativize_source_file(data.get("source_file", ""), project_root)
@@ -386,10 +483,18 @@ def _write_project(
 
         if _is_controller(label, annotations):
             controllers.append(label)
-            # Gather routes for this controller
+            # Gather routes for this controller. Match the route handler's class
+            # segment EXACTLY — a plain `label in handler` substring test
+            # fabricated routes from any controller whose name is a superstring
+            # (UserController ⊂ AdminUserController), then misattributed them to
+            # this article's source file (BH-W3). `_route_handler_class` peels the
+            # class off the `<handler> [<VERB> <path>]` route label across every
+            # framework's method separator (and bare handlers), so a controller
+            # keeps its OWN routes even when the handler has no dot (Laravel array
+            # / invokable / bare-function handlers).
             ctrl_routes = [
                 r for r in routes_by_project.get(project_name, [])
-                if label in r.get("handler", "")
+                if _route_handler_class(r.get("handler") or "") == label
             ]
             content = templates.controller_article(
                 label=label,
@@ -399,8 +504,7 @@ def _write_project(
                 calls=calls,
                 project_name=project_name,
             )
-            stem = dedup_stem(_safe_filename(label), node_id, claimed, "controllers")
-            _write_file(proj_dir / "controllers" / f"{stem}.md", content)
+            _write_file(proj_dir / "controllers" / f"{stem_of[node_id][1]}.md", content)
         else:
             services.append(label)
             entities = _related_entities(G, node_id)
@@ -415,13 +519,12 @@ def _write_project(
                 annotations=annotations,
                 project_name=project_name,
             )
-            stem = dedup_stem(_safe_filename(label), node_id, claimed, "services")
-            _write_file(proj_dir / "services" / f"{stem}.md", content)
+            _write_file(proj_dir / "services" / f"{stem_of[node_id][1]}.md", content)
 
     # Entity nodes
     entity_names: list[str] = []
     for node_id, data in type_map.get("entity", []):
-        label = data.get("label", node_id)
+        label = data.get("label") or node_id
         entity_names.append(label)
         table_name = data.get("table_name", "")
         fields = data.get("fields", [])
@@ -440,13 +543,12 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        stem = dedup_stem(_safe_filename(label), node_id, claimed, "entities")
-        _write_file(proj_dir / "entities" / f"{stem}.md", content)
+        _write_file(proj_dir / "entities" / f"{stem_of[node_id][1]}.md", content)
 
     # Component nodes
     component_names: list[str] = []
     for node_id, data in type_map.get("component", []):
-        label = data.get("label", node_id)
+        label = data.get("label") or node_id
         component_names.append(label)
         props = data.get("props", [])
         hooks = data.get("hooks", [])
@@ -467,8 +569,7 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        stem = dedup_stem(_safe_filename(label), node_id, claimed, "components")
-        _write_file(proj_dir / "components" / f"{stem}.md", content)
+        _write_file(proj_dir / "components" / f"{stem_of[node_id][1]}.md", content)
 
     # Detect framework from any node in this project
     framework = ""

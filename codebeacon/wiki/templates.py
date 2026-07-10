@@ -13,14 +13,46 @@ from codebeacon.common.safety import safe_wiki_filename
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _md_cell(value: str) -> str:
+    """Escape a value for a GFM table cell that is wrapped in a code span.
+
+    Only ``|`` needs escaping here: it opens a new column even inside a code
+    span, silently truncating the row and dropping later columns (a
+    regex-alternation route path such as Spring's ``/user/{id:[0-9]+|new}`` is
+    the realistic trigger — BH-S3). GFM's table parser rewrites ``\\|`` back to a
+    literal pipe before the code span is read, so the value still renders whole.
+    ``]``/backtick are deliberately left untouched: a backslash is literal inside
+    a code span, so escaping them there would only leak the backslash, and none
+    occurs in a real method/path/handler/file cell.
+
+    Coerces to ``str`` first so a mis-shaped route dict carrying ``None`` renders
+    as the old f-string did (``None``) instead of raising (G06).
+    """
+    return str(value).replace("|", "\\|")
+
+
+def _md_link_text(value: str) -> str:
+    """Escape a value used as inline-link display text ``[<value>](...)``.
+
+    An unbalanced ``[`` / ``]`` closes the display text early and drops the link
+    (``[page [GET /signup]](...)`` → broken). Real class/entity/component labels
+    are source identifiers and never contain brackets, so this is defensive, but
+    page-component labels and future graph sources can (BH-S3). Coerces to
+    ``str`` so a ``None`` slipping through can't raise (G06).
+    """
+    return str(value).replace("[", "\\[").replace("]", "\\]")
+
+
 def _rel_link(label: str, project: str) -> str:
     """Produce a relative markdown link (same project).
 
     The link target must be the exact stem the generator writes the file
     under (``safe_wiki_filename``) — space-encoding alone left links to any
     label with `#`, parentheses, generics, etc. pointing at missing files.
+    The display text is bracket-escaped so a label with `[`/`]` can't break the
+    link syntax (BH-S3).
     """
-    return f"[{label}](./{safe_wiki_filename(label)}.md)"
+    return f"[{_md_link_text(label)}](./{safe_wiki_filename(label)}.md)"
 
 
 def _back_link(project_name: str) -> str:
@@ -306,10 +338,13 @@ def routes_summary(
             continue
         lines += [f"## {project_name}", "", f"| Method | Path | Handler | File |", "| --- | --- | --- | --- |"]
         for r in sorted(routes, key=lambda x: (x.get("path", ""), x.get("method", ""))):
-            method = r.get("method", "")
-            path = r.get("path", "")
-            handler = r.get("handler", "")
-            sf = r.get("source_file", "")
+            # Pipe-escape each cell: an unescaped `|` in a regex-constrained
+            # route path (Spring/ASP.NET/Express alternation) otherwise opens a
+            # phantom column and drops the File cell entirely (BH-S3).
+            method = _md_cell(r.get("method", ""))
+            path = _md_cell(r.get("path", ""))
+            handler = _md_cell(r.get("handler", ""))
+            sf = _md_cell(r.get("source_file", ""))
             lines.append(f"| `{method}` | `{path}` | `{handler}` | `{sf}` |")
         lines.append("")
 
@@ -359,9 +394,10 @@ def project_index(
             continue
         lines += [f"## {heading}", ""]
         for name in sorted(names):
-            # Link target uses the same transform the generator names the
-            # file with; the display text stays the raw label.
-            lines.append(f"- [{bucket}/{name}](./{bucket}/{safe_wiki_filename(name)}.md)")
+            # Link target uses the same transform the generator names the file
+            # with; the display text stays the raw label but is bracket-escaped
+            # so a label with `[`/`]` can't break the link (BH-S3).
+            lines.append(f"- [{bucket}/{_md_link_text(name)}](./{bucket}/{safe_wiki_filename(name)}.md)")
         lines.append("")
 
     lines += ["---", "_Back to [index.md](../index.md)_"]

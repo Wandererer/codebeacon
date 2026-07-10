@@ -27,6 +27,23 @@
 
 ---
 
+## 0.6.9 새 소식
+
+역대 최대 규모의 감사 릴리스입니다: 이중 업스트림 패리티 스윕(codesight 트래커 최초 전체 감사 + graphify v0.9.4–v0.9.12 / 이슈 #1776까지)에 codebeacon 자체에 대한 독립 멀티에이전트 버그 헌트를 결합했습니다. 모든 후보를 수정 전에 재현하고, 모든 수정을 mutation 테스트했으며, 적대적 2차 리뷰가 수정 자체를 공격해 출시 전에 추가 구멍 18개를 잡아냈습니다. **실제 버그 48건 수정.**
+
+- **이제 CLAUDE.md가 안전합니다** — 손으로 작성한 CLAUDE.md(예: `/init` 산출물)에서 병합 단계가 사용자의 `## Architecture` / `## Common Commands` 섹션을 codebeacon 출력으로 오인해 삭제할 수 있었습니다. 이제 스트립은 codebeacon 생성물로 확실히 판별되는 파일에서만, 생성 블록에 앵커링되어 동작합니다 — 사용자 섹션은 살아남습니다. `codebeacon.yaml`도 원자적으로(심링크 관통·파일 모드 보존 포함) 기록되어, 중단된 쓰기가 손수 관리한 설정을 파괴할 수 없습니다.
+- **파일이 인덱스에서 조용히 사라지지 않습니다** — 대문자 확장자(`App.PY`, `Page.TSX`)가 무시됐고, 자격증명 이름을 딴 소스 모듈(`api_key_manager.go`, `access_token_service.py`)이 시크릿 파일 휴리스틱에 걸려 탈락했으며, `.gitignore`의 비 UTF-8 바이트 하나가 스캔 전체를 중단시켰고, `build/`나 `dist/`라는 폴더 아래에 체크아웃한 리포는 아티팩트 필터가 상위 디렉토리까지 매칭해 **그래프 전체가 소거**됐습니다. 모두 수정했고, 건너뛴 심링크는 침묵 대신 그룹화된 경고 한 줄을 남깁니다.
+- **`.gitignore` 처리가 git과 정확히 일치합니다** — 부정 패턴 시맨틱(`dir/` + `!dir/keep.txt`)을 모든 규칙 형태에 대해 `git check-ignore`와 differential 테스트했습니다. git과 똑같이, 제외된 디렉토리 아래의 파일은 다시 포함될 수 없습니다. 표준 구출 관용구 `dir/*` + `!dir/keep`은 종전대로 동작합니다.
+- **동명 프로젝트가 공존합니다** — `frontend`라는 이름의 하위 프로젝트 두세 개가 하나로 합쳐지곤 했습니다: 노드 ID 충돌로 라우트가 조용히 소실되고 wiki/obsidian 폴더가 서로 덮어썼습니다. 중복 이름은 이제 부모 디렉토리 접두사로 자동 구별됩니다.
+- **라우트 추출 정확성 전면 정비** — Express `app.use('/api', router)` 마운트 프리픽스가 적용되고 체인 `router.route(x).get().post()`가 모든 verb를 산출합니다. Flask `register_blueprint` / FastAPI `include_router` 프리픽스가 파일 내 위치에 의존하지 않습니다. Spring `@RequestMapping(method = RequestMethod.X)`가 `ANY` 대신 실제 verb를 기록합니다. Next.js catch-all(`[...slug]`)이 더는 깨지지 않고 `@slot` 병렬 라우트가 URL에서 제거됩니다. Laravel의 교과서적 `class X extends Model`이 드디어 엔티티를 생성합니다(이전엔 완전 수식된 베이스만 매칭 — `ViewModel`은 이제 걸러냅니다).
+- **유령 그래프 엣지 제거** — 소문자 경로 import가 무관한 `Config` 클래스에 `CONFIG`를 케이스폴딩으로 오연결하던 가짜 god-node 패턴이 사라졌고, import가 언어 경계를 넘어 바인딩되지 않으며(`import time` → `time.ts`), DI 바인딩은 아무 프로젝트의 동명 클래스가 아니라 등록한 프로젝트를 우선하고, 한 디렉토리의 동명 service + entity가 단일 노드로 합쳐지지 않습니다.
+- **Export가 Windows-안전 + 크래시-안전** — obsidian 노트 이름이 Windows 불법 문자 전체를 제거하고(Flask `<string:id>` 라우트가 Windows에서 export를 중단시켰습니다) 예약 장치 이름을 방어합니다. `None` 라벨이 wiki·call-flow HTML·obsidian exporter를 더는 크래시시키지 않습니다. git hook이 LF 개행으로 기록되어 Windows에서도 실행되고, 긴 프로젝트 이름이 파일시스템 한계를 넘지 않습니다.
+- **입력 하나가 장수명 프로세스를 죽일 수 없습니다** — MCP 서버가 잘못된 JSON-RPC 메시지에 죽지 않고 살아남습니다. 손상된 `beacon.json`이나 AST 캐시(잘못된 UTF-8, null/기형 컬렉션 포함)는 백업 후 명확히 보고되며 `affected`·`serve`·머지 드라이버를 크래시시키지 않습니다.
+- **바이트 단위 재현 가능한 출력** — 노드 순서가 스레드 완료 순서를 따라가지 않고 공유 엔티티 주석이 정렬되어, 변경 없는 트리를 두 번 스캔하면 `beacon.json`·wiki·CLAUDE.md가 바이트 단위로 동일합니다. graspologic API 변경으로 조용히 죽어 있던(한 번도 실행되지 못한) Leiden 클러스터링 백엔드도 복구했습니다.
+- **작성한 설정이 실제로 적용됩니다** — 문서화된 `codebeacon.yaml` 설정(`wave.*`, `output.wiki/obsidian`, `context_map.targets`, `semantic.enabled`)이 파싱만 되고 무시됐는데, 이제 파이프라인을 실제로 제어합니다. 워크스페이스 안에서 `--list-only`가 존중되고, `codebeacon upgrade`가 uv venv 설치에 맞는 명령을 안내합니다. 덤으로 CLAUDE.md의 Projects 표·Notes 열·Architecture 섹션이 하나의 "Services" 수치로 일치하며 wiki와도 맞습니다.
+
+---
+
 ## 0.6.8 새 소식
 
 업스트림 v0.8.41–v0.9.3(보고된 이슈 #1568까지)에 대한 graphify-패리티 감사입니다. 모든 후보를 수정 전에 codebeacon에서 실제로 재현하고 적대적 리뷰 패스로 재검증했으며, **7개의 실제 버그**를 확인했습니다 — 데이터 손실 함정과 프라이버시 유출이 핵심입니다.

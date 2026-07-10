@@ -142,8 +142,8 @@ def run_pipeline(projects, output_dir: str, args) -> int:
             wave = auto_wave(
                 project=project,
                 files=files,
-                chunk_size=300,
-                max_parallel=5,
+                chunk_size=getattr(args, "wave_chunk_size", None) or 300,
+                max_parallel=getattr(args, "wave_max_parallel", None) or 5,
                 cache=cache,
                 progress_callback=progress,
                 semantic=getattr(args, "semantic", False),
@@ -237,36 +237,48 @@ def run_pipeline(projects, output_dir: str, args) -> int:
     # project_name → absolute root, so wiki/obsidian emit relative source paths (#1417)
     project_roots = {p.name: p.path for p in projects}
 
+    # Which exporters run is gated by output.* in codebeacon.yaml, wired onto
+    # `args` by _cmd_sync (getattr defaults keep the plain-scan path writing
+    # everything). context_map.targets picks which of CLAUDE.md/.cursorrules/
+    # AGENTS.md get written.
+    obsidian_dir = getattr(args, "obsidian_dir", None)
+    gen_wiki = getattr(args, "output_wiki", True)
+    gen_obsidian = getattr(args, "output_obsidian", True)
+    context_targets = getattr(args, "context_map_targets", None)
+
     # Wiki generation (always runs — whether full scan or --wiki-only)
-    print("  Generating wiki ...")
-    from codebeacon.wiki.generator import generate_wiki
-    generate_wiki(G, communities, output_dir, project_roots=project_roots)
-    print(f"    Wiki written to {output_dir}/wiki/")
+    if gen_wiki:
+        print("  Generating wiki ...")
+        from codebeacon.wiki.generator import generate_wiki
+        generate_wiki(G, communities, output_dir, project_roots=project_roots)
+        print(f"    Wiki written to {output_dir}/wiki/")
 
     # Obsidian vault generation
-    obsidian_dir = getattr(args, "obsidian_dir", None)
-    print("  Generating Obsidian vault ...")
-    from codebeacon.export.obsidian import generate_obsidian_vault, VaultNotOwnedError
-    try:
-        n_notes = generate_obsidian_vault(
-            G, communities, output_dir, obsidian_dir=obsidian_dir, project_roots=project_roots
-        )
-    except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
-        print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
-        n_notes = 0
-    print(f"    {n_notes} notes written to {obsidian_dir or output_dir + '/obsidian'}/")
+    if gen_obsidian:
+        print("  Generating Obsidian vault ...")
+        from codebeacon.export.obsidian import generate_obsidian_vault, VaultNotOwnedError
+        try:
+            n_notes = generate_obsidian_vault(
+                G, communities, output_dir, obsidian_dir=obsidian_dir, project_roots=project_roots
+            )
+        except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
+            print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
+            n_notes = 0
+        print(f"    {n_notes} notes written to {obsidian_dir or output_dir + '/obsidian'}/")
 
     # Context Map generation (CLAUDE.md / .cursorrules / AGENTS.md)
-    print("  Generating context map ...")
-    from codebeacon.contextmap.generator import generate_context_map
-    written = generate_context_map(
-        G=G,
-        output_dir=output_dir,
-        projects=projects,
-        obsidian_dir=obsidian_dir,
-    )
-    for path in written:
-        print(f"    {path}")
+    if context_targets is None or context_targets:
+        print("  Generating context map ...")
+        from codebeacon.contextmap.generator import generate_context_map
+        written = generate_context_map(
+            G=G,
+            output_dir=output_dir,
+            projects=projects,
+            obsidian_dir=obsidian_dir,
+            targets=context_targets,
+        )
+        for path in written:
+            print(f"    {path}")
 
     print(f"\n  Output: {output_dir}")
     if wiki_only:
@@ -374,6 +386,16 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     wiki_only = getattr(args, "wiki_only", False)
     obsidian_dir = getattr(args, "obsidian_dir", None)
 
+    # Exporter gates + wave sizing from codebeacon.yaml (wired onto `args` by
+    # _cmd_sync). getattr defaults preserve the plain --deep-dive scan path,
+    # which has no config and writes every exporter at the default wave size.
+    gen_wiki = getattr(args, "output_wiki", True)
+    gen_obsidian = getattr(args, "output_obsidian", True)
+    context_targets = getattr(args, "context_map_targets", None)
+    gen_context = context_targets is None or bool(context_targets)
+    wave_chunk_size = getattr(args, "wave_chunk_size", None) or 300
+    wave_max_parallel = getattr(args, "wave_max_parallel", None) or 5
+
     if len(projects) <= 1:
         print(
             "Warning: --deep-dive with a single project produces identical per-project "
@@ -418,8 +440,8 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 wave = auto_wave(
                     project=project,
                     files=files,
-                    chunk_size=300,
-                    max_parallel=5,
+                    chunk_size=wave_chunk_size,
+                    max_parallel=wave_max_parallel,
                     cache=cache,
                     progress_callback=progress,
                     semantic=getattr(args, "semantic", False),
@@ -483,6 +505,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
             write_project_artifact_outputs(
                 G, communities, group_projects, proj_output_dir, label=label,
+                wiki=gen_wiki, obsidian=gen_obsidian, targets=context_targets,
             )
     else:
         for group_root, group_projects in grouped:
@@ -544,6 +567,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
             write_project_artifact_outputs(
                 G, communities, group_projects, proj_output_dir, label=label,
+                wiki=gen_wiki, obsidian=gen_obsidian, targets=context_targets,
             )
 
     # ── Phase 3: Combined workspace graph + outputs ────────────────────────────
@@ -623,31 +647,35 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             print(f"    Warning: workspace HTML export failed: {exc}", file=sys.stderr)
 
     workspace_roots = {p.name: p.path for p in projects}
-    print("  Generating combined wiki ...")
-    generate_wiki(G_all, communities_all, workspace_output_dir, project_roots=workspace_roots)
-    print(f"    Wiki written to {workspace_output_dir}/wiki/")
+    if gen_wiki:
+        print("  Generating combined wiki ...")
+        generate_wiki(G_all, communities_all, workspace_output_dir, project_roots=workspace_roots)
+        print(f"    Wiki written to {workspace_output_dir}/wiki/")
 
-    from codebeacon.export.obsidian import VaultNotOwnedError
-    print("  Generating combined Obsidian vault ...")
-    try:
-        n_notes = generate_obsidian_vault(
-            G_all, communities_all, workspace_output_dir,
-            obsidian_dir=obsidian_dir, project_roots=workspace_roots,
+    if gen_obsidian:
+        from codebeacon.export.obsidian import VaultNotOwnedError
+        print("  Generating combined Obsidian vault ...")
+        try:
+            n_notes = generate_obsidian_vault(
+                G_all, communities_all, workspace_output_dir,
+                obsidian_dir=obsidian_dir, project_roots=workspace_roots,
+            )
+        except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
+            print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
+            n_notes = 0
+        print(f"    {n_notes} notes written to {obsidian_dir or workspace_output_dir + '/obsidian'}/")
+
+    if gen_context:
+        print("  Generating combined context map ...")
+        written = generate_context_map(
+            G=G_all,
+            output_dir=workspace_output_dir,
+            projects=projects,
+            obsidian_dir=obsidian_dir,
+            targets=context_targets,
         )
-    except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
-        print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
-        n_notes = 0
-    print(f"    {n_notes} notes written to {obsidian_dir or workspace_output_dir + '/obsidian'}/")
-
-    print("  Generating combined context map ...")
-    written = generate_context_map(
-        G=G_all,
-        output_dir=workspace_output_dir,
-        projects=projects,
-        obsidian_dir=obsidian_dir,
-    )
-    for path in written:
-        print(f"    {path}")
+        for path in written:
+            print(f"    {path}")
 
     print(f"\n  Output: {workspace_output_dir}")
     if wiki_only:
@@ -664,6 +692,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
 def write_project_artifact_outputs(
     G, communities, projects, proj_output_dir: str, label: str | None = None,
+    wiki: bool = True, obsidian: bool = True, targets: list | None = None,
 ) -> None:
     """Write wiki, obsidian, and context map for one project group's output dir.
 
@@ -671,6 +700,9 @@ def write_project_artifact_outputs(
     repo may contain several — landing/server/desktop in one monorepo). The
     obsidian vault always lands inside proj_output_dir/obsidian/ (no custom
     path), keeping each group self-contained under its own .codebeacon/.
+
+    ``wiki``/``obsidian``/``targets`` gate the three exporters from
+    codebeacon.yaml's ``output.*`` (defaults keep every exporter on).
     """
     from codebeacon.wiki.generator import generate_wiki
     from codebeacon.export.obsidian import generate_obsidian_vault
@@ -680,20 +712,24 @@ def write_project_artifact_outputs(
     label = label or (projects[0].name if projects else "?")
     project_roots = {p.name: p.path for p in projects}
 
-    print(f"  [{label}] Generating wiki ...")
-    generate_wiki(G, communities, proj_output_dir, project_roots=project_roots)
+    if wiki:
+        print(f"  [{label}] Generating wiki ...")
+        generate_wiki(G, communities, proj_output_dir, project_roots=project_roots)
 
-    print(f"  [{label}] Generating Obsidian vault ...")
-    generate_obsidian_vault(
-        G, communities, proj_output_dir, obsidian_dir=None, project_roots=project_roots
-    )
+    if obsidian:
+        print(f"  [{label}] Generating Obsidian vault ...")
+        generate_obsidian_vault(
+            G, communities, proj_output_dir, obsidian_dir=None, project_roots=project_roots
+        )
 
-    print(f"  [{label}] Generating context map ...")
-    written = generate_context_map(
-        G=G,
-        output_dir=proj_output_dir,
-        projects=projects,
-        obsidian_dir=None,
-    )
-    for path in written:
-        print(f"    {path}")
+    if targets is None or targets:
+        print(f"  [{label}] Generating context map ...")
+        written = generate_context_map(
+            G=G,
+            output_dir=proj_output_dir,
+            projects=projects,
+            obsidian_dir=None,
+            targets=targets,
+        )
+        for path in written:
+            print(f"    {path}")

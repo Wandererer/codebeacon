@@ -532,11 +532,21 @@ def _error(req_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def _dispatch(idx: BeaconIndex, message: dict) -> dict | None:
+def _dispatch(idx: BeaconIndex, message: Any) -> dict | None:
     """Dispatch a single JSON-RPC 2.0 message; return response dict or None."""
+    if not isinstance(message, dict):
+        # Valid JSON but not a JSON-RPC request object (array/string/number/…).
+        # A top-level array is the JSON-RPC 2.0 batch envelope, which we don't
+        # support. Reply with Invalid Request rather than crashing on .get().
+        return _error(None, -32600, "Invalid Request: expected a JSON object")
     req_id = message.get("id")
     method = message.get("method", "")
-    params = message.get("params") or {}
+    params = message.get("params")
+    if not isinstance(params, dict):
+        # `params` may legitimately be omitted/null, but a non-empty array or
+        # scalar would crash the ``params.get(...)`` calls below. Normalise any
+        # non-object params to an empty dict.
+        params = {}
 
     # Notifications (no id) — no response required
     if req_id is None:
@@ -616,6 +626,15 @@ def serve(beacon_dir: str | Path) -> None:
             _write({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {e}"}})
             continue
 
-        response = _dispatch(idx, message)
+        try:
+            response = _dispatch(idx, message)
+        except Exception as exc:
+            # A single malformed/unexpected request must never take down the
+            # long-lived server. Reply with a scoped internal error (echoing the
+            # id when the message is a dict) and keep serving the connection.
+            req_id = message.get("id") if isinstance(message, dict) else None
+            print(f"[codebeacon-mcp] dispatch error: {exc}", file=sys.stderr)
+            _write(_error(req_id, -32603, f"Internal error: {exc}"))
+            continue
         if response is not None:
             _write(response)

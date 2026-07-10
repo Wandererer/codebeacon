@@ -159,9 +159,10 @@ def _interpret_react(
 ) -> list[ComponentInfo]:
     """React/Next.js: exported uppercase functions/arrows + hooks + props."""
     components: dict[str, ComponentInfo] = {}  # name → ComponentInfo
-    hooks: list[str] = []
+    comp_ranges: dict[str, tuple[int, int] | None] = {}  # name → (start_byte, end_byte)
     props: list[str] = []
-    imports: list[str] = []
+    hook_sites: list[tuple[int, str]] = []    # (byte pos, hook name)
+    import_sites: list[tuple[int, str]] = []  # (byte pos, import path)
 
     for _idx, caps in matches:
         # Exported function component
@@ -169,7 +170,7 @@ def _interpret_react(
             if cap_key in caps:
                 name = node_text(caps[cap_key][0])
                 if name and name not in components:
-                    # Determine line from the parent export/declaration
+                    # Determine line + byte range from the parent export/declaration
                     parent_key = None
                     for k in ("component.export_func", "component.export_func_upper",
                               "component.export_default_func", "component.export_arrow",
@@ -180,19 +181,20 @@ def _interpret_react(
                         if k in caps:
                             parent_key = k
                             break
-                    line = caps[parent_key][0].start_point[0] + 1 if parent_key else 1
+                    parent = caps[parent_key][0] if parent_key else None
+                    line = parent.start_point[0] + 1 if parent else 1
                     components[name] = ComponentInfo(
                         name=name,
                         source_file=file_path,
                         line=line,
                         framework=framework,
                     )
+                    comp_ranges[name] = (parent.start_byte, parent.end_byte) if parent else None
 
-        # Hooks
+        # Hooks — record call site so it can be scoped to its enclosing component
         if "hook.name" in caps:
-            hook_name = node_text(caps["hook.name"][0])
-            if hook_name not in hooks:
-                hooks.append(hook_name)
+            node = caps["hook.name"][0]
+            hook_sites.append((node.start_byte, node_text(node)))
 
         # Props destructuring
         if "prop.name" in caps:
@@ -203,18 +205,43 @@ def _interpret_react(
 
         # Imports (for imported component tracking)
         if "import.path" in caps:
-            path = node_text(caps["import.path"][0]).strip("'\"")
-            if path not in imports and not path.startswith("."):
-                imports.append(path)
+            node = caps["import.path"][0]
+            path = node_text(node).strip("'\"")
+            if not path.startswith("."):
+                import_sites.append((node.start_byte, path))
 
-    # Assign file-level hooks/imports to all components.
+    def _owner(pos: int) -> str | None:
+        """Innermost component whose byte range encloses ``pos`` (None if file-level)."""
+        best: str | None = None
+        best_start = -1
+        for cname, rng in comp_ranges.items():
+            if rng is None:
+                continue
+            start, end = rng
+            if start <= pos <= end and start > best_start:
+                best, best_start = cname, start
+        return best
+
+    # A hook/import enclosed by a component belongs only to that component; one that
+    # nothing encloses (e.g. a top-level import) is genuinely file-level and shared.
+    for pos, hname in hook_sites:
+        owner = _owner(pos)
+        targets = [components[owner]] if owner else list(components.values())
+        for c in targets:
+            if hname not in c.hooks:
+                c.hooks.append(hname)
+
+    for pos, ipath in import_sites:
+        owner = _owner(pos)
+        targets = [components[owner]] if owner else list(components.values())
+        for c in targets:
+            if ipath not in c.imports:
+                c.imports.append(ipath)
+
     # Props are assigned only to the first component (typically the main one).
     comp_list = list(components.values())
-    for i, comp in enumerate(comp_list):
-        comp.hooks = hooks[:]
-        comp.imports = imports[:]
-        if i == 0:
-            comp.props = props[:]
+    if comp_list:
+        comp_list[0].props = props[:]
 
     return comp_list
 

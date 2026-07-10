@@ -120,6 +120,11 @@ def test_upgrade_pip_without_pip_module_errors(monkeypatch, upgrade_env, capsys)
 
     monkeypatch.setattr(cli, "_detect_install_kind", lambda: "pip")
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    # Pin the non-uv-venv branch. Otherwise this suite (which itself runs inside
+    # a uv-created .venv) would take the uv-specific branch and never print the
+    # pipx/uv-tool advice this test is about. The uv-venv branch has its own
+    # coverage in tests/test_audit_069_cli.py.
+    monkeypatch.setattr(cli, "_is_uv_venv", lambda: False)
     assert cli._cmd_upgrade(_args()) == 1
     assert upgrade_env == []  # nothing was executed
     err = capsys.readouterr().err

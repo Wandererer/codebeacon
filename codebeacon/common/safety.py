@@ -143,7 +143,14 @@ def safe_wiki_filename(label: str) -> str:
     transforms, any label with a character outside [-_.\\w] (spaces, `#`,
     parentheses, `<>` from generics) produced a file at one path and links
     pointing at another — every such link was dead on arrival.
+
+    A ``None`` label (a node whose ``label`` attribute is absent or explicitly
+    ``None``) short-circuits to ``"unnamed"`` instead of crashing on the
+    character iteration, so a single mis-shaped node can't abort the whole
+    wiki/obsidian export (G06).
     """
+    if not isinstance(label, str):
+        return "unnamed"
     cleaned = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
     return cap_filename(cleaned)
 

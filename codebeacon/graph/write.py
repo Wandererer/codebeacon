@@ -189,8 +189,35 @@ def load_beacon(beacon_path: str | Path) -> tuple[nx.DiGraph, dict]:
             f"{type(data).__name__}, expected object). It has been preserved with "
             f"a .corrupt suffix; re-run `codebeacon scan` to rebuild it."
         )
+    for coll in ("nodes", "links", "edges"):
+        if coll in data and not isinstance(data[coll], list):
+            # Present-but-non-list collection (e.g. JSON null) is structurally
+            # corrupt: node_link_graph would crash with a raw TypeError/KeyError
+            # that callers catching only ValueError (pipeline, serve) can't
+            # absorb. Route it through the same backup + ValueError path (#1536).
+            _backup_corrupt_beacon(path)
+            raise ValueError(
+                f"{path} is corrupt: '{coll}' is {type(data[coll]).__name__}, "
+                f"expected a list. It has been preserved with a .corrupt suffix; "
+                f"re-run `codebeacon scan` to rebuild it."
+            )
     meta = data.pop("meta", {})
-    return _load_with_edge_compat(data), meta
+    try:
+        graph = _load_with_edge_compat(data)
+    except (TypeError, KeyError, AttributeError, ValueError, nx.NetworkXError) as exc:
+        # Shape-enumeration is a losing game: the collection can be a list yet
+        # hold non-dict or malformed-dict elements (missing id/source/target)
+        # that make node_link_graph raise a raw TypeError/KeyError/AttributeError
+        # rather than a ValueError. Callers (serve, pipeline) catch only
+        # ValueError, so normalise ANY construction failure into the same
+        # backup + ValueError path as the other corruption checks (#1536).
+        _backup_corrupt_beacon(path)
+        raise ValueError(
+            f"{path} is corrupt: could not build a graph from it ({exc}). It has "
+            f"been preserved with a .corrupt suffix; re-run `codebeacon scan` to "
+            f"rebuild it."
+        ) from exc
+    return graph, meta
 
 
 def _backup_corrupt_beacon(path: Path) -> None:

@@ -48,6 +48,10 @@ class IgnoreMatcher:
 
     def __init__(self, lines: list[str]) -> None:
         self._rules: list[_Rule] = [r for r in (_parse_line(ln) for ln in lines) if r is not None]
+        # Memoised directory verdicts so a full walk stays ~O(files·rules) rather
+        # than O(files·depth·rules): the parent-directory recursion below queries
+        # the same ancestor dirs repeatedly (see :meth:`_dir_ignored`).
+        self._dir_cache: dict[str, bool] = {}
 
     @classmethod
     def from_file(cls, path: str | Path) -> "IgnoreMatcher":
@@ -60,32 +64,54 @@ class IgnoreMatcher:
     def is_ignored(self, rel_path: str, is_dir: bool = False) -> bool:
         """Return True if ``rel_path`` is ignored.
 
-        Semantics (closer to gitignore than naive last-match-wins):
+        Implements git's directory-first semantics exactly:
 
-        - A *self* match — the rule's pattern matches ``rel_path`` directly —
-          can flip the verdict either way (positive ignores, ``!`` un-ignores).
-        - A *positive ancestor* match — the rule matches an ancestor directory
-          of ``rel_path`` — implicitly ignores the descendant (gitignore's
-          "everything under an ignored directory is ignored too" rule).
-        - A *negation* matching only via an ancestor does **not** re-include
-          the descendant. Mirrors gitignore's rule that a child cannot be
-          re-included once its parent is excluded, and prevents parent-level
-          negations from silently overriding explicit positive ignores at
-          deeper paths (see codesight #42 / 0bedd0d). To opt into recursive
-          re-inclusion, write an explicit ``!path/**`` rule that self-matches
-          the descendants you want back.
+        - If the immediate parent **directory** is itself ignored, ``rel_path``
+          is ignored too and *cannot* be re-included — git: "It is not possible
+          to re-include a file if a parent directory of that file is excluded"
+          (``dir/`` + ``!dir/keep`` keeps ``keep`` out). The parent's verdict is
+          computed with this same rule, so the check is fully recursive.
+        - Otherwise the outcome is decided by the last rule whose pattern
+          *self*-matches ``rel_path`` (positive ignores, ``!`` un-ignores).
+
+        This distinguishes the two idioms git treats differently: ``dir/*`` /
+        ``*`` exclude a directory's *contents* (the dir itself stays included, so
+        ``!dir/keep`` / ``!important/**`` can re-include children), whereas
+        ``dir/`` / ``logs/`` exclude the *directory*, so nothing under it can be
+        re-included. It also preserves codesight #42: a parent-level ``!.source``
+        re-includes ``.source`` itself but a deeper positive ``.source/testfolder``
+        still self-matches and stays ignored.
         """
-        ancestors = _ancestor_dirs(rel_path)
+        if is_dir:
+            return self._dir_ignored(rel_path)
+        parent = _parent_dir(rel_path)
+        if parent and self._dir_ignored(parent):
+            return True
+        return self._self_verdict(rel_path, is_dir=False)
+
+    def _dir_ignored(self, rel_dir: str) -> bool:
+        """Recursive, memoised verdict for a directory path.
+
+        A directory is ignored if its own parent is ignored (git's sticky
+        exclusion) or the last self-matching rule for it is positive.
+        """
+        cached = self._dir_cache.get(rel_dir)
+        if cached is not None:
+            return cached
+        parent = _parent_dir(rel_dir)
+        if parent and self._dir_ignored(parent):
+            verdict = True
+        else:
+            verdict = self._self_verdict(rel_dir, is_dir=True)
+        self._dir_cache[rel_dir] = verdict
+        return verdict
+
+    def _self_verdict(self, rel_path: str, is_dir: bool) -> bool:
+        """Last-match-wins over rules that *self*-match ``rel_path`` directly."""
         result = False
         for rule in self._rules:
-            self_match = _matches(rule, rel_path) and (not rule.dir_only or is_dir)
-            anc_match = any(_matches(rule, anc) for anc in ancestors)
-            if self_match:
+            if _matches(rule, rel_path) and (not rule.dir_only or is_dir):
                 result = not rule.negate
-            elif anc_match and not rule.negate:
-                # Positive ancestor match is sticky; descendants stay ignored.
-                # Negation-via-ancestor deliberately does nothing here.
-                result = True
         return result
 
     def is_explicitly_included(self, rel_path: str, is_dir: bool = False) -> bool:
@@ -141,13 +167,13 @@ class IgnoreMatcher:
 _TRAILING_WS_RE = re.compile(r"(?<!\\)\s+$")
 
 
-def _ancestor_dirs(rel_path: str) -> list[str]:
-    """Return every directory component up to (but excluding) ``rel_path``.
+def _parent_dir(rel_path: str) -> str:
+    """Return the immediate parent directory of ``rel_path`` (``""`` if top-level).
 
-    For ``"a/b/c.ts"`` this returns ``["a", "a/b"]``.
+    For ``"a/b/c.ts"`` this returns ``"a/b"``; for ``"a"`` it returns ``""``.
     """
     segments = [s for s in rel_path.split("/") if s]
-    return ["/".join(segments[: i + 1]) for i in range(len(segments) - 1)]
+    return "/".join(segments[:-1])
 
 
 def _parse_line(raw: str) -> _Rule | None:

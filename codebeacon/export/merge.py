@@ -46,8 +46,20 @@ def merge_files(base_path: str, current_path: str, other_path: str) -> int:
     if other is None:
         return 0
 
-    merged = _union(current, other)
-    _write(current_path, merged)
+    try:
+        merged = _union(current, other)
+        _write(current_path, merged)
+    except Exception as exc:  # noqa: BLE001 — a merge driver must never exit non-zero
+        # _load rejects a non-list collection, but a list can still hold non-dict
+        # or malformed-dict elements: a line-level git merge of two node arrays
+        # can interleave into syntactically-valid JSON with structurally-broken
+        # entries that crash _union on ``n.get(...)``. The driver must always
+        # exit 0 so a graph regen never blocks a git merge — on any union/write
+        # failure, warn and leave current as-is (the survivor).
+        print(
+            f"[codebeacon merge-driver] union failed ({exc}); leaving current as-is",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -55,9 +67,23 @@ def merge_files(base_path: str, current_path: str, other_path: str) -> int:
 
 def _load(path: str) -> dict | None:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    # A syntactically-valid file that isn't a node_link_data object — a non-dict
+    # top-level, or a nodes/links/edges field that's present-but-not-a-list (e.g.
+    # JSON null) — is structurally corrupt: _union would crash on ``a.get(...)``
+    # or ``list(None)``, breaking the always-exit-0 contract. Treat it as
+    # unreadable so the survivor is used as-is (mirrors the edges `or []`
+    # tolerance already in _union).
+    if not isinstance(data, dict):
+        print(f"[codebeacon merge-driver] {path} is not a JSON object; treating as unreadable", file=sys.stderr)
+        return None
+    for coll in ("nodes", "links", "edges"):
+        if coll in data and not isinstance(data[coll], list):
+            print(f"[codebeacon merge-driver] {path}: '{coll}' is not a list; treating as unreadable", file=sys.stderr)
+            return None
+    return data
 
 
 def _write(path: str, payload: dict) -> None:

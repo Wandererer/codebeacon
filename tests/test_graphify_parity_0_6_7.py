@@ -55,6 +55,9 @@ class TestIgnoreNegationPruning:
         assert m.could_unignore_under("build") is False
 
     def test_end_to_end_rescue_without_descending_unrelated_dir(self, tmp_path):
+        """0.6.9 git parity update: the rescue uses git's idiom ``src/gen/*``
+        (exclude the *contents*, keep the dir), because ``src/gen/`` +
+        ``!src/gen/keep.ts`` no longer re-includes — see the test below."""
         root = tmp_path.resolve()
         (root / "src" / "gen").mkdir(parents=True)
         (root / "build" / "sub").mkdir(parents=True)
@@ -62,13 +65,29 @@ class TestIgnoreNegationPruning:
         (root / "src" / "gen" / "keep.ts").write_text("export const x = 1")
         (root / "build" / "junk.py").write_text("y = 2")
         (root / ".codebeaconignore").write_text(
-            "build/\nsrc/gen/\n!src/gen/keep.ts\n"
+            "build/\nsrc/gen/*\n!src/gen/keep.ts\n"
         )
         files = collect_files(str(root))
-        # The negated file is rescued even though its parent dir is ignored…
+        # The negated file is rescued (contents-excluded dir, git idiom)…
         assert any(f.endswith("keep.ts") for f in files)
         # …and the unrelated ignored subtree's files stay excluded.
         assert not any("junk" in f for f in files)
+        assert any(f.endswith("app.py") for f in files)
+
+    def test_no_reinclude_under_excluded_dir_end_to_end(self, tmp_path):
+        """0.6.9 git parity: with the *directory* excluded (``src/gen/``), an
+        explicit self-negation no longer rescues a file beneath it — matches
+        ``git check-ignore`` ("cannot re-include a file if a parent directory
+        is excluded"). Use ``src/gen/*`` + ``!src/gen/keep.ts`` like git."""
+        root = tmp_path.resolve()
+        (root / "src" / "gen").mkdir(parents=True)
+        (root / "src" / "gen" / "keep.ts").write_text("export const x = 1")
+        (root / "src" / "app.py").write_text("x = 1")
+        (root / ".codebeaconignore").write_text(
+            "src/gen/\n!src/gen/keep.ts\n"
+        )
+        files = collect_files(str(root))
+        assert not any(f.endswith("keep.ts") for f in files)
         assert any(f.endswith("app.py") for f in files)
 
 

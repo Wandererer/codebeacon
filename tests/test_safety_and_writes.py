@@ -66,7 +66,14 @@ class TestIgnoreMatcher:
         (["build/"], "build/foo.ts", False, True),
         (["build/"], "build/sub/x.ts", False, True),
         (["build/", "!build/keep.ts"], "build/foo.ts", False, True),
-        (["build/", "!build/keep.ts"], "build/keep.ts", False, False),
+        # 0.6.9 git parity: an excluded *directory* (`build/`) is sticky — an
+        # explicit self-negation no longer rescues a file beneath it (git:
+        # "cannot re-include a file if a parent directory is excluded").
+        (["build/", "!build/keep.ts"], "build/keep.ts", False, True),
+        # The git idiom for a rescue: exclude the *contents* (`build/*`), which
+        # leaves the dir itself included so `!build/keep.ts` can re-include.
+        (["build/*", "!build/keep.ts"], "build/keep.ts", False, False),
+        (["build/*", "!build/keep.ts"], "build/other.ts", False, True),
         (["generated"], "generated/auto.py", False, True),
         (["generated"], "src/manual.py", False, False),
         (["/secrets.txt"], "secrets.txt", False, True),

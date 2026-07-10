@@ -124,7 +124,12 @@ def _try_graspologic(G: nx.DiGraph) -> Optional[dict[str, int]]:
         if UG.number_of_edges() == 0:
             return None
 
-        communities, _ = leiden(UG)
+        # graspologic's leiden() returns a plain dict[node, community] (3.x);
+        # older/other builds returned a (partition, modularity) tuple. Accept
+        # both so the best backend actually runs instead of raising
+        # "too many values to unpack" and degrading to the Louvain fallback.
+        result = leiden(UG)
+        communities = result[0] if isinstance(result, tuple) else result
         return {str(k): int(v) for k, v in communities.items()}
     except ImportError:
         return None

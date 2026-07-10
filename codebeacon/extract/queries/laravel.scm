@@ -105,10 +105,23 @@
 
 ; ── Eloquent Model subclass ───────────────────────────────────────────────────
 
+; tree-sitter-php emits a bare (name) for `extends Model` and only wraps it in
+; (qualified_name ...) when the base is namespace-qualified (\Illuminate\...\Model),
+; so both branches are required — the qualified-only form missed the canonical
+; `class X extends Model`. The allowlist is an anchored ^…$ set (not an open
+; `…$` suffix): an unbounded suffix mis-promoted every non-Eloquent base whose
+; name merely ends in "Model" — spatie/laravel-view-models `extends ViewModel`,
+; `FormModel`, `BaseDataModel`, … — into false data-model entities. The set still
+; covers the common app-wide base-class convention (BaseModel, AbstractModel, …)
+; that a single-file query cannot resolve by ancestry.
 (class_declaration
   name: (name) @entity.class_name
   (base_clause
-    (qualified_name (name) @_base (#match? @_base "^(Model|Authenticatable)$"))
+    [
+      (name) @_base
+      (qualified_name (name) @_base)
+    ]
+    (#match? @_base "^(Model|Authenticatable|BaseModel|AbstractModel|BaseAuthenticatable)$")
   )
 ) @entity.model
 
