@@ -27,6 +27,21 @@
 
 ---
 
+## 0.7.0 新功能
+
+这是一次能力发布,而非 bug 清扫:codebeacon 新增了实时文件监视器,把你的设计笔记连入代码图,提供两个新的前端(用于 MCP 服务器的 npm 启动器和一个 GitHub Action),并收紧了默认索引的范围。每个功能都保持本地优先 — 核心 scan 依然不需要网络、不需要云、不需要模型。
+
+- **`codebeacon watch` 让索引保持实时** — 一个防抖的文件监视器(`codebeacon watch [path] [--debounce 2.0] [--once] [--exclude PATTERN]`)会在被监视的源文件发生变化时重新同步图。一阵编辑的爆发 — 一次 500 文件的 `git checkout`、一次分支切换 — 会合并成单次重新同步,而且监视器复用扫描器完全相同的忽略规则,因此写入索引这个动作绝不会把监视器唤醒进一个绕着它自己 `.codebeacon/` 输出打转的循环。需要新的可选 extra:`pip install 'codebeacon[watch]'`(watchdog)。
+- **设计笔记连入代码图** — 当索引已经存在时,`codebeacon knowledge` 现在会把它的笔记(ADR、会议记录、复盘、规范)写*进* `beacon.json`:一条显式的文件路径引用会成为可信的 `references` 边,而一次有辨识度的符号提及(`PaymentService`,绝不是光秃秃的 `User`)会成为一条 `AMBIGUOUS` 的 `mentions` 边 — 于是读取图的智能体就能了解一个 service *为什么* 是现在这个样子。由于 `codebeacon scan` 仅从源码重建代码图并丢弃这层叠加,**在一次 scan 之后重新运行 `codebeacon knowledge`** 以恢复这些链接。
+- **`beacon_knowledge` MCP 工具** — 一个新工具可按关键字搜索笔记,和/或列出连到某个给定代码节点的笔记,直接通过 MCP 暴露代码背后的决策脉络。
+- **用于 MCP 服务器的 npm 启动器** — `@codebeacon/mcp` 让 MCP 客户端以它们期待的 npx 优先方式启动服务器(`"command": "npx", "args": ["-y", "@codebeacon/mcp"]`)。这个零依赖的 Node 垫片会按 PATH → `uvx` → `pipx run` → `python3 -m codebeacon` 的顺序解析出一个能用的 codebeacon,并原封不动地转发 stdio。参见 [`npm/README.md`](npm/README.md)。(随 0.7.0 发布;尚未发布到 npm。)
+- **用于 PR 上下文的 GitHub Action** — 一个复合动作会在每个拉取请求上评论出你已提交的知识图中受影响的那一片:变更触及的 wiki 文章、上游的影响半径,以及它改动的任何高影响枢纽文件 — 一次面向 AI 时代评审的架构漂移检查。需要一个已提交的 `.codebeacon/` 索引、`fetch-depth: 0` 以及 `permissions: pull-requests: write`。参见 [`action/README.md`](action/README.md) 和 [`action/examples/pr-context.yml`](action/examples/pr-context.yml)。
+- **工作区的 CLAUDE.md 保持在约 200 行以内** — 在多项目工作区中,根 `CLAUDE.md` 现在只保留共享概览,并把每个项目的细节移入作用域化的 `.claude/rules/codebeacon-<project>.md` 文件,其 `paths:` frontmatter 仅在触及该项目的文件时才加载它们(遵循 Anthropic 自己关于上下文文件的指南)。单项目输出保持不变;设置 `output.context_map.rules_split: false` 可回到旧的单体文件。重复的项目行也会被合并。
+- **测试夹具默认被忽略** — 任意深度的 `tests/fixtures/`、`test/fixtures/` 和 `__fixtures__/` 现在默认被忽略,于是项目的合成测试输入不再把假的路由和 service 注入图中(codebeacon 自己的自扫描曾把一个夹具 `main.py` 报告成五条"路由")。这是优先级最低的规则,因此 `.codebeaconignore` 中的一行 `!tests/fixtures/` 可以把它们重新包含进来,而把一次 scan *对准* 一个夹具目录仍会收集它。
+- **Warp 路由提取现在是真的了** — Warp 的过滤器组合子路由现在真的会被提取:`warp::path!(...)` 和 `warp::path("x")` 段、方法组合子(`warp::get()` / `post()` / …),以及 `.map` / `.and_then` 处理器,会按各自所在的绑定被关联成完整的路由。诚实的限制(在查询头中写明):在一个绑定内用 `.or(...)` 连接的过滤器会塌缩成单条拼接的路由,而 `warp::path::param()` 过滤器调用段和闭包处理器仍未解析。
+
+---
+
 ## 0.6.9 新功能
 
 迄今为止规模最大的审计版本:一次双重的上游对齐扫查(对 codesight 追踪器的首次完整审计,外加 graphify v0.9.4–v0.9.12 / issue 直到 #1776),并结合了一次针对 codebeacon 自身的独立多智能体查错。每个候选项在修复前都先复现,每个修复都做了 mutation 测试,随后一轮对抗式二次复核又反过来攻击这些修复本身——在发布前又抓出 18 个漏洞。**修复 48 个真实 bug。**

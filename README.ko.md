@@ -27,6 +27,21 @@
 
 ---
 
+## 0.7.0 새 소식
+
+버그 스윕이라기보다 기능 릴리스입니다: codebeacon에 실시간 파일 워처가 생기고, 설계 노트를 코드 그래프에 연결하며, 두 개의 새 프런트엔드(MCP 서버용 npm 런처와 GitHub Action)를 제공하고, 기본으로 인덱싱하는 대상을 좁혔습니다. 모든 기능은 로컬 우선을 유지합니다 — 코어 스캔은 여전히 네트워크도, 클라우드도, 모델도 필요로 하지 않습니다.
+
+- **`codebeacon watch`가 인덱스를 실시간으로 유지합니다** — 디바운스된 파일 워처(`codebeacon watch [path] [--debounce 2.0] [--once] [--exclude PATTERN]`)가 감시 중인 소스 파일이 바뀔 때마다 그래프를 다시 동기화합니다. 편집 폭주 — 500개 파일 `git checkout`, 브랜치 전환 — 는 단일 재동기화로 합쳐지고, 워처가 스캐너의 정확히 동일한 무시 규칙을 재사용하므로 인덱스를 쓰는 동작이 자신의 `.codebeacon/` 출력을 도는 루프로 워처를 깨우는 일이 없습니다. 새 선택적 extra가 필요합니다: `pip install 'codebeacon[watch]'`(watchdog).
+- **설계 노트가 코드 그래프에 연결됩니다** — `codebeacon knowledge`가 인덱스가 이미 존재할 때 이제 노트(ADR, 회의록, 회고, 스펙)를 `beacon.json` *안에* 기록합니다: 명시적 파일 경로 참조는 신뢰된 `references` 엣지가 되고, 특징적인 심볼 언급(`PaymentService`, 맨 `User`은 절대 아님)은 `AMBIGUOUS` `mentions` 엣지가 됩니다 — 그래서 그래프를 읽는 에이전트가 어떤 service가 *왜* 그런 형태인지를 배웁니다. `codebeacon scan`은 코드 그래프를 소스만으로 다시 만들며 이 오버레이를 버리므로, 링크를 복원하려면 **스캔 후 `codebeacon knowledge`를 다시 실행하세요**.
+- **`beacon_knowledge` MCP 도구** — 새 도구가 키워드로 노트를 검색하거나 주어진 코드 노드에 연결된 노트를 나열해, 코드 뒤에 있는 결정의 흔적을 MCP로 직접 노출합니다.
+- **MCP 서버용 npm 런처** — `@codebeacon/mcp`는 MCP 클라이언트가 기대하는 npx 우선 방식으로 서버를 시작하게 해줍니다(`"command": "npx", "args": ["-y", "@codebeacon/mcp"]`). 의존성 없는 Node 심(shim)이 PATH → `uvx` → `pipx run` → `python3 -m codebeacon` 순으로 동작하는 codebeacon을 찾아 stdio를 손대지 않고 그대로 전달합니다. [`npm/README.md`](npm/README.md) 참조. (0.7.0에 포함, 아직 npm에 게시되지 않음.)
+- **PR 컨텍스트용 GitHub Action** — 컴포지트 액션이 모든 풀 리퀘스트에, 커밋된 지식 그래프에서 영향받는 조각을 댓글로 남깁니다: 변경이 건드리는 wiki 문서, 업스트림 폭발 반경, 그리고 편집된 고영향 허브 파일 — AI 시대 리뷰를 위한 아키텍처 드리프트 점검입니다. 커밋된 `.codebeacon/` 인덱스, `fetch-depth: 0`, `permissions: pull-requests: write`가 필요합니다. [`action/README.md`](action/README.md)와 [`action/examples/pr-context.yml`](action/examples/pr-context.yml) 참조.
+- **워크스페이스 CLAUDE.md가 ~200줄 이하로 유지됩니다** — 다중 프로젝트 워크스페이스에서 루트 `CLAUDE.md`가 이제 공유 개요만 담고, 프로젝트별 세부는 `paths:` 프런트매터가 해당 프로젝트 파일을 건드릴 때만 로드하는 스코프된 `.claude/rules/codebeacon-<project>.md` 파일로 옮깁니다(컨텍스트 파일에 대한 Anthropic 자체 가이드를 따름). 단일 프로젝트 출력은 그대로입니다. 예전의 단일 파일을 원하면 `output.context_map.rules_split: false`로 설정하세요. 중복 프로젝트 행도 합쳐집니다.
+- **테스트 픽스처가 기본으로 무시됩니다** — 어느 깊이든 `tests/fixtures/`, `test/fixtures/`, `__fixtures__/`가 이제 기본 무시되어, 프로젝트의 합성 테스트 입력이 가짜 라우트와 service를 그래프에 주입하는 일이 멈춥니다(codebeacon 자체 셀프 스캔이 픽스처 `main.py`를 다섯 개의 "라우트"로 보고했었습니다). 이는 우선순위가 가장 낮은 규칙이므로, `.codebeaconignore`에 `!tests/fixtures/` 줄을 넣으면 다시 포함되고, 스캔을 픽스처 디렉토리*로* 향하게 하면 여전히 수집됩니다.
+- **Warp 라우트 추출이 이제 실제로 됩니다** — Warp의 필터-콤비네이터 라우트가 실제로 추출됩니다: `warp::path!(...)`와 `warp::path("x")` 세그먼트, 메서드 콤비네이터(`warp::get()` / `post()` / …), 그리고 `.map` / `.and_then` 핸들러가 그것들을 감싸는 바인딩을 기준으로 상관되어 온전한 라우트로 만들어집니다. 정직한 한계(쿼리 헤더에 명시됨): 한 바인딩 안에서 `.or(...)`로 이어진 필터는 하나의 연결된 라우트로 합쳐지고, `warp::path::param()` 필터-호출 세그먼트와 클로저 핸들러는 미해결로 남습니다.
+
+---
+
 ## 0.6.9 새 소식
 
 역대 최대 규모의 감사 릴리스입니다: 이중 업스트림 패리티 스윕(codesight 트래커 최초 전체 감사 + graphify v0.9.4–v0.9.12 / 이슈 #1776까지)에 codebeacon 자체에 대한 독립 멀티에이전트 버그 헌트를 결합했습니다. 모든 후보를 수정 전에 재현하고, 모든 수정을 mutation 테스트했으며, 적대적 2차 리뷰가 수정 자체를 공격해 출시 전에 추가 구멍 18개를 잡아냈습니다. **실제 버그 48건 수정.**
