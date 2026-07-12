@@ -61,6 +61,20 @@ IGNORE_DIRS: set[str] = {
     ".gnupg",
 }
 
+# Default gitignore-style patterns applied at the *lowest* precedence in
+# ``collect_files`` (before ``.gitignore`` / ``.codebeaconignore``), so a user's
+# negation — e.g. ``!tests/fixtures/`` — re-includes them. Unlike ``IGNORE_DIRS``
+# these are path patterns, not basenames: test-fixture trees are synthetic inputs
+# for a project's *own* test suite, not product surface, and indexing them injects
+# fake routes/services (codebeacon's self-scan reported tests/fixtures/fastapi/main.py
+# as 5 "routes"). The ``**/`` prefix matches at any depth; matching is relative to
+# the scan root, so pointing the scan *at* a fixture dir still collects it.
+DEFAULT_IGNORE_PATTERNS: list[str] = [
+    "**/tests/fixtures/",
+    "**/test/fixtures/",
+    "**/__fixtures__/",
+]
+
 # File basenames that should never be indexed even if their extension matches
 # CODE_EXTENSIONS — they almost certainly hold credentials. Underscore-prefixed
 # variants (api_token.txt, oauth_token.json) are also caught by the regex in
@@ -241,7 +255,11 @@ def collect_files(
     re-includes paths that would otherwise be skipped.
     """
     root = Path(root).resolve()
-    lines = read_ignore_file(root)
+    # Defaults first (lowest precedence): a user's .gitignore/.codebeaconignore —
+    # read next — wins on conflict under last-match-wins, so ``!tests/fixtures/``
+    # re-includes a fixture tree the defaults would otherwise prune.
+    lines = list(DEFAULT_IGNORE_PATTERNS)
+    lines.extend(read_ignore_file(root))
     if extra_ignore:
         lines.extend(extra_ignore)
     matcher = IgnoreMatcher(lines)

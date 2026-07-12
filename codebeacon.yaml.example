@@ -15,6 +15,7 @@ output:
   obsidian: true
   context_map:
     targets: [CLAUDE.md, .cursorrules, AGENTS.md]
+    rules_split: true                    # 워크스페이스: 프로젝트별 상세를 .claude/rules/로 분할 (CLAUDE.md ≤200줄)
 
 wave:
   auto: true

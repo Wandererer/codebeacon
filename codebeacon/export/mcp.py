@@ -10,6 +10,7 @@ Tools:
     beacon_blast_radius    - downstream + upstream neighbours of a node
     beacon_routes          - list all routes (optional: filter by project)
     beacon_services        - list all services (optional: filter by project)
+    beacon_knowledge       - search knowledge notes / list notes linked to a node
 
 Usage:
     codebeacon serve --dir /path/to/.codebeacon
@@ -358,6 +359,104 @@ def tool_beacon_services(idx: BeaconIndex, args: dict) -> str:
     return "\n".join(lines)
 
 
+def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
+    """Search knowledge notes, or list the notes linked to a code node.
+
+    Knowledge notes (ADRs, meeting notes, retros, specs, research) are linked
+    into the graph by ``codebeacon knowledge`` as ``knowledge``-type nodes with
+    edges to the code they reference. This tool surfaces the *why* behind the
+    code that the other tools describe.
+
+    Args:
+        query: keyword(s) matched against note title, summary, category, and
+               tags (case-insensitive substring).
+        node:  optional node label/id — return only notes that link to a
+               matching code node. May be combined with ``query`` to filter.
+        limit: max notes to return (default 20).
+    """
+    from codebeacon.common.types import KNOWLEDGE_NODE_TYPE
+
+    if idx.G is None:
+        return "Graph not loaded."
+
+    query = (args.get("query") or "").strip()
+    node = (args.get("node") or "").strip()
+    limit = int(args.get("limit", 20))
+    if not query and not node:
+        return "Error: provide 'query' and/or 'node'."
+
+    G = idx.G
+
+    def _is_note(nid: str) -> bool:
+        return G.nodes[nid].get("type") == KNOWLEDGE_NODE_TYPE
+
+    # Candidate note ids: linked to a given node, else every knowledge note.
+    if node:
+        code_ids = idx.find_node_ids(node)
+        if not code_ids:
+            return f"No node matching '{sanitize_label(node)}'."
+        note_ids: list[str] = []
+        seen: set[str] = set()
+        for cid in code_ids:
+            for src, _tgt, _d in G.in_edges(cid, data=True):
+                if _is_note(src) and src not in seen:
+                    seen.add(src)
+                    note_ids.append(src)
+    else:
+        note_ids = [n for n in G.nodes() if _is_note(n)]
+
+    query_cf = query.casefold()
+    if query_cf:
+        note_ids = [n for n in note_ids if query_cf in _note_haystack(G, n)]
+
+    note_ids.sort(key=lambda n: (G.nodes[n].get("date", ""), G.nodes[n].get("label", n)), reverse=True)
+    note_ids = note_ids[:limit]
+
+    # A one-line description of the filter for both the header and the empty case.
+    clauses = []
+    if query:
+        clauses.append(f"matching '{sanitize_label(query)}'")
+    if node:
+        clauses.append(f"linked to '{sanitize_label(node)}'")
+    scope = " ".join(clauses)
+
+    if not note_ids:
+        return f"No knowledge notes {scope}.".replace("  ", " ")
+
+    lines = [f"## Knowledge notes ({len(note_ids)} {scope})".rstrip() + "\n"]
+    for nid in note_ids:
+        d = G.nodes[nid]
+        title = sanitize_label(d.get("label", nid))
+        category = sanitize_label(d.get("category", "note"))
+        date = sanitize_label(d.get("date", "")) or "????-??-??"
+        path = sanitize_label(d.get("note_path", d.get("source_file", "")))
+        lines.append(f"- **{title}** ({category}, {date}) — `{path}`")
+        summary = sanitize_label(d.get("summary", ""))
+        if summary:
+            lines.append(f"  {summary}")
+        # Show what code each note points at, with the confidence band so the
+        # agent can weigh a trusted path reference against an ambiguous mention.
+        for _src, tgt, ed in G.out_edges(nid, data=True):
+            tgt_label = sanitize_label(G.nodes[tgt].get("label", tgt))
+            rel = sanitize_label(ed.get("relation", ""))
+            conf = sanitize_label(ed.get("confidence", ""))
+            lines.append(f"    → {tgt_label} [{rel}, {conf}]")
+    return "\n".join(lines)
+
+
+def _note_haystack(G, node_id: str) -> str:
+    """Casefolded search text for a knowledge note (title/summary/category/tags)."""
+    d = G.nodes[node_id]
+    tags = d.get("tags", [])
+    parts = [
+        str(d.get("label", "")),
+        str(d.get("summary", "")),
+        str(d.get("category", "")),
+        " ".join(tags) if isinstance(tags, list) else str(tags),
+    ]
+    return " ".join(parts).casefold()
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 TOOLS = {
@@ -437,6 +536,23 @@ TOOLS = {
             "properties": {
                 "project": {"type": "string", "description": "Filter by project name (optional)"},
                 "limit": {"type": "integer", "description": "Max results (default 50)"},
+            },
+            "required": [],
+        },
+    },
+    "beacon_knowledge": {
+        "fn": tool_beacon_knowledge,
+        "description": (
+            "Search knowledge notes (ADRs, meeting notes, retros, specs, research) by "
+            "keyword, or list the notes linked to a given code node. Use this to learn "
+            "*why* the code looks the way it does — the decisions behind a service."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword(s) matched against note title/summary/category/tags"},
+                "node": {"type": "string", "description": "Optional node label/id — return only notes linked to it"},
+                "limit": {"type": "integer", "description": "Max notes to return (default 20)"},
             },
             "required": [],
         },

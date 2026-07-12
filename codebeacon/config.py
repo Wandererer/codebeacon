@@ -24,6 +24,11 @@ class OutputConfig:
     wiki: bool = True
     obsidian: bool = True
     context_map_targets: list = field(default_factory=lambda: ["CLAUDE.md", ".cursorrules", "AGENTS.md"])
+    # In a multi-project workspace, split per-project detail out of CLAUDE.md
+    # into scoped .claude/rules/ files (keeps CLAUDE.md under ~200 lines). Set to
+    # false to keep the old monolithic CLAUDE.md. Single-project output is
+    # unaffected either way.
+    rules_split: bool = True
 
 
 @dataclass
@@ -157,6 +162,7 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         wiki=output_raw.get("wiki", True),
         obsidian=output_raw.get("obsidian", True),
         context_map_targets=context_map.get("targets", ["CLAUDE.md", ".cursorrules", "AGENTS.md"]),
+        rules_split=context_map.get("rules_split", True),
     )
 
     wave_raw = _section_mapping(raw.get("wave"), "wave")

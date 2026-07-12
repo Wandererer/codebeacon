@@ -855,7 +855,11 @@ def _interpret_aspnet(file_path: str, matches: list, framework: str) -> list[Rou
 
 
 def _interpret_actix(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
-    """Actix proc macros (#[get(...)]) + Axum Router::new().route(...)."""
+    """Actix proc macros (#[get(...)]) + Axum Router::new().route(...) + Warp filters.
+
+    The three Rust web frameworks share ``actix.scm``; each is a disjoint set of
+    captures, so a file only ever produces routes for the style it actually uses.
+    """
     routes: list[RouteInfo] = []
     for _idx, caps in matches:
         if "route.actix_handler" in caps and "route.path" in caps:
@@ -885,6 +889,119 @@ def _interpret_actix(file_path: str, matches: list, framework: str) -> list[Rout
                 line=line,
                 framework=framework,
             ))
+
+    routes.extend(_warp_routes(file_path, matches, framework))
+    return routes
+
+
+def _warp_macro_segments(tokens_text: str) -> list[str]:
+    """Turn a ``warp::path!`` token_tree text into URL segments.
+
+    ``("users" / u32)`` → ``["users", "{param}"]``. String tokens become literal
+    segments; a typed token (``u32``, ``String``, ``Uuid`` — captured by the
+    grammar as identifier / primitive_type / type_identifier) is a positional
+    path parameter, rendered ``{param}`` (Warp path! params are unnamed). Tokens
+    that are neither (e.g. the ``..`` rest pattern) are not nameable and dropped.
+    """
+    inner = tokens_text.strip()
+    if len(inner) >= 2 and inner[0] in "([{" and inner[-1] in ")]}":
+        inner = inner[1:-1]
+    segments: list[str] = []
+    for raw in inner.split("/"):
+        part = raw.strip()
+        if not part:
+            continue
+        if part[0] in ('"', "'"):
+            segments.append(_clean(part))
+        elif part[0].isalpha() or part[0] == "_":
+            segments.append("{param}")
+    return segments
+
+
+def _warp_routes(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
+    """Warp filter-combinator chains.
+
+    A Warp route is a filter chain, e.g.
+    ``warp::path!("users" / u32).and(warp::get()).and_then(get_user)`` — path,
+    method, and handler are three unrelated nodes along one method-call chain.
+    ``actix.scm`` captures each piece plus the let_declaration/block scopes; here
+    every piece is bucketed by its *innermost* enclosing scope and each bucket is
+    folded into a single route (path segments concatenated in source order, the
+    first method combinator and first identifier handler winning).
+
+    Honest limits: multiple filters joined by ``.or(...)`` inside ONE binding
+    collapse into a single concatenated path; a filter bound to its own ``let``
+    and reused via ``.and(var)`` yields a partial route; ``warp::path::param()``
+    and closure handlers are not resolved.
+    """
+    scopes: list[tuple[int, int]] = []
+    anchors: list[tuple[int, int, list[str]]] = []  # (start_byte, row, segments)
+    methods: list[tuple[int, str]] = []             # (start_byte, method name)
+    handlers: list[tuple[int, str]] = []            # (start_byte, handler name)
+
+    for _idx, caps in matches:
+        if "route.warp_scope" in caps:
+            n = caps["route.warp_scope"][0]
+            scopes.append((n.start_byte, n.end_byte))
+        if "route.warp_path_macro" in caps and "route.warp_macro_tokens" in caps:
+            n = caps["route.warp_path_macro"][0]
+            segs = _warp_macro_segments(node_text(caps["route.warp_macro_tokens"][0]))
+            if segs:
+                anchors.append((n.start_byte, n.start_point[0], segs))
+        if "route.warp_path_call" in caps and "route.warp_seg" in caps:
+            n = caps["route.warp_path_call"][0]
+            seg = _clean(node_text(caps["route.warp_seg"][0]))
+            if seg:
+                anchors.append((n.start_byte, n.start_point[0], [seg]))
+        if "route.warp_method_call" in caps and "route.warp_method" in caps:
+            n = caps["route.warp_method_call"][0]
+            methods.append((n.start_byte, node_text(caps["route.warp_method"][0])))
+        if "route.warp_handler_call" in caps and "route.warp_handler" in caps:
+            n = caps["route.warp_handler_call"][0]
+            handlers.append((n.start_byte, node_text(caps["route.warp_handler"][0])))
+
+    if not anchors:
+        return []
+
+    def _bucket(pos: int) -> tuple[int, int]:
+        # Innermost enclosing scope = the enclosing one with the largest start
+        # (scopes nest, so deeper = later start). No enclosing scope → a
+        # per-position singleton, so an unscoped anchor still yields its route.
+        best: Optional[tuple[int, int]] = None
+        for s, e in scopes:
+            if s <= pos <= e and (best is None or s > best[0]):
+                best = (s, e)
+        return best if best is not None else (pos, pos)
+
+    grouped: dict[tuple[int, int], dict] = {}
+    for start, row, segs in anchors:
+        grouped.setdefault(
+            _bucket(start), {"anchors": [], "methods": [], "handlers": []},
+        )["anchors"].append((start, row, segs))
+    for start, method in methods:
+        key = _bucket(start)
+        if key in grouped:
+            grouped[key]["methods"].append((start, method))
+    for start, handler in handlers:
+        key = _bucket(start)
+        if key in grouped:
+            grouped[key]["handlers"].append((start, handler))
+
+    routes: list[RouteInfo] = []
+    for key in sorted(grouped):
+        g = grouped[key]
+        g["anchors"].sort()
+        segments = [s for _start, _row, segs in g["anchors"] for s in segs]
+        method = min(g["methods"])[1] if g["methods"] else ""
+        handler = min(g["handlers"])[1] if g["handlers"] else ""
+        routes.append(RouteInfo(
+            method=_norm_method(method.lower()) if method else "ANY",
+            path=_join(*segments),
+            handler=handler,
+            source_file=file_path,
+            line=g["anchors"][0][1] + 1,
+            framework=framework,
+        ))
     return routes
 
 

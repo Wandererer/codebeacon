@@ -4,6 +4,21 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ── Knowledge overlay constants ───────────────────────────────────────────────
+# Markdown notes (ADRs, meeting notes, retros, specs, research) linked into the
+# code graph by ``codebeacon.knowledge.link`` become nodes of this type. It is
+# distinct from the AST-owned code node types ("class", "route", …) and from the
+# semantic pipeline's LLM node types ("concept", "document", "paper") — a note
+# node is deterministically minted from a real ``.md`` file, never inferred.
+KNOWLEDGE_NODE_TYPE = "knowledge"
+
+# Edge relations from a knowledge note to the code it points at. REFERENCES is
+# minted for an explicit file-path reference (EXTRACTED confidence); MENTIONS for
+# a bare label match found in prose (AMBIGUOUS confidence).
+KNOWLEDGE_REFERENCES_RELATION = "references"
+KNOWLEDGE_MENTIONS_RELATION = "mentions"
+
+
 @dataclass(slots=True)
 class Node:
     id: str

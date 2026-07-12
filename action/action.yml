@@ -1,0 +1,86 @@
+name: "codebeacon PR context"
+description: >-
+  Comment on pull requests with the affected slice of the committed codebeacon
+  knowledge graph — an architecture-drift context check for AI-era code review.
+author: "codebeacon"
+
+branding:
+  icon: "git-pull-request"
+  color: "yellow"
+
+inputs:
+  base:
+    description: "Git ref to diff the PR against."
+    required: false
+    default: ${{ github.base_ref }}
+  beacon-dir:
+    description: "Path to the committed .codebeacon index directory."
+    required: false
+    default: ".codebeacon"
+  depth:
+    description: "Upstream blast-radius walk depth."
+    required: false
+    default: "3"
+  limit:
+    description: "Max wiki articles to list in the comment."
+    required: false
+    default: "50"
+  comment:
+    description: "Post/update a PR comment with the context (true|false)."
+    required: false
+    default: "true"
+  install:
+    description: "How to install codebeacon: 'pip' (default) or 'skip' if pre-installed."
+    required: false
+    default: "pip"
+  fail-on-error:
+    description: "Fail the job on internal errors. Defaults to false — a context commenter should never break a build."
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install codebeacon
+      if: ${{ inputs.install == 'pip' }}
+      shell: bash
+      run: python3 -m pip install --upgrade codebeacon
+
+    - name: Compute PR context
+      id: context
+      shell: bash
+      env:
+        CODEBEACON_COMMENT_FILE: ${{ runner.temp }}/codebeacon_pr_context.md
+      run: |
+        python3 "$GITHUB_ACTION_PATH/pr_context.py" \
+          --base "${{ inputs.base }}" \
+          --beacon-dir "${{ inputs.beacon-dir }}" \
+          --depth "${{ inputs.depth }}" \
+          --limit "${{ inputs.limit }}" \
+          --repo "$GITHUB_WORKSPACE" \
+          --output "$CODEBEACON_COMMENT_FILE" \
+          ${{ inputs.fail-on-error == 'true' && '--fail-on-error' || '' }}
+
+    - name: Upsert PR comment
+      if: ${{ inputs.comment == 'true' && steps.context.outputs.has_comment == 'true' && github.event.pull_request.number }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        COMMENT_FILE: ${{ runner.temp }}/codebeacon_pr_context.md
+        MARKER: "<!-- codebeacon-pr-context -->"
+      run: |
+        # Find an existing codebeacon comment by its marker and PATCH it, so we
+        # update in place across pushes instead of stacking duplicate comments.
+        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq "map(select(.body | contains(\"$MARKER\"))) | .[0].id // empty")
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+            -F body=@"$COMMENT_FILE" >/dev/null
+          echo "codebeacon: updated existing PR comment ($existing)."
+        else
+          gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+            -F body=@"$COMMENT_FILE" >/dev/null
+          echo "codebeacon: created PR comment."
+        fi

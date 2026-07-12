@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.6.9"
+version = "0.7.0"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
@@ -57,6 +57,11 @@ swift   = ["tree-sitter-swift>=0.0.1,<0.8"]
 html    = ["tree-sitter-html>=0.23,<0.24"]
 svelte  = ["tree-sitter-svelte>=0.23,<1.1"]
 
+# ── Real-time watch mode (`codebeacon watch`) ────────────────────────────────
+# Optional: `watch` lazily imports watchdog and prints an install hint if it's
+# absent, so the base install stays lean.
+watch   = ["watchdog>=4,<8"]
+
 # ── Stack bundles ────────────────────────────────────────────────────────────
 # Pick the one that matches your team's primary stack. Default install
 # already covers Python + JS/TS; bundles fill in the gaps without forcing
@@ -94,6 +99,8 @@ full    = [
     "tree-sitter-swift>=0.0.1,<0.8",
     "tree-sitter-html>=0.23,<0.24",
     "tree-sitter-svelte>=0.23,<1.1",
+    # Real-time watch mode — see the `watch` extra.
+    "watchdog>=4,<8",
 ]
 
 cluster = ["graspologic>=1.0"]
@@ -112,6 +119,8 @@ dev     = [
     "tree-sitter-swift>=0.0.1,<0.8",
     "tree-sitter-html>=0.23,<0.24",
     "tree-sitter-svelte>=0.23,<1.1",
+    # Dev installs pull watchdog too so the watch-mode integration test runs.
+    "watchdog>=4,<8",
 ]
 
 [project.urls]

@@ -245,6 +245,7 @@ def run_pipeline(projects, output_dir: str, args) -> int:
     gen_wiki = getattr(args, "output_wiki", True)
     gen_obsidian = getattr(args, "output_obsidian", True)
     context_targets = getattr(args, "context_map_targets", None)
+    rules_split = getattr(args, "rules_split", True)
 
     # Wiki generation (always runs — whether full scan or --wiki-only)
     if gen_wiki:
@@ -276,6 +277,7 @@ def run_pipeline(projects, output_dir: str, args) -> int:
             projects=projects,
             obsidian_dir=obsidian_dir,
             targets=context_targets,
+            rules_split=rules_split,
         )
         for path in written:
             print(f"    {path}")
@@ -393,6 +395,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     gen_obsidian = getattr(args, "output_obsidian", True)
     context_targets = getattr(args, "context_map_targets", None)
     gen_context = context_targets is None or bool(context_targets)
+    rules_split = getattr(args, "rules_split", True)
     wave_chunk_size = getattr(args, "wave_chunk_size", None) or 300
     wave_max_parallel = getattr(args, "wave_max_parallel", None) or 5
 
@@ -506,6 +509,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             write_project_artifact_outputs(
                 G, communities, group_projects, proj_output_dir, label=label,
                 wiki=gen_wiki, obsidian=gen_obsidian, targets=context_targets,
+                rules_split=rules_split,
             )
     else:
         for group_root, group_projects in grouped:
@@ -568,6 +572,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             write_project_artifact_outputs(
                 G, communities, group_projects, proj_output_dir, label=label,
                 wiki=gen_wiki, obsidian=gen_obsidian, targets=context_targets,
+                rules_split=rules_split,
             )
 
     # ── Phase 3: Combined workspace graph + outputs ────────────────────────────
@@ -673,6 +678,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             projects=projects,
             obsidian_dir=obsidian_dir,
             targets=context_targets,
+            rules_split=rules_split,
         )
         for path in written:
             print(f"    {path}")
@@ -693,6 +699,7 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 def write_project_artifact_outputs(
     G, communities, projects, proj_output_dir: str, label: str | None = None,
     wiki: bool = True, obsidian: bool = True, targets: list | None = None,
+    rules_split: bool = True,
 ) -> None:
     """Write wiki, obsidian, and context map for one project group's output dir.
 
@@ -730,6 +737,7 @@ def write_project_artifact_outputs(
             projects=projects,
             obsidian_dir=None,
             targets=targets,
+            rules_split=rules_split,
         )
         for path in written:
             print(f"    {path}")

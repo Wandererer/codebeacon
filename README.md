@@ -25,6 +25,21 @@
 
 ---
 
+## What's new in 0.7.0
+
+A capability release rather than a bug sweep: codebeacon grows a live file-watcher, links your design notes into the code graph, ships two new front-ends (an npm launcher for the MCP server and a GitHub Action), and tightens what it indexes by default. Every feature stays local-first — the core scan still needs no network, no cloud, and no model.
+
+- **`codebeacon watch` keeps the index live** — a debounced file-watcher (`codebeacon watch [path] [--debounce 2.0] [--once] [--exclude PATTERN]`) re-syncs the graph whenever watched source files change. A burst of edits — a 500-file `git checkout`, a branch switch — coalesces into a single resync, and the watcher reuses the scanner's exact ignore rules so writing the index never wakes it into a loop over its own `.codebeacon/` output. Needs the new optional extra: `pip install 'codebeacon[watch]'` (watchdog).
+- **Design notes link into the code graph** — `codebeacon knowledge` now writes its notes (ADRs, meeting notes, retros, specs) *into* `beacon.json` when an index already exists: an explicit file-path reference becomes a trusted `references` edge, and a distinctive symbol mention (`PaymentService`, never a bare `User`) becomes an `AMBIGUOUS` `mentions` edge — so an agent reading the graph learns *why* a service is shaped the way it is. Because `codebeacon scan` rebuilds the code graph from source alone and drops this overlay, **re-run `codebeacon knowledge` after a scan** to restore the links.
+- **`beacon_knowledge` MCP tool** — a new tool searches notes by keyword and/or lists the notes linked to a given code node, exposing the decision trail behind the code directly over MCP.
+- **npm launcher for the MCP server** — `@codebeacon/mcp` lets MCP clients start the server the npx-first way they expect (`"command": "npx", "args": ["-y", "@codebeacon/mcp"]`). The zero-dependency Node shim resolves a working codebeacon via PATH → `uvx` → `pipx run` → `python3 -m codebeacon` and forwards stdio untouched. See [`npm/README.md`](npm/README.md). (Ships with 0.7.0; not yet published to npm.)
+- **GitHub Action for PR context** — a composite action comments on every pull request with the affected slice of your committed knowledge graph: the wiki articles the change touches, the upstream blast radius, and any high-impact hub files it edits — an architecture-drift check for AI-era review. Requires a committed `.codebeacon/` index, `fetch-depth: 0`, and `permissions: pull-requests: write`. See [`action/README.md`](action/README.md) and [`action/examples/pr-context.yml`](action/examples/pr-context.yml).
+- **Workspace CLAUDE.md stays under ~200 lines** — in a multi-project workspace the root `CLAUDE.md` now keeps only the shared overview and moves per-project detail into scoped `.claude/rules/codebeacon-<project>.md` files whose `paths:` frontmatter loads them only when that project's files are touched (following Anthropic's own guidance for context files). Single-project output is unchanged; set `output.context_map.rules_split: false` for the old monolithic file. Duplicate project rows are also collapsed.
+- **Test fixtures are ignored by default** — `tests/fixtures/`, `test/fixtures/`, and `__fixtures__/` at any depth are now default-ignored, so a project's synthetic test inputs stop injecting fake routes and services into the graph (codebeacon's own self-scan had reported a fixture `main.py` as five "routes"). It is the lowest-precedence rule, so a `.codebeaconignore` line `!tests/fixtures/` re-includes them, and pointing a scan *at* a fixture directory still collects it.
+- **Warp route extraction is real now** — Warp's filter-combinator routes are actually extracted: `warp::path!(...)` and `warp::path("x")` segments, method combinators (`warp::get()` / `post()` / …), and `.map` / `.and_then` handlers are correlated by their enclosing binding into whole routes. Honest limits (spelled out in the query header): filters joined by `.or(...)` inside one binding collapse into a single concatenated route, and `warp::path::param()` filter-call segments and closure handlers are left unresolved.
+
+---
+
 ## What's new in 0.6.9
 
 The largest audit release to date: a dual upstream-parity sweep (the first-ever full audit of codesight's tracker, plus graphify v0.9.4–v0.9.12 / issues through #1776) combined with an independent multi-agent bug hunt over codebeacon itself. Every candidate was reproduced before fixing, every fix was mutation-tested, and an adversarial second review then attacked the fixes themselves — catching 18 further holes before release. **48 real bugs fixed.**
@@ -189,7 +204,8 @@ Existing tools solve this partially. Route analyzers map your controllers but mi
 - **Deep-dive mode** — `--deep-dive` generates per-project `.codebeacon/` + `CLAUDE.md` for every sub-project; running `codebeacon scan . --update` from any sub-project folder automatically syncs all projects in the workspace
 - **Workspace auto-rediscovery** — on every `scan` / `sync`, codebeacon re-scans the workspace and appends any new project folders to `codebeacon.yaml` before extraction, so freshly added sub-projects are never silently skipped; pass `--no-rediscover` to opt out for hand-curated configs
 - **Graphify-style semantic enrichment** — after AST extraction, the skill dispatches one parallel subagent per chunk to emit `{nodes, edges, hyperedges}` with 8 relation types (`calls`/`implements`/`references`/`cites`/`conceptually_related_to`/`shares_data_with`/`semantically_similar_to`/`rationale_for`) and EXTRACTED/INFERRED/AMBIGUOUS confidence; on Claude Code the subagent runs one tier below the host model (Opus→Sonnet, Sonnet→Haiku) so spend stays proportional to corpus size. AST owns code nodes; LLM only contributes `concept`/`document`/`paper` nodes. Existing 0.3.x archives replay through the new schema unchanged.
-- **Knowledge mode (`codebeacon knowledge`)** — scan markdown notes (ADRs, meeting notes, retros, specs, research) and produce a single `KNOWLEDGE.md` next to `.codebeacon/`. Auto-classifies by filename and heading patterns, parses Obsidian YAML frontmatter and `[[backlinks]]`, surfaces a top-level "Key Decisions" + "Open Questions" rollup so an agent learns *why* the codebase looks the way it does. Pure heuristics — no LLM call.
+- **Knowledge mode (`codebeacon knowledge`)** — scan markdown notes (ADRs, meeting notes, retros, specs, research) and produce a single `KNOWLEDGE.md` next to `.codebeacon/`. Auto-classifies by filename and heading patterns, parses Obsidian YAML frontmatter and `[[backlinks]]`, surfaces a top-level "Key Decisions" + "Open Questions" rollup so an agent learns *why* the codebase looks the way it does. Pure heuristics — no LLM call. When a `beacon.json` already exists, the notes are also **linked into the graph**: explicit file-path references become trusted `references` edges and distinctive symbol mentions become `AMBIGUOUS` `mentions` edges. This overlay is dropped by the next `codebeacon scan` (which rebuilds the code graph from source alone), so re-run `codebeacon knowledge` after a scan to restore it.
+- **Watch mode (`codebeacon watch`)** — a debounced file-watcher re-syncs the index whenever watched source files change, coalescing a burst of edits (a 500-file `git checkout`) into a single resync and reusing the scanner's exact ignore rules so it never loops on its own `.codebeacon/` output. Optional extra: `pip install 'codebeacon[watch]'`.
 - **Bare-path shortcut** — `codebeacon ./src` is now equivalent to `codebeacon scan ./src`; when the first argument isn't a registered subcommand, `scan` is auto-injected, so muscle memory from `graphify <path>` / `codesight <path>` works here too.
 - **Hardened semantic pipeline** — `semantic-apply` guards against malformed agent JSONL (null/list/code-fence lines, missing fields), coerces broken `confidence_score` values (None/NaN/string/out-of-range) to a safe default, snapshots `beacon.json` → `beacon.json.bak` before merging so the AST baseline is always recoverable, and regenerates `beacon.html` + `callflow.html` so visual exports reflect the newly-inferred edges.
 - **Sensitive file/dir guard** — `secrets/`, `credentials/`, `.ssh/`, `.aws/`, `.gnupg/` directories are always skipped; filenames matching credential patterns (`api_token`, `oauth_token`, `private_key`, `client_secret`; underscore *and* hyphen variants) are excluded from the source-file collector before they reach extractors.
@@ -229,6 +245,18 @@ codebeacon sync                      # subsequent runs via config
 | C# | ASP.NET Core, Blazor (`.razor`, `.cshtml`); `.sln` / `.csproj` / `.fsproj` / `.vbproj` parsed for `ProjectReference` + `PackageReference` |
 | Swift | Vapor |
 | ArkTS | `.ets` (HarmonyOS) collected — extractors framework-agnostic |
+
+> **How the "27 frameworks" count works.** Coverage is grounded in tree-sitter
+> queries, and frameworks in the same grammar family share query files — Rocket
+> reuses Actix-Web's attribute-macro pattern, the JS/TS web frameworks share the
+> class/decorator queries, and so on. That sharing is what makes broad coverage
+> tractable, but it also means depth varies per framework: some are exercised by
+> extensive fixtures, others by a single query pattern. Where a framework has
+> known limits, they're documented at the source — e.g. Warp's `.or(...)` and
+> `warp::path::param()` caveats live in the query header
+> ([`codebeacon/extract/queries/actix.scm`](codebeacon/extract/queries/actix.scm)).
+> If a specific framework matters to you, scan a representative repo and check
+> the routes/services it actually extracts before relying on the number.
 
 ---
 
@@ -420,6 +448,71 @@ codebeacon scan .
 | `beacon_blast_radius` | Upstream callers + downstream affected nodes |
 | `beacon_routes` | List all HTTP routes, filterable by project |
 | `beacon_services` | List all services/classes, filterable by project |
+| `beacon_knowledge` | Search knowledge notes (ADRs, meetings, retros, specs) or list the notes linked to a code node — the *why* behind the code |
+| `beacon_pr_context` | Given changed files (or a `base` ref), return the wiki articles in their blast radius — read the docs that matter before a PR review |
+
+### npm launcher (`@codebeacon/mcp`)
+
+MCP clients that prefer to launch servers with `npx` can use the thin Node
+wrapper instead of pointing at the `codebeacon` binary directly:
+
+```json
+{
+  "mcpServers": {
+    "codebeacon": {
+      "command": "npx",
+      "args": ["-y", "@codebeacon/mcp", "--dir", "/path/to/your/repo/.codebeacon"]
+    }
+  }
+}
+```
+
+The wrapper bundles no Python — it resolves an installed codebeacon on the host
+(PATH → `uvx` → `pipx run` → `python3 -m codebeacon`) and forwards stdio to
+`codebeacon serve` untouched. See [`npm/README.md`](npm/README.md) for the full
+per-client config snippets. (Shipping with 0.7.0; not yet published to npm.)
+
+---
+
+## GitHub Action — PR context
+
+Comment on every pull request with the affected slice of your committed
+knowledge graph — the wiki articles the change touches, the upstream blast
+radius, and any high-impact hub files it edits. It reframes review around
+**architecture drift**: instead of reading a diff in isolation, the comment
+points at the parts of the system that actually move.
+
+```yaml
+# .github/workflows/pr-context.yml
+name: codebeacon PR context
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write        # required to post/update the comment
+jobs:
+  pr-context:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # required — full history so the base is diffable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: codebeacon/codebeacon/action@v1
+        with:
+          base: ${{ github.base_ref }}
+```
+
+The Action does **not** scan on the runner — it reads the `.codebeacon/` index
+you commit to the repo (codebeacon's model is that the graph is a
+git-committable artifact). If the index is missing it posts one-time setup
+guidance instead of failing the build, and it updates a single marked comment in
+place rather than stacking duplicates. See [`action/README.md`](action/README.md)
+and [`action/examples/pr-context.yml`](action/examples/pr-context.yml) for inputs
+and edge-case behaviour.
 
 ---
 
@@ -428,6 +521,7 @@ codebeacon scan .
 ```bash
 pip install codebeacon              # all language grammars included
 pip install codebeacon[cluster]     # + Leiden community detection (graspologic)
+pip install codebeacon[watch]       # + live file-watcher for `codebeacon watch` (watchdog)
 pip install --upgrade codebeacon    # upgrade to latest version with all dependencies
 ```
 
@@ -458,6 +552,12 @@ codebeacon sync                           # run from codebeacon.yaml (auto-appen
 codebeacon sync --config <file>           # use a specific config file
 codebeacon sync --no-rediscover           # don't auto-append newly added projects (hand-curated yaml mode)
 codebeacon sync --exclude PATTERN         # same flag, same semantics
+
+# Watch mode — keep the index live as you edit (needs the `watch` extra)
+codebeacon watch [path]                    # re-sync on file changes (default path: cwd)
+codebeacon watch . --debounce 2.0          # quiet-window before a resync fires; coalesces bursts
+codebeacon watch . --once                  # process one debounce cycle then exit
+codebeacon watch . --exclude 'docs/**'     # extra gitignore-style pattern (repeatable)
 
 # PR / CI: what does this diff actually break?
 codebeacon affected --base main           # walk upstream callers of every changed file
@@ -619,6 +719,11 @@ output:
   obsidian: true
   context_map:
     targets: [CLAUDE.md, .cursorrules, AGENTS.md]
+    rules_split: true          # multi-project workspaces: keep CLAUDE.md under
+                               # ~200 lines and move per-project detail into
+                               # scoped .claude/rules/codebeacon-<project>.md
+                               # files. Set false for the old monolithic CLAUDE.md.
+                               # No effect on single-project scans.
 
 wave:
   auto: true
@@ -657,6 +762,8 @@ fixtures/
 ```
 
 `!pattern` re-includes a previously-ignored path; later rules override earlier ones. The walker prunes directories whose name matches the rule set, but defers pruning when any negation rule could un-ignore a nested file.
+
+**Default fixture exclusion.** `tests/fixtures/`, `test/fixtures/`, and `__fixtures__/` are ignored by default at any depth — test-fixture trees are synthetic inputs for a project's *own* test suite, not product surface, and indexing them injects fake routes and services. This is the lowest-precedence rule, so a `.codebeaconignore` line `!tests/fixtures/` re-includes them, and pointing a scan directly *at* a fixture directory still collects it.
 
 ---
 
@@ -697,6 +804,50 @@ All AST processing is local. Your source code never leaves your machine when you
 - The CLI **never calls an LLM provider on its own** — codebeacon ships no API client, no key handling, no model name
 - `--semantic` activates **structured-comment parsing only** (Javadoc `@see` / `{@link}`, JSDoc `@see` / `@param` types, Python `:class:` / `:func:` / `See Also`). Fully local.
 - **AI-semantic** (the deeper LLM-driven layer) is invoked by the `/codebeacon` Claude Code skill. The agent reads `semantic-tasks.jsonl`, runs the analysis under whatever model the user already picked, and writes `semantic-results.jsonl`. The Python CLI only prepares the task batch and merges the results — it has no idea which model was used. Pass `--no-semantic` in the skill to skip the LLM step entirely.
+
+---
+
+## Air-Gapped & Compliance-Friendly
+
+codebeacon's core pipeline — tree-sitter AST parsing → knowledge graph → wiki
+and context map — runs **entirely on your machine**. It requires:
+
+- **No network.** The scan makes no outbound calls; nothing about your source
+  code leaves the host.
+- **No cloud service.** There is no backend, no account, no telemetry.
+- **No LLM — not even a local one.** The graph, wiki, `beacon.json`, and
+  `CLAUDE.md` are all produced by deterministic AST analysis. (The optional
+  AI-semantic layer is a *separate*, opt-in step owned by the `/codebeacon`
+  agent — it never runs unless you invoke it; see
+  [Privacy & Security](#privacy--security) — and the CLI ships no API client,
+  key handling, or model name.)
+
+That architecture makes codebeacon suitable for **air-gapped and tightly
+regulated environments** — healthcare, defense, legal, finance — where source
+code cannot touch third-party services. To be precise about what that does and
+does not mean: codebeacon makes **no compliance certification claims** (no
+HIPAA, FedRAMP, CMMC, SOC 2, or similar). What it offers is an architecture that
+keeps code on-premises, so it can *fit* within environments governed by those
+policies. Verifying that codebeacon meets the specific controls of your
+environment remains your responsibility.
+
+**Offline install.** Because it is a normal Python package with vendored
+grammars, codebeacon installs without internet access on the target host:
+download the wheel and its dependencies on a connected machine, transfer them
+across the air gap, and install from the local files.
+
+```bash
+# On a connected machine (include the grammar extras you need — [full] grabs all):
+pip download 'codebeacon[full]' -d ./codebeacon-offline
+
+# Transfer ./codebeacon-offline across the air gap, then on the target host:
+pip install --no-index --find-links ./codebeacon-offline 'codebeacon[full]'
+```
+
+The base install bundles Python + JavaScript/TypeScript grammars; other
+languages are ordinary wheels pulled in by extras (`[jvm]`, `[backend]`,
+`[full]`, …), so include the extras you need in the download and nothing is
+fetched at runtime.
 
 ---
 

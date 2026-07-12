@@ -1,0 +1,35 @@
+{
+  "name": "@codebeacon/mcp",
+  "version": "0.7.0",
+  "description": "npx launcher for the codebeacon MCP server (stdio) — exposes a repo's knowledge graph + wiki to AI clients like Claude Desktop, Claude Code, and Cursor.",
+  "keywords": [
+    "mcp",
+    "codebeacon",
+    "knowledge-graph",
+    "ast",
+    "ai-context",
+    "claude",
+    "cursor"
+  ],
+  "homepage": "https://github.com/codebeacon/codebeacon#readme",
+  "bugs": {
+    "url": "https://github.com/codebeacon/codebeacon/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codebeacon/codebeacon.git",
+    "directory": "npm"
+  },
+  "license": "MIT",
+  "author": "codebeacon",
+  "bin": {
+    "codebeacon-mcp": "bin/run.js"
+  },
+  "files": [
+    "bin/run.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

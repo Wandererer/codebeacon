@@ -21,7 +21,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     paths = [str(Path(p).resolve()) for p in args.paths]
 
     if getattr(args, "watch", False):
-        print("Warning: --watch is not yet implemented. Ignoring.", file=sys.stderr)
+        print(
+            "Note: `scan --watch` is now the standalone `codebeacon watch [path]` "
+            "command — run that instead. Ignoring --watch.",
+            file=sys.stderr,
+        )
 
     # If single path: check for local config first, then walk up to parent directories.
     # This lets `codebeacon scan . --update` from any sub-project find and sync the
@@ -143,6 +147,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     args.output_wiki = config.output.wiki
     args.output_obsidian = config.output.obsidian
     args.context_map_targets = config.output.context_map_targets
+    args.rules_split = config.output.rules_split
 
     print(f"Using {config.config_file}")
     print(f"Processing {len(config.projects)} project(s)...")
@@ -178,6 +183,58 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     if deep_dive:
         return run_deep_dive_pipeline(projects_info, output_dir, args)
     return run_pipeline(projects_info, output_dir, args)
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """``codebeacon watch [path]`` — resync the index when files change.
+
+    Opt-in, real-time counterpart to the post-commit rebuild hook: an initial
+    sync (the same ``scan --update`` path users run by hand) followed by a
+    debounced file-watch that re-runs that sync whenever watched source
+    changes. The incremental cache keeps each resync cheap — only changed files
+    are re-extracted — so we lean on it rather than tracking per-file dirty
+    sets. Requires the optional ``watchdog`` extra.
+    """
+    import contextlib
+    import io
+
+    from codebeacon.watch import run_watch
+
+    root = Path(args.path or ".").resolve()
+    if not root.exists():
+        print(f"  Error: path not found: {root}", file=sys.stderr)
+        return 1
+    if not root.is_dir():
+        print(f"  Error: not a directory: {root}", file=sys.stderr)
+        return 1
+
+    extra_ignore = list(getattr(args, "exclude", []) or [])
+
+    def _resync(_changed: set) -> int:
+        # Reuse the exact incremental path `codebeacon scan <root> --update`
+        # takes (auto-switching to sync when a codebeacon.yaml exists) instead
+        # of re-driving the pipeline here. The pipeline's own progress output is
+        # captured so a continuous watch prints only its own one-line status;
+        # on failure the captured output is surfaced so the error isn't hidden.
+        scan_args = argparse.Namespace(**vars(args))
+        scan_args.paths = [str(root)]
+        scan_args.update = True
+        scan_args.watch = False
+        scan_args.list_only = False
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _cmd_scan(scan_args)
+        if rc != 0:
+            sys.stdout.write(buf.getvalue())
+        return rc
+
+    return run_watch(
+        root,
+        _resync,
+        debounce=args.debounce,
+        extra_ignore=extra_ignore,
+        once=getattr(args, "once", False),
+    )
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -267,7 +324,11 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     the team decided to build it this way (see codesight 1.9.3
     ``--mode knowledge`` for the original framing).
     """
-    from codebeacon.knowledge import build_knowledge_map
+    from codebeacon.knowledge import (
+        build_knowledge_map,
+        link_knowledge_to_graph,
+        resolve_beacon_dir,
+    )
 
     root = Path(args.path or ".").resolve()
     if not root.exists():
@@ -289,6 +350,19 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
         print(f"    Categories: {bits}")
     if result.output_path:
         print(f"  Wrote {result.output_path}")
+
+    # If a prior ``codebeacon scan`` left a beacon.json, link the notes into it
+    # so an agent reading the graph learns *why* the code is shaped this way.
+    # No graph → skip silently; KNOWLEDGE.md stands on its own.
+    beacon_dir = resolve_beacon_dir(output_dir / ".codebeacon", root / ".codebeacon", output_dir)
+    if beacon_dir is not None:
+        link = link_knowledge_to_graph(result, beacon_dir)
+        if link is not None:
+            print(
+                f"  Linked {link.linked_notes}/{total} notes into "
+                f"{link.beacon_path} ({link.reference_edges} references, "
+                f"{link.mention_edges} mentions)"
+            )
     return 0
 
 
@@ -681,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("paths", nargs="+", metavar="PATH", help="Project or workspace path(s)")
     scan_p.add_argument("--semantic", action="store_true", help="Enable LLM semantic extraction")
     scan_p.add_argument("--update", action="store_true", help="Only reprocess changed files")
-    scan_p.add_argument("--watch", action="store_true", help="Watch for file changes (coming soon)")
+    scan_p.add_argument("--watch", action="store_true", help="Deprecated — use `codebeacon watch` instead")
     scan_p.add_argument("--wiki-only", action="store_true", help="Only generate wiki")
     scan_p.add_argument("--obsidian-dir", metavar="PATH", help="Custom Obsidian vault path")
     scan_p.add_argument("--list-only", action="store_true", help="Only list detected projects, don't extract")
@@ -737,6 +811,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail (non-zero exit) when extraction failure rate exceeds RATE (0.0-1.0). Default 0.01 = 1%%.",
     )
     sync_p.set_defaults(func=_cmd_sync)
+
+    # watch — resync the index on file changes (opt-in; needs the watchdog extra)
+    watch_p = sub.add_parser(
+        "watch",
+        help="Watch a tree and auto-resync the index on file changes",
+    )
+    watch_p.add_argument(
+        "path", nargs="?", default=".", help="Directory to watch (default: cwd)"
+    )
+    watch_p.add_argument(
+        "--debounce", type=float, default=2.0, metavar="SECONDS",
+        help="Quiet-window before a resync fires; coalesces bursts (default: 2.0)",
+    )
+    watch_p.add_argument(
+        "--once", action="store_true",
+        help="Process a single debounce cycle then exit (used by tests)",
+    )
+    watch_p.add_argument(
+        "--exclude",
+        metavar="PATTERN",
+        action="append",
+        default=[],
+        help="Extra gitignore-style pattern to skip (repeatable). Merged with .codebeaconignore/.gitignore.",
+    )
+    watch_p.set_defaults(func=_cmd_watch)
 
     # init
     init_p = sub.add_parser("init", help="Interactively create codebeacon.yaml")
@@ -899,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Known subcommands — used by main() to decide whether a bare first arg should
 # be auto-dispatched to ``scan``. Keep this in sync with ``build_parser()``.
 _KNOWN_SUBCOMMANDS: set[str] = {
-    "scan", "sync", "init", "query", "path", "serve", "install", "upgrade",
+    "scan", "sync", "watch", "init", "query", "path", "serve", "install", "upgrade",
     "semantic-prepare", "semantic-apply", "affected", "merge-driver",
     "hook", "knowledge",
 }

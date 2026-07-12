@@ -11,17 +11,25 @@ Output files (written next to .codebeacon/):
     CLAUDE.md                  ← Claude Code
     .cursorrules               ← Cursor IDE
     AGENTS.md                  ← Codex / Copilot multi-agent
+    .claude/rules/codebeacon-<project>.md  ← Claude Code, workspace mode only
 
 Lookup strategy encoded in each file:
     Step 1 → .codebeacon/wiki/          (routes, controllers, services)
     Step 2 → .codebeacon/obsidian/      (methods, fields, connections)
     Step 3 → source files               (only those found in Steps 1-2)
+
+Workspace (multi-project) mode keeps CLAUDE.md under Anthropic's ~200-line
+guidance by moving per-project detail (commands, architecture, class-note
+lookup) into scoped .claude/rules/ files that Claude Code loads only when the
+matching project's files are touched. The Cursor/Codex files stay monolithic —
+`.claude/rules/` is a Claude Code feature and the line budget is Claude-specific.
 """
 
 from __future__ import annotations
 
 import datetime
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -211,6 +219,65 @@ def _get_commands(framework: str) -> dict[str, str]:
     return _FALLBACK_COMMANDS
 
 
+# ── Project de-duplication & rules-file scoping ─────────────────────────────────
+
+def _dedupe_projects(projects: list[ProjectInfo]) -> list[ProjectInfo]:
+    """Collapse projects that share a name to a single, order-preserving entry.
+
+    Workspace discovery can surface several ProjectInfo with the SAME name —
+    distinct directories whose leaf name collides (``APT-Score/frontend`` and
+    ``TriPhotoMap/frontend`` both named ``frontend``), or one directory detected
+    under multiple frameworks. Every rendered surface (the stats tables, the
+    wiki/obsidian ``{project}`` folder, the per-project commands) is keyed by
+    NAME, so the extra rows only duplicate already-conflated data — and two
+    same-named projects would otherwise collide on one ``codebeacon-<name>.md``
+    rules file. Keep the first occurrence; the full path set for a name is still
+    recovered by :func:`_project_scope_globs` for the rules ``paths:`` block.
+    """
+    seen: set[str] = set()
+    out: list[ProjectInfo] = []
+    for p in projects:
+        if p.name in seen:
+            continue
+        seen.add(p.name)
+        out.append(p)
+    return out
+
+
+def _slugify_project(name: str) -> str:
+    """Filesystem-safe slug for a ``codebeacon-<slug>.md`` rules filename.
+
+    Project names are usually already safe (``web``, ``api-python``,
+    ``datapopcorn-ai-magic.git``). Replace any character outside
+    ``[A-Za-z0-9._-]`` with '-' and trim leading/trailing dashes so a stray path
+    separator or space cannot escape the rules directory or split the filename.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug or "project"
+
+
+def _project_scope_globs(projects: list[ProjectInfo], root: Path) -> dict[str, list[str]]:
+    """Map project name → ordered, de-duplicated ``paths:`` globs for its rules file.
+
+    All directories sharing a name contribute their glob (both ``frontend`` dirs),
+    so editing any of them loads the scoped rules file. Paths are relativized to
+    ``root`` (where ``.claude/`` lives) because Claude Code ``paths:`` globs are
+    root-relative; a dir equal to or outside ``root`` falls back to the bare
+    project name so the frontmatter still carries a scope hint.
+    """
+    globs: dict[str, list[str]] = {}
+    for p in projects:
+        rel = _relativize_to(p.path, root)
+        if not rel or os.path.isabs(rel) or rel == "." or rel.startswith(".."):
+            glob = f"{p.name}/**"
+        else:
+            glob = f"{rel.rstrip('/')}/**"
+        bucket = globs.setdefault(p.name, [])
+        if glob not in bucket:
+            bucket.append(glob)
+    return globs
+
+
 # ── Stats extraction ──────────────────────────────────────────────────────────
 
 def _collect_stats(G: nx.DiGraph) -> dict[str, dict[str, int]]:
@@ -311,6 +378,7 @@ def _build_content(
     repo_type: str = "",
     skills_section: str = "",
     hooks_section: str = "",
+    split: bool = False,
 ) -> str:
     today = datetime.date.today().isoformat()
     codebeacon_dir = ".codebeacon"  # relative to project root
@@ -376,8 +444,9 @@ def _build_content(
         "",
     ]
 
-    # Project table
-    if projects:
+    # Project table. In split mode the per-project Notes/Example live in each
+    # project's .claude/rules/ file, so this workspace index omits the table.
+    if projects and not split:
         lines += [
             "| Project | Notes | Example |",
             "| --- | --- | --- |",
@@ -423,47 +492,69 @@ def _build_content(
     lines.append("")
 
     # ── Project stats table ──
-    lines += [
-        "## Projects",
-        "",
-        "| Project | Framework | Routes | Services | Entities | Components |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
+    lines += ["## Projects", ""]
+    if split:
+        # Per-project detail is split into scoped .claude/rules/ files so this
+        # workspace CLAUDE.md stays under Anthropic's ~200-line guidance. The
+        # Detail column points at each; Claude Code loads it only when the
+        # matching project's files are touched.
+        lines += [
+            "Per-project commands, architecture, and class-note lookup live in the",
+            "`.claude/rules/codebeacon-<project>.md` files below — Claude Code loads",
+            "each automatically when you edit files in that project.",
+            "",
+            "| Project | Framework | Routes | Services | Entities | Components | Detail |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    else:
+        lines += [
+            "| Project | Framework | Routes | Services | Entities | Components |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
     for p in projects:
         s = stats.get(p.name, {})
-        lines.append(
+        row = (
             f"| {p.name} | {p.framework}"
             f" | {s.get('routes', 0)}"
             f" | {s.get('services', 0)}"  # services only — see Step-2 Notes note
             f" | {s.get('entities', 0)}"
-            f" | {s.get('components', 0)} |"
+            f" | {s.get('components', 0)}"
         )
+        if split:
+            row += f" | `.claude/rules/codebeacon-{_slugify_project(p.name)}.md` |"
+        else:
+            row += " |"
+        lines.append(row)
     lines += ["", "---", ""]
 
     # ── Common Commands ──
-    lines += ["## Common Commands", ""]
-    for p in projects:
-        cmds = _get_commands(p.framework)
-        lines += [f"### {p.name} ({p.framework})", "```bash"]
-        lines.append(f"{cmds['build']}  # build")
-        lines.append(f"{cmds['run']}  # run")
-        lines.append(f"{cmds['test']}  # all tests")
-        if cmds.get("test_single") != cmds.get("test"):
-            lines.append(f"{cmds['test_single']}  # single test")
-        lines += ["```", ""]
-    lines += ["---", ""]
+    # In split mode these move to the per-project .claude/rules/ files.
+    if not split:
+        lines += ["## Common Commands", ""]
+        for p in projects:
+            cmds = _get_commands(p.framework)
+            lines += [f"### {p.name} ({p.framework})", "```bash"]
+            lines.append(f"{cmds['build']}  # build")
+            lines.append(f"{cmds['run']}  # run")
+            lines.append(f"{cmds['test']}  # all tests")
+            if cmds.get("test_single") != cmds.get("test"):
+                lines.append(f"{cmds['test_single']}  # single test")
+            lines += ["```", ""]
+        lines += ["---", ""]
 
     # ── Architecture ──
-    lines += ["## Architecture", ""]
-    for p in projects:
-        s = stats.get(p.name, {})
-        arch_parts = [f"**{p.framework}**", f"{p.language}"]
-        lines.append(f"**{p.name}**: {' · '.join(arch_parts)}")
-        lines.append(f"  Routes: {s.get('routes', 0)} | "
-                     f"Services: {s.get('services', 0)} | "
-                     f"Entities: {s.get('entities', 0)} | "
-                     f"Components: {s.get('components', 0)}")
-        lines.append("")
+    # In split mode these move to the per-project .claude/rules/ files.
+    if not split:
+        lines += ["## Architecture", ""]
+        for p in projects:
+            s = stats.get(p.name, {})
+            arch_parts = [f"**{p.framework}**", f"{p.language}"]
+            lines.append(f"**{p.name}**: {' · '.join(arch_parts)}")
+            lines.append(f"  Routes: {s.get('routes', 0)} | "
+                         f"Services: {s.get('services', 0)} | "
+                         f"Entities: {s.get('entities', 0)} | "
+                         f"Components: {s.get('components', 0)}")
+            lines.append("")
 
     # ── High-impact files ──
     if hub_files:
@@ -524,6 +615,88 @@ def _pick_example_note(G: nx.DiGraph, project: str) -> str:
         _nid, data = min(proj_nodes, key=_key)
         return data.get("label", "example") + ".md"
     return "example.md"
+
+
+# ── Rules-file builders (workspace split) ───────────────────────────────────────
+
+def _build_rules_frontmatter(globs: list[str]) -> str:
+    """YAML ``paths:`` frontmatter so Claude Code scope-loads the rules file only
+    when a matching file is edited. Must be the first thing in the file."""
+    lines = ["---", "paths:"]
+    for g in globs:
+        lines.append(f'  - "{g}"')
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _build_rules_body(
+    G: nx.DiGraph,
+    p: ProjectInfo,
+    stats: dict[str, dict[str, int]],
+    obsidian_path: str,
+) -> str:
+    """The codebeacon-managed body of a per-project rules file: the commands,
+    architecture, and class-note lookup lifted out of the workspace CLAUDE.md."""
+    s = stats.get(p.name, {})
+    cmds = _get_commands(p.framework)
+
+    lines = [
+        f"## {p.name} ({p.framework})",
+        "",
+        "### Commands",
+        "```bash",
+        f"{cmds['build']}  # build",
+        f"{cmds['run']}  # run",
+        f"{cmds['test']}  # all tests",
+    ]
+    if cmds.get("test_single") != cmds.get("test"):
+        lines.append(f"{cmds['test_single']}  # single test")
+    lines += ["```", ""]
+
+    lines += [
+        "### Architecture",
+        f"**{p.framework}** · {p.language}",
+        f"Routes: {s.get('routes', 0)} | "
+        f"Services: {s.get('services', 0)} | "
+        f"Entities: {s.get('entities', 0)} | "
+        f"Components: {s.get('components', 0)}",
+        "",
+        "### Class notes",
+        "Class-level detail (methods, fields, incoming/outgoing edges) — look up",
+        "by class name:",
+        f"`{obsidian_path}/{p.name}/{{ClassName}}.md`",
+        f"Example: `{_pick_example_note(G, p.name)}`",
+    ]
+    return "\n".join(lines)
+
+
+def _write_rules_files(
+    G: nx.DiGraph,
+    projects: list[ProjectInfo],
+    scope_projects: list[ProjectInfo],
+    project_root: Path,
+    stats: dict[str, dict[str, int]],
+    obsidian_path: str,
+) -> list[str]:
+    """Write one ``.claude/rules/codebeacon-<slug>.md`` per (de-duplicated)
+    project, preserving any user content below the codebeacon markers. Returns
+    the paths written.
+
+    ``scope_projects`` is the PRE-dedup list so a name shared by several
+    directories contributes every directory to that rules file's ``paths:``.
+    """
+    rules_dir = project_root / ".claude" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    scope = _project_scope_globs(scope_projects, project_root)
+
+    written: list[str] = []
+    for p in projects:
+        path = rules_dir / f"codebeacon-{_slugify_project(p.name)}.md"
+        frontmatter = _build_rules_frontmatter(scope.get(p.name, [f"{p.name}/**"]))
+        body = _build_rules_body(G, p, stats, obsidian_path)
+        path.write_text(_merge_rules_content(frontmatter, body, path), encoding="utf-8")
+        written.append(str(path))
+    return written
 
 
 # ── Merge helpers ─────────────────────────────────────────────────────────────
@@ -648,6 +821,37 @@ def _merge_content(new_content: str, path: Path) -> str:
     return wrapped
 
 
+def _merge_rules_content(frontmatter: str, body: str, path: Path) -> str:
+    """Return the final rules-file text: YAML frontmatter, then the codebeacon
+    block, then any user content that follows it.
+
+    A rules file differs from CLAUDE.md in that its ``paths:`` frontmatter is
+    codebeacon-generated and MUST sit at the very top (Claude Code only reads
+    frontmatter as the file's first bytes), so the frontmatter + marker block
+    form the managed region and user content is preserved only BELOW the end
+    marker. Regenerating rewrites the frontmatter and block while keeping that
+    trailing user tail. A pre-existing hand-authored file with no markers is
+    kept whole below the fresh block rather than discarded.
+    """
+    block = f"{_BLOCK_START}\n{body.rstrip()}\n{_BLOCK_END}\n"
+    generated = f"{frontmatter.rstrip()}\n{block}"
+
+    if not path.exists():
+        return generated
+
+    existing = path.read_text(encoding="utf-8")
+    if _BLOCK_START in existing and _BLOCK_END in existing:
+        tail = existing[existing.index(_BLOCK_END) + len(_BLOCK_END):].strip()
+    elif _BLOCK_START not in existing:
+        tail = existing.strip()  # hand-authored, no block — keep it all, below
+    else:
+        tail = ""  # start marker but no end (truncated) — regenerate clean
+
+    if tail:
+        return f"{generated}\n{tail}\n"
+    return generated
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 def generate_context_map(
@@ -656,6 +860,7 @@ def generate_context_map(
     projects: list[ProjectInfo],
     obsidian_dir: str | Path | None = None,
     targets: list[str] | None = None,
+    rules_split: bool = True,
 ) -> list[str]:
     """Generate CLAUDE.md, .cursorrules, and AGENTS.md context map files.
 
@@ -667,9 +872,13 @@ def generate_context_map(
         projects:    list of ProjectInfo (name, path, framework, language)
         obsidian_dir: custom obsidian vault path; defaults to output_dir/obsidian
         targets:     which files to generate; defaults to all three
+        rules_split: in a multi-project workspace, move per-project detail out of
+                     CLAUDE.md into scoped .claude/rules/ files (default on).
+                     Disable to keep the old monolithic CLAUDE.md.
 
     Returns:
-        List of absolute paths of files written.
+        List of absolute paths of files written (context map files, plus any
+        .claude/rules/ files when the workspace split is active).
     """
     if targets is None:
         targets = ["CLAUDE.md", ".cursorrules", "AGENTS.md"]
@@ -696,12 +905,21 @@ def generate_context_map(
     skills_section = format_skills_section(detect_skills(project_root))
     hooks_section  = format_hooks_section(detect_hooks(project_root))
 
-    def _render(tool: str) -> str:
+    # Collapse duplicate project rows before rendering any surface (see
+    # _dedupe_projects). Done after repo-type classification so that heuristic
+    # still sees every discovered project. The pre-dedup list is retained so a
+    # name shared by several directories still contributes every one to its
+    # rules-file `paths:` scope.
+    all_projects = list(projects)
+    projects = _dedupe_projects(projects)
+
+    def _render(tool: str, split: bool) -> str:
         return _build_content(
             G, projects, output_path, obs_path, stats, hubs, tool=tool,
             repo_type=repo_type,
             skills_section=skills_section,
             hooks_section=hooks_section,
+            split=split,
         )
 
     written: list[str] = []
@@ -713,8 +931,16 @@ def generate_context_map(
     for fname, tool in targets_to_files.items():
         if fname not in targets:
             continue
+        # The split is a Claude Code feature (.claude/rules/ with scoped `paths:`
+        # frontmatter) and only pays off across a multi-project workspace: the
+        # Cursor/Codex files and single-project output stay monolithic.
+        do_split = rules_split and tool == "claude" and len(projects) > 1
         path = project_root / fname
-        path.write_text(_merge_content(_render(tool), path), encoding="utf-8")
+        path.write_text(_merge_content(_render(tool, do_split), path), encoding="utf-8")
         written.append(str(path))
+        if do_split:
+            written += _write_rules_files(
+                G, projects, all_projects, project_root, stats, obs_path
+            )
 
     return written

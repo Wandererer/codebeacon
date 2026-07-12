@@ -1,0 +1,37 @@
+# codebeacon PR context — drop this in as .github/workflows/pr-context.yml
+#
+# On every pull request, comment with the slice of the committed knowledge
+# graph the change touches (affected wiki articles + blast-radius counts +
+# high-impact hub-file "architecture drift" signals).
+#
+# Requires a committed .codebeacon/ index in the repo (see the action README).
+name: codebeacon PR context
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# The upsert step needs write access to pull request comments.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-context:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the base branch is present for the diff.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: codebeacon PR context
+        uses: codebeacon/codebeacon/action@v1
+        with:
+          base: ${{ github.base_ref }}
+          depth: 3
+          limit: 50
