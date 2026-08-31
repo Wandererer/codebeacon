@@ -27,6 +27,25 @@
 
 ---
 
+## 0.7.1 新功能
+
+迄今为止最大的一次审计发布:一次双上游对等性扫荡(graphify v0.9.13–v0.9.53 / 议题 #1777–#3235,外加 codesight #50–#55),以必须复现为前提对照 codebeacon 逐条验证 — **修复了约 70 个已确认的缺陷**,由十个并行的修复者完成,每一处修复都做了变异测试,随后由主导者以真实 CLI 集成运行进行对抗式复审。测试套件:885 → 1,481 个测试。
+
+- **JS/TS 图差不多翻了一倍** — 导出的小写箭头函数、`const` 以及对象字面量成员(`export const useAuthStore = …`、`authUtils.clear`)终于成为节点:在一个真实的 865 文件 Next.js 应用上,组件节点从 **960 → 2,237**,而毫无贡献的文件从 406 → 108。导入现在先按**路径**解析(相对说明符、带 `extends` 链和 `${configDir}` 的 `tsconfig`/`jsconfig` 别名、包后缀),然后才回退到标签 — 于是 `from codebeacon.graph.build import …` 不会再绑定到无关的 `build` 符号,CLAUDE.md 中的"High-Impact Files"列表也反映了现实。纯 JS 的 `class X extends Y` 继承关系和动态 `await import()` 边也会被捕获。
+- **路由前缀像真实框架那样组合** — 以运行中的 FastAPI/Express/Flask 服务器为准做了验证:`include_router(prefix=)` 会与路由器自身的前缀组合,属性形式的 include(`app.include_router(pkg.router, …)`、`@pkg.router.get`)不再凭空消失,同一文件内的级联挂载会展开相乘,被挂载两次的路由器会产出两条路由,而 Flask 的 `register_blueprint(url_prefix=)` 会正确地*覆盖*。已知限制:跨**文件**的挂载链仍未被组合。
+- **接口→实现的 DI 解析现在真的能用了** — 提取流水线中的一处序列化边界自 0.6.x 起就在悄悄丢弃 `implements`/`extends`,于是 wiki 看上去一切正常,整个特性却是端到端死掉的。已修复、已让缓存失效,并通过真实流水线做了边界测试。DI 绑定现在还有证据门槛:不再有跨语言或跨项目的臆造(一个 Spring service 不可能再"注入"一个 React 组件),存在多个实现的歧义情况只按 `*Impl` 命名约定、以显式的 `AMBIGUOUS` 置信度绑定,而重复的边会把第二条关系记录到新的 `also` 属性下,而不是覆盖掉。
+- **节点标识是确定性的,并且能区分扩展名** — `Button.tsx` 和 `Button.jsx` 是两个节点(此前其中一个会悄悄吞掉另一个 — 在 codebeacon 自己的仓库上占声明的 6.3%);节点 ID 不再依赖线程完成顺序或检出目录,于是 wiki/obsidian 的文件名不会在两次运行之间来回跳变。冲突的标签会拿到能区分彼此的最短路径后缀。(此前被合并掉的节点,其 ID 会在升级时变动一次。)
+- **ignore 层与 git 的吻合度大幅提高** — 嵌套的 `.gitignore` 会作用于它自己的子树(monorepo 的 `app/.gitignore` 不再被忽略,过去这会把几万个构建文件拽进 scan),`.git/info/exclude` 会被尊重,链接的 worktree 按结构识别而不再让语料翻倍,带 BOM 的 / UTF-16 / NFD 编码的 ignore 文件会被解码,而不是悄悄丢掉规则。含义模糊的目录名(`env/`、`build/`、`public/`、`coverage/` …)只在有佐证的情况下才被剪掉 — 一个 UVM 的 `env/` 测试平台,或者一个名叫 `coverage/` 的 Python 包,都会留在图中。匹配快了约 19 倍,新的 `ignored.json` 诊断会记录每一棵被跳过的子树*为什么*被跳过。
+- **shrink 守卫现在守住了真正要紧的路径** — 过去只要出现 `--update` 它就会解除武装,而那恰恰就是无人值守的路径(watch、git 钩子、CI);一个权限错误就可能悄悄把你已提交的图砍掉一半。现在它会把每一个被移除的节点归因到其源文件(已删除 / 新被忽略 / **无法解释** — 只有最后一种会拒绝执行,并提供真正的 `--force` 标志),在所有路径上都保持武装状态,把读不了的子树当作"未知,不予豁免",并在节点数没变而边却塌缩时发出警告。
+- **`scan → knowledge → scan` 不再卡死** — 0.7.0 中记录在案的这条流程,要么以退出码 1 收场("refusing to shrink"),要么悄悄丢掉你的笔记叠加层。守卫现在能识别层级,而且 knowledge 叠加层会在**每次 scan 之后自动重新应用**;删掉一条笔记就精确地只剪掉那一条。手写的 `[[wikilinks]]` 终于会生成边(此前解析完就被丢弃 — 100% 损失),笔记带上了 `node_kind`/frontmatter,生成的文件(CLAUDE.md、KNOWLEDGE.md)也不再被当作笔记重新收录。
+- **已提交的索引保持干净** — 没有变化的重新扫描现在会重写**零**个已提交文件(此前:每一个都重写,上游曾出现约 3.1 万文件的抖动):`built_at_ts` 由提交推导而来,export 只在内容变化时才写入,而机器本地的 AST 缓存会把自己 git-ignore 掉。HTML export(`beacon.html`、`callflow.html`)**默认离线**内置它们的 JS(把 d3 + mermaid 打包进 `_assets/`) — 与气隙隔离的定位保持一致;设置 `output.html_assets: cdn` 可保留旧行为。构建机器的绝对路径不再泄漏到任何产物里。
+- **程序上可以信赖的 MCP 回答** — 工具失败会返回 `isError: true` 并附上可操作的消息(而不是长得像成功的错误散文,或者被客户端吞掉的协议错误);名称解析会优先精确匹配再考虑子串,于是 `blast_radius("User")` 不会再回答关于 `UserServiceImpl` 的内容;每个工具都遵守 `token_budget`(默认 2,000 tokens),并会对照真实总量声明截断情况。
+- **健壮性与安全清扫** — `.csproj` 的 XML 解析带上了 DOCTYPE/ENTITY 拦截;面向模型的文本(MCP 输出、CLAUDE.md)会按形态中和聊天模板的控制 token(`<|…|>`、`[INST]`);`hook install` 在 git worktree 中可用,而且绝不会把仓库丢在配置到一半的状态;`install`/`upgrade` 会备份手工改过的 SKILL.md 而不是直接覆盖,没有结束标记的标记块也不再能删掉它下方的用户内容;cp949/latin-1 编码的 CLAUDE.md 不会让 scan 崩溃;`codebeacon … | head` 能干净地退出;watch 模式不再被 Linux inotify 事件自我触发;Leiden 聚类固定了随机种子,社区不再每次重新扫描就漂移 12%。
+
+升级说明:此前被合并掉的声明,其节点 ID 会变动一次;semantic 的 `task_id` 会失效一次(任务现在对整个文件做哈希,修复了"第 4,000 个字符之后的编辑永远不会被重新分析");AST 缓存会失效一次(schema 标记);新增边属性 `also`、新增置信度值 `AMBIGUOUS`、semantic 生成的 external 节点上新增 `verification` 标记。如果你的仓库已经提交过 `.codebeacon/cache/`,请执行一次 `git rm --cached -r .codebeacon/cache` — 新的自我忽略 `.gitignore` 无法取消跟踪已被跟踪的文件。
+
+---
+
 ## 0.7.0 新功能
 
 这是一次能力发布,而非 bug 清扫:codebeacon 新增了实时文件监视器,把你的设计笔记连入代码图,提供两个新的前端(用于 MCP 服务器的 npm 启动器和一个 GitHub Action),并收紧了默认索引的范围。每个功能都保持本地优先 — 核心 scan 依然不需要网络、不需要云、不需要模型。
