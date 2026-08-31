@@ -176,6 +176,25 @@
   name: (name) @service.class_name
 ) @service.class
 
+; ── Interfaces, traits and enums ──────────────────────────────────────────────
+; class_declaration was the ONLY class-like pattern, so a Laravel app's DI
+; contracts (interfaces) and its primary reuse mechanism (traits) produced no
+; nodes at all — which also meant a `use App\Traits\HasUuid;` import had nothing
+; to bind to. They share @service.class_name: _interpret_laravel keys on that
+; and dedupes by name, so no interpreter change is needed.
+
+(interface_declaration
+  name: (name) @service.class_name
+) @service.class
+
+(trait_declaration
+  name: (name) @service.class_name
+) @service.class
+
+(enum_declaration
+  name: (name) @service.class_name
+) @service.class
+
 ; ── use statements ────────────────────────────────────────────────────────────
 
 (namespace_use_declaration

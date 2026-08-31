@@ -251,10 +251,15 @@ def test_mcp_knowledge_by_query(tmp_path: Path):
 
 
 def test_mcp_knowledge_requires_an_argument(tmp_path: Path):
-    from codebeacon.export.mcp import tool_beacon_knowledge
+    """0.7.1 error contract: a missing required argument raises ToolError
+    (surfaced to the caller as isError: true), not success-shaped prose."""
+    import pytest
+
+    from codebeacon.export.mcp import ToolError, tool_beacon_knowledge
 
     idx = _linked_index(tmp_path)
-    assert "provide" in tool_beacon_knowledge(idx, {}).lower()
+    with pytest.raises(ToolError):
+        tool_beacon_knowledge(idx, {})
 
 
 def test_mcp_knowledge_unknown_node(tmp_path: Path):

@@ -13,16 +13,24 @@
 ;   @entity.class_name   - BaseModel / SQLAlchemy Base subclass
 ;   @entity.field_name   - model field name
 ;   @entity.field_type   - model field type annotation
-;   @router.include      - app.include_router(router, prefix="...")
+;   @router.include_call - ANY <x>.include_router(...) call (args walked in Python)
+;   @route.alias_name    - `local = pkg.router` alias left-hand side
+;   @route.alias_target  - the aliased router expression
 ;   @import.path         - import path
 
 ; ── @app.get("/path") / @router.post("/path") ────────────────────────────────
+; The decorator object accepts an attribute as well as a bare identifier:
+; `@consumer.consumer_router.get("/ping")` is idiomatic and an identifier-only
+; object made the whole route invisible (not merely un-prefixed).
 
 (decorated_definition
   (decorator
     (call
       function: (attribute
-        object: (identifier) @route.object
+        object: [
+          (identifier)
+          (attribute)
+        ] @route.object
         attribute: (identifier) @route.method
         (#match? @route.method "^(get|post|put|delete|patch|options|head)$")
       )
@@ -54,35 +62,33 @@
 ) @route.router_decl
 
 ; ── app.include_router(router, prefix="...") ─────────────────────────────────
+;
+; ONE broad pattern per physical call, deliberately. The previous pair of
+; patterns (with-prefix / without-prefix) BOTH matched a prefixed call, so any
+; naive "collect every include match" reading double-counted it and emitted a
+; phantom unprefixed route. Enumerating the argument shapes in .scm instead
+; (identifier / attribute / `router=` keyword, x includer identifier /
+; attribute) explodes combinatorially. routes.py::_parse_include_router walks
+; the argument list to pull includer, child router and prefix.
 
-; With prefix keyword argument
 (call
   function: (attribute
-    object: (identifier) @_app
     attribute: (identifier) @_include
     (#eq? @_include "include_router")
   )
-  arguments: (argument_list
-    (identifier) @router.include_router
-    (keyword_argument
-      name: (identifier) @_pk
-      (#eq? @_pk "prefix")
-      value: (string) @router.include_prefix
-    )
-  )
-) @router.include
+) @router.include_call
 
-; Without prefix keyword argument
-(call
-  function: (attribute
-    object: (identifier) @_app2
-    attribute: (identifier) @_include2
-    (#eq? @_include2 "include_router")
-  )
-  arguments: (argument_list
-    (identifier) @router.include_router
-  )
-) @router.include_no_prefix
+; ── `router = pkg.some_router` alias ─────────────────────────────────────────
+; A router imported through its module and re-bound locally is decorated under
+; the local name but mounted under the attribute expression, so without this
+; the two never meet and the mount prefix is lost. Restricted to attribute
+; right-hand sides: a bare `a = b` rebinding is too common to be worth the
+; match noise, and routers are conventionally reached through their module.
+
+(assignment
+  left: (identifier) @route.alias_name
+  right: (attribute) @route.alias_target
+) @route.alias
 
 ; ── Depends() function dependency ────────────────────────────────────────────
 
@@ -159,6 +165,19 @@
   name: (aliased_import name: (dotted_name) @import.item)
 ) @import.from_item
 
+; A plain `import x` and an aliased `import x as y` are different node
+; shapes. The wildcard captured the WHOLE aliased_import, so the emitted
+; target was the literal string "widget as w" — matching no node label, which
+; dropped the import edge entirely rather than merely mislabelling it.
+; Capturing the dotted_name in both shapes mirrors how the from-import case
+; above already handles its alias.
+
 (import_statement
-  name: _ @import.path
+  name: (dotted_name) @import.path
+) @import.plain
+
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.path
+  )
 ) @import.plain

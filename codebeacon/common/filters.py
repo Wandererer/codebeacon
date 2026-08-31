@@ -9,6 +9,7 @@ Three main filters applied after Pass-2 symbol resolution:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -56,17 +57,218 @@ def families_compatible(src_ext: str, tgt_ext: str) -> bool:
     return not (src_fam and tgt_fam and src_fam != tgt_fam)
 
 
+# ── Language runtime / stdlib guards ──────────────────────────────────────────
+#
+# A bare-name import target is matched against declaration labels, so any user
+# type sharing a name with a runtime type becomes an instant fabricated hub:
+# ``com/ex/model/List.java`` collected four ``imports_from`` edges from files
+# that only ever wrote ``import java.util.List`` (G-0916-14), and the same holds
+# for Swift/Foundation (G-0927-11) and PHP/Illuminate (G-0941-11).
+#
+# Every set below is keyed by *language family* and consulted only for imports
+# emitted from a file of that family — a global deny list would silently erase a
+# legitimate ``Foundation`` class in a Java repo (GI-2313's caveat). An unknown
+# family denies nothing.
+#
+# These guards run only AFTER path resolution has failed to place the import on
+# a scanned file, so a project that genuinely declares ``com/ex/model/List.java``
+# and imports it by its real package path still binds.
+
+_RUNTIME_PREFIXES: dict[str, tuple[str, ...]] = {
+    "jvm": ("java.", "javax.", "jakarta.", "kotlin.", "kotlinx.", "android.",
+            "androidx.", "sun.", "scala.", "groovy."),
+    "csharp": ("System.", "Microsoft.", "Windows."),
+    # PHP namespace separators are normalised to "/" before this is consulted.
+    "php": ("Illuminate/", "Symfony/", "Psr/", "Doctrine/", "PHPUnit/",
+            "Laravel/", "Spatie/"),
+    "rust": ("std::", "core::", "alloc::", "std/", "core/", "alloc/"),
+    "web": ("node:", "next/", "@angular/", "@nestjs/", "react-native/"),
+    "swift": (),
+    "python": (),
+    "go": (),
+    "ruby": (),
+}
+
+_RUNTIME_MODULES: dict[str, frozenset[str]] = {
+    "web": frozenset({
+        # Node builtins (also reachable via the "node:" prefix above)
+        "fs", "path", "os", "http", "https", "url", "util", "events", "stream",
+        "crypto", "buffer", "child_process", "zlib", "net", "tls", "dns",
+        "assert", "querystring", "readline", "worker_threads", "perf_hooks",
+        "timers", "process", "module", "vm", "cluster", "string_decoder",
+        # Framework entry points whose last path segment collides with common
+        # component names ("next/link" → "link", "react-dom" → "dom").
+        "react", "react-dom", "react-router", "react-router-dom", "vue",
+        "svelte", "next", "express", "@angular/core", "rxjs",
+    }),
+    "swift": frozenset({
+        "Foundation", "UIKit", "SwiftUI", "Combine", "CoreData", "AppKit",
+        "XCTest", "Dispatch", "OSLog", "CoreGraphics", "AVFoundation",
+        "MapKit", "WidgetKit", "Security", "Network", "CryptoKit",
+    }),
+    "ruby": frozenset({
+        "json", "yaml", "set", "time", "date", "uri", "logger", "fileutils",
+        "digest", "securerandom", "openssl", "csv", "erb", "ostruct",
+        "pathname", "stringio", "benchmark", "socket", "tempfile", "net/http",
+    }),
+    # Python's real stdlib list ships with the interpreter (3.10+).
+    "python": frozenset(getattr(sys, "stdlib_module_names", ())),
+    # Go has no import-path marker that separates the standard library from a
+    # module path: "fmt" and "myapp/internal/db" are the same shape. The
+    # tempting rule — "a first segment without a dot is stdlib" — condemns every
+    # import of a module declared as `module myapp` (still normal in private
+    # code; the indexed shotgun_code repo is one), so the standard library is
+    # enumerated instead. Judged by first segment, so "net/http" and
+    # "encoding/json" are covered by "net" and "encoding".
+    #
+    # ``internal`` and ``builtin`` are deliberately absent: user code cannot
+    # import either from the standard library, while ``internal`` is one of the
+    # most common first segments in real Go projects.
+    "go": frozenset({
+        "archive", "bufio", "bytes", "cmp", "compress", "container", "context",
+        "crypto", "database", "debug", "embed", "encoding", "errors", "expvar",
+        "flag", "fmt", "go", "hash", "html", "image", "index", "io", "iter",
+        "log", "maps", "math", "mime", "net", "os", "path", "plugin", "reflect",
+        "regexp", "runtime", "slices", "sort", "strconv", "strings", "structs",
+        "sync", "syscall", "testing", "text", "time", "unicode", "unique",
+        "unsafe", "weak",
+    }),
+}
+
+# Supertype names that must never invert into an interface→impl mapping.
+#
+# ``class AppError extends Exception`` registered ``Exception → [AppError]``, so
+# any later reference to a bare ``Exception`` resolved to that unrelated class
+# (G-0949-15). These names are generic bases in every language we parse, so the
+# core set is shared; per-family extras cover framework base classes.
+_GENERIC_SUPERTYPES: frozenset[str] = frozenset({
+    "Object", "object", "Exception", "Error", "Base", "Model", "Controller",
+    "Service", "Component", "Entity", "Enum", "Thread", "List", "Map", "Set",
+})
+
+_FAMILY_SUPERTYPES: dict[str, frozenset[str]] = {
+    "jvm": frozenset({
+        "RuntimeException", "Throwable", "Runnable", "Comparable", "Serializable",
+        "Cloneable", "Iterable", "Collection", "Number", "Record", "AbstractList",
+        "ArrayList", "HashMap", "JpaRepository", "CrudRepository", "Any",
+    }),
+    "python": frozenset({
+        "BaseException", "ABC", "ABCMeta", "Protocol", "TypedDict", "NamedTuple",
+        "Generic", "IntEnum", "StrEnum", "TestCase", "BaseModel", "Thread",
+    }),
+    "web": frozenset({
+        "PureComponent", "HTMLElement", "Array", "Promise", "EventEmitter",
+        "Event", "Element", "Node",
+    }),
+    "csharp": frozenset({
+        "ControllerBase", "DbContext", "IDisposable", "Attribute", "ValueType",
+        "IEquatable", "IComparable", "INotifyPropertyChanged", "PageModel",
+        "EventArgs",
+    }),
+    "php": frozenset({
+        "Throwable", "Middleware", "ServiceProvider", "Command", "Request",
+        "FormRequest", "Resource", "Migration", "Seeder", "TestCase", "Facade",
+    }),
+    "ruby": frozenset({
+        "StandardError", "ApplicationRecord", "ApplicationController",
+        "ActiveRecord::Base", "Struct", "Module", "Class", "Hash", "Array",
+    }),
+    "swift": frozenset({
+        "NSObject", "Codable", "Decodable", "Encodable", "Equatable", "Hashable",
+        "Identifiable", "View", "ObservableObject", "UIViewController",
+        "UIView", "Sendable",
+    }),
+    "go": frozenset({"error"}),
+    "rust": frozenset({
+        "Default", "Clone", "Debug", "Display", "Iterator", "From", "Into",
+        "Copy", "Send", "Sync",
+    }),
+}
+
+
+def _normalise_import(raw_import: str) -> str:
+    """Strip decoration a language puts around an import path.
+
+    PHP namespaces use ``\\`` and may carry a leading root separator; treating
+    them as ``/`` lets one set of prefix rules cover every language.
+    """
+    text = raw_import.strip().strip("'\"")
+    if "\\" in text:
+        text = text.replace("\\", "/")
+    return text.lstrip("/")
+
+
+def is_runtime_import(raw_import: str, src_ext: str) -> bool:
+    """True when ``raw_import`` names the language's own runtime / stdlib.
+
+    ``src_ext`` is the extension of the *importing* file — the deny set is
+    scoped to that file's language family and nothing else.
+    """
+    fam = lang_family(src_ext)
+    if not fam or not raw_import:
+        return False
+    text = _normalise_import(raw_import)
+    if not text:
+        return False
+
+    for prefix in _RUNTIME_PREFIXES.get(fam, ()):  # noqa: SIM110 — explicit is clearer
+        if text.startswith(prefix):
+            return True
+
+    modules = _RUNTIME_MODULES.get(fam)
+    if modules:
+        if text in modules:
+            return True
+        # ``os.path`` / ``net/http`` — judge by the owning top-level module.
+        head_dot = text.split(".", 1)[0]
+        head_slash = text.split("/", 1)[0]
+        if fam == "python" and head_dot in modules:
+            return True
+        if fam in ("web", "ruby", "swift", "go") and head_slash in modules:
+            return True
+
+    return False
+
+
+def is_generic_supertype(name: str, src_ext: str) -> bool:
+    """True when ``name`` is a language/framework base type, not a user interface.
+
+    Used to keep the interface→impl map from inverting ``extends Exception``
+    into "every error class implements Exception" (G-0949-15).
+    """
+    if not name:
+        return False
+    if name in _GENERIC_SUPERTYPES:
+        return True
+    fam = lang_family(src_ext)
+    return bool(fam and name in _FAMILY_SUPERTYPES.get(fam, frozenset()))
+
+
+def is_shared_lib(file_path: str, root: Optional[str] = None) -> bool:
+    """Public alias of the shared-library heuristic (see ``_is_shared_lib``)."""
+    return _is_shared_lib(file_path, root)
+
+
 # Relations to always preserve regardless of filter logic
 _PRESERVE_RELATIONS: frozenset[str] = frozenset({"calls_api", "shares_db_entity"})
 
-# Import-type relations that the cross-service filter operates on
-_IMPORT_RELATIONS: frozenset[str] = frozenset({"imports", "imports_from"})
+# Import-type relations that the cross-service filter operates on.
+#
+# ``injects`` is here because DI resolution binds by *type name*: a bare
+# ``PaymentClient`` dependency in service `orders` matched a same-named class in
+# an unrelated project `billing` and shipped as a full-confidence edge. A DI
+# container never wires across service boundaries unless the target is a shared
+# library — which this filter already exempts. (audit 0.7.1 R7c / GI-2207)
+_IMPORT_RELATIONS: frozenset[str] = frozenset({"imports", "imports_from", "injects"})
 
 # Import-type relations the cross-language filter inspects. ``re_exports`` is
 # included here (but NOT in _IMPORT_RELATIONS) so a barrel re-export that
 # collides across languages is dropped too — it previously bypassed the guard
-# entirely.
-_CROSS_LANG_RELATIONS: frozenset[str] = frozenset({"imports", "imports_from", "re_exports"})
+# entirely. ``injects`` likewise: a Spring service must never inject a ``.tsx``
+# component just because the names collide (R7c).
+_CROSS_LANG_RELATIONS: frozenset[str] = frozenset(
+    {"imports", "imports_from", "re_exports", "injects"}
+)
 
 # Shared library directory markers (heuristic)
 _SHARED_MARKERS: frozenset[str] = frozenset({

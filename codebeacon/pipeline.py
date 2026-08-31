@@ -14,8 +14,12 @@ returns a non-zero exit code instead of writing a partial graph.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+from codebeacon.common.io import write_text_if_changed
+from codebeacon.diagnostics import IgnoredReport
 
 
 def emit_failure_report(waves, output_dir: str, args) -> int:
@@ -60,6 +64,157 @@ def emit_failure_report(waves, output_dir: str, args) -> int:
     return 0
 
 
+def _run_is_incomplete(waves) -> bool:
+    """True when this run could not see the whole corpus.
+
+    Two independent signals, both of which make "this file is gone from the
+    corpus, so it must have been ignored" an unsound inference:
+
+      * a file was collected but failed extraction, so its nodes are missing
+        even though the file is right there on disk;
+      * the walk could not read part of the tree (a chmod-000 directory), so
+        those files never reached the corpus at all. ``collect_files`` reports
+        that through the scanner's diagnostics; the attribute is read
+        defensively because it is only populated by scanners that track it.
+
+    The shrink guard uses this to stay armed instead of mistaking an unreadable
+    subtree for a deliberate exclusion.
+    """
+    for wave in waves or []:
+        if getattr(wave, "failures", None):
+            return True
+    return bool(_unreadable_subtrees())
+
+
+def _unreadable_subtrees() -> list[str]:
+    """Directories the scanner could not descend into during this run.
+
+    Contract with the discover layer: it exposes a zero-argument
+    ``unreadable_dirs()`` returning the paths a walk had to skip (today a bare
+    ``except PermissionError: return`` loses them silently). Read through
+    ``diagnostics`` first and the scanner second so either home works, and
+    treated as empty when neither provides it — an absent signal must degrade to
+    "no known walk errors", never to an import crash mid-scan.
+    """
+    for module, attr in (
+        ("codebeacon.diagnostics", "unreadable_dirs"),
+        ("codebeacon.discover.scanner", "unreadable_dirs"),
+    ):
+        try:
+            mod = __import__(module, fromlist=[attr])
+            fn = getattr(mod, attr, None)
+            if callable(fn):
+                return list(fn() or [])
+        except Exception:
+            continue
+    return []
+
+
+def _ensure_output_dir(output_path: Path) -> int:
+    """Create the output directory, or explain why the scan cannot start.
+
+    Scanning a read-only checkout (a Nix store path, a CI cache mount, a
+    third-party tree opened for reading) used to end in an unhandled
+    PermissionError traceback from ``mkdir`` before a single file was read.
+    The cache half of this is handled inside ``Cache``, which degrades to a
+    warning; the graph output has nowhere to go, so it is a clean failure with
+    the remedy spelled out. Returns 0 on success, 1 on failure.
+    """
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Deliberately does NOT name a flag: `scan` has no --output-dir, and
+        # pointing users at an option that does not exist is the same defect
+        # the old shrink-guard message had.
+        print(
+            f"Error: cannot create {output_path} — permission denied.\n"
+            f"  codebeacon writes its index into the tree it scans, so a "
+            f"read-only checkout cannot be scanned in place. Either make the "
+            f"directory writable, or copy the tree somewhere writable and scan "
+            f"the copy.",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as exc:
+        print(f"Error: cannot create {output_path} ({exc}).", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cache_anchor(projects, fallback: str) -> str:
+    """The directory cache keys are stored relative to.
+
+    Must contain EVERY project, otherwise the projects outside it fall back to
+    absolute keys and the cache stops being portable between machines — the
+    whole point of relative keying. Anchoring on ``projects[0].path`` did
+    exactly that for any repo with more than one project.
+
+    Falls back to the first project when no USEFUL common ancestor exists:
+    ``commonpath`` raises on separate Windows drives, and for unrelated trees it
+    succeeds with the filesystem root, which is worse than useless — every key
+    would then embed its whole absolute path minus the leading slash, i.e.
+    exactly the machine-specific keys relative anchoring exists to avoid.
+    """
+    paths = [p.path for p in projects if getattr(p, "path", None)]
+    if not paths:
+        return fallback
+    if len(paths) == 1:
+        return paths[0]
+    try:
+        anchor = os.path.commonpath([os.path.abspath(p) for p in paths])
+    except (ValueError, OSError):
+        return paths[0]
+    if os.path.dirname(anchor) == anchor:   # filesystem root
+        return paths[0]
+    return anchor
+
+
+def _emit_ignored_report(report, output_dir: str) -> None:
+    """Write ignored.json and point at it when anything was left out.
+
+    Best-effort: the diagnostic must never be the reason a scan fails.
+    """
+    from codebeacon.diagnostics import write_ignored_report
+
+    try:
+        path = write_ignored_report(report, output_dir)
+    except OSError as exc:
+        print(f"  Warning: could not write ignored.json ({exc}).", file=sys.stderr)
+        return
+    if path is None:
+        return
+    causes = ", ".join(
+        f"{reason}={count}"
+        for reason, count in sorted(report.counts.items(), key=lambda kv: -kv[1])[:3]
+    )
+    print(f"    {report.total} paths ignored ({causes}) — see {path.name}")
+
+
+def _reapply_knowledge_overlay(root, output_path) -> None:
+    """Re-mint the knowledge overlay a code-only rebuild has just dropped (R2).
+
+    A scan rebuilds the graph from source, so the note nodes that
+    ``codebeacon knowledge`` linked in are gone from the beacon it just wrote.
+    Re-running the link pass *here* — after the code graph is final — keeps the
+    overlay without weakening the determinism invariant that overlay nodes are
+    always minted last.
+
+    ``reapply_knowledge`` is a total function per F10's contract — it never
+    raises, and it reports its own failures on stderr. Its return value is the
+    whole protocol:
+
+        > 0   that many notes were re-linked; say so.
+        0     this repo never opted into an overlay; stay silent.
+        -1    an overlay exists but could not be rebuilt; it has already
+              warned, so a second message here would only duplicate it.
+    """
+    from codebeacon.knowledge.link import reapply_knowledge
+
+    notes = reapply_knowledge(Path(root), Path(output_path))
+    if notes > 0:
+        print(f"    Knowledge overlay reapplied: {notes} notes")
+
+
 def run_pipeline(projects, output_dir: str, args) -> int:
     """Run the full extraction pipeline for a list of projects."""
     from codebeacon.graph.analyze import analyze, report_to_markdown
@@ -67,9 +222,17 @@ def run_pipeline(projects, output_dir: str, args) -> int:
     from pathlib import Path
 
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    if _ensure_output_dir(output_path) != 0:
+        return 1
 
     wiki_only = getattr(args, "wiki_only", False)
+
+    # project_name → absolute root. Hoisted above the wiki_only split because
+    # BOTH branches need it: the HTML exporters inside the full-scan branch, and
+    # the wiki/obsidian generators below, which run either way. Keeping one
+    # binding also stops the same dict being rebuilt inline at three call sites.
+    project_roots = {p.name: p.path for p in projects}
+    html_assets = getattr(args, "html_assets", "local")
 
     if wiki_only:
         # --wiki-only: skip extraction, load existing graph and regenerate outputs
@@ -123,16 +286,27 @@ def run_pipeline(projects, output_dir: str, args) -> int:
         # The project root is passed so cache keys end up repo-relative —
         # makes ``.codebeacon/cache/cache.json`` portable across machines
         # for teams that share the directory in git.
-        cache_root = projects[0].path if projects else output_dir
+        cache_root = _cache_anchor(projects, output_dir)
         cache = Cache(output_dir, project_root=cache_root)
-        if getattr(args, "update", False):
+        # --force is the single escape hatch: it bypasses the shrink guard AND
+        # the incremental cache, so one flag recovers from both a refused write
+        # and a poisoned cache entry (G-0917-7).
+        force = bool(getattr(args, "force", False))
+        if getattr(args, "update", False) and not force:
             cache.load()
 
         wave_results = []
+        corpus: list[str] = []
         extra_ignore = list(getattr(args, "exclude", []) or [])
+        # One report across every project: an over-broad ignore rule and a clean
+        # scan both report N files and exit 0, so what got left out is recorded
+        # with a cause instead of being invisible (R12).
+        ignored = IgnoredReport()
         for project in projects:
             print(f"\n  Extracting {project.name} ({project.framework}) ...")
-            files = collect_files(project.path, extra_ignore=extra_ignore)
+            files = collect_files(project.path, extra_ignore=extra_ignore,
+                                  report=ignored)
+            corpus.extend(files)
             print(f"    {len(files)} source files found")
 
             def progress(done, total, _name=project.name):
@@ -162,6 +336,7 @@ def run_pipeline(projects, output_dir: str, args) -> int:
             wave_results.append(wave)
 
         cache.save()
+        _emit_ignored_report(ignored, output_dir)
 
         # Gate: if extraction failure rate breaches the threshold, write the
         # failures file and bail before producing a half-built graph that
@@ -195,47 +370,61 @@ def run_pipeline(projects, output_dir: str, args) -> int:
         n_communities = len(set(communities.values())) if communities else 0
         print(f"    {n_communities} communities detected")
 
-        # Persist beacon.json first; shrink/desync guard refuses to overwrite a
-        # larger prior graph and prevents the report from racing ahead of a
-        # half-written graph. In `--update` mode the cache already accounted
-        # for deleted files (see Cache.evict_missing), so a smaller graph is
-        # the expected outcome and the guard would otherwise fire on every
-        # delete-heavy run.
+        # Persist beacon.json first; the shrink/desync guard prevents the report
+        # from racing ahead of a half-written graph. The guard stays ARMED under
+        # --update, watch and hook rebuilds — those are the unattended paths it
+        # exists for — and instead of a blanket waiver it is handed the corpus,
+        # so a node loss can be attributed to a deleted or newly-excluded file.
         wr = write_beacon(
             G,
             output_path,
             repo_path=projects[0].path if projects else output_path,
-            had_explicit_deletions=getattr(args, "update", False),
-            project_roots={p.name: p.path for p in projects},
+            force=force,
+            project_roots=project_roots,
+            corpus=corpus,
+            incomplete=_run_is_incomplete(wave_results),
         )
         if wr.skipped_shrink:
             print(
-                "  Aborting outputs because the new graph is smaller than the existing one.",
+                "  Aborting outputs because nodes went missing without an explanation.",
                 file=sys.stderr,
             )
             return 1
 
+        _reapply_knowledge_overlay(
+            projects[0].path if projects else output_path, output_path,
+        )
+
         # Analysis (after write, so the report can quote the stamped commit)
-        report = analyze(G, communities, cohesion, project_paths={p.name: p.path for p in projects})
+        report = analyze(G, communities, cohesion, project_paths=project_roots)
         report.built_at_commit = wr.built_at_commit
         report.current_commit = wr.built_at_commit  # same run; not stale yet
+        # write_text_if_changed, not write_text: REPORT.md is derived entirely
+        # from the graph, so an unchanged rebuild reproduces it byte for byte.
+        # Rewriting identical bytes still moves mtime, which re-triggers editor
+        # indexers and file-sync clients watching .codebeacon/.
         report_path = output_path / "REPORT.md"
-        report_path.write_text(report_to_markdown(report), encoding="utf-8")
+        write_text_if_changed(report_path, report_to_markdown(report))
 
-        # Visual exports — best-effort, never block the pipeline.
+        # Visual exports — best-effort, never block the pipeline. The exporters
+        # degrade internally too (an unwritable page is one skipped file, not an
+        # abort), so these wrappers are belt-and-braces.
         try:
-            tree_path = write_tree_html(G, output_path)
+            tree_path = write_tree_html(
+                G, output_path,
+                project_roots=project_roots, html_assets=html_assets,
+            )
             print(f"    Wrote {tree_path.name}")
         except (OSError, ValueError) as exc:
             print(f"    Warning: tree HTML failed: {exc}", file=sys.stderr)
         try:
-            flow_path = write_callflow_html(G, output_path)
+            flow_path = write_callflow_html(
+                G, output_path,
+                project_roots=project_roots, html_assets=html_assets,
+            )
             print(f"    Wrote {flow_path.name}")
         except (OSError, ValueError) as exc:
             print(f"    Warning: callflow HTML failed: {exc}", file=sys.stderr)
-
-    # project_name → absolute root, so wiki/obsidian emit relative source paths (#1417)
-    project_roots = {p.name: p.path for p in projects}
 
     # Which exporters run is gated by output.* in codebeacon.yaml, wired onto
     # `args` by _cmd_sync (getattr defaults keep the plain-scan path writing
@@ -251,21 +440,31 @@ def run_pipeline(projects, output_dir: str, args) -> int:
     if gen_wiki:
         print("  Generating wiki ...")
         from codebeacon.wiki.generator import generate_wiki
-        generate_wiki(G, communities, output_dir, project_roots=project_roots)
-        print(f"    Wiki written to {output_dir}/wiki/")
+        # The exporters are idempotent (staging + content compare), so these
+        # counts are churn, not volume: on an unchanged repo they read 0 and
+        # the committed tree stays clean.
+        changed = generate_wiki(G, communities, output_dir, project_roots=project_roots)
+        print(f"    Wiki written to {output_dir}/wiki/ ({changed} page(s) changed)")
 
     # Obsidian vault generation
     if gen_obsidian:
         print("  Generating Obsidian vault ...")
         from codebeacon.export.obsidian import generate_obsidian_vault, VaultNotOwnedError
+        obs_stats: dict[str, int] = {}
         try:
             n_notes = generate_obsidian_vault(
-                G, communities, output_dir, obsidian_dir=obsidian_dir, project_roots=project_roots
+                G, communities, output_dir, obsidian_dir=obsidian_dir,
+                project_roots=project_roots, stats=obs_stats,
             )
         except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
             print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
             n_notes = 0
-        print(f"    {n_notes} notes written to {obsidian_dir or output_dir + '/obsidian'}/")
+        print(
+            f"    {n_notes} notes written to "
+            f"{obsidian_dir or output_dir + '/obsidian'}/ "
+            f"({obs_stats.get('changed', 0)} changed, "
+            f"{obs_stats.get('removed', 0)} removed)"
+        )
 
     # Context Map generation (CLAUDE.md / .cursorrules / AGENTS.md)
     if context_targets is None or context_targets:
@@ -387,6 +586,11 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     workspace_root = workspace_path.resolve().parent
     wiki_only = getattr(args, "wiki_only", False)
     obsidian_dir = getattr(args, "obsidian_dir", None)
+    # Hoisted above the wiki_only split for the same reason as in run_pipeline:
+    # the workspace HTML exporters run inside the full-scan branch while the
+    # wiki/obsidian generators below run either way, and both need these.
+    workspace_roots = {p.name: p.path for p in projects}
+    html_assets = getattr(args, "html_assets", "local")
 
     # Exporter gates + wave sizing from codebeacon.yaml (wired onto `args` by
     # _cmd_sync). getattr defaults preserve the plain --deep-dive scan path,
@@ -415,6 +619,8 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
     # group_waves collects the same waves per repo boundary for Phase 2.
     project_waves: list[tuple] = []
     group_waves: dict = {root: [] for root, _ in grouped}
+    group_corpus: dict = {root: [] for root, _ in grouped}
+    force = bool(getattr(args, "force", False))
 
     if not wiki_only:
         from codebeacon.discover.scanner import collect_files
@@ -422,18 +628,21 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
         from codebeacon.wave import auto_wave
 
         extra_ignore = list(getattr(args, "exclude", []) or [])
+        ignored = IgnoredReport()
         for group_root, group_projects in grouped:
             # One cache per group, shared by its projects and stored at the
             # group root — writing it per-project would scatter .codebeacon/
             # dirs into a monorepo's subfolders, and per-project Cache
             # instances saving to one file would overwrite each other.
             cache = Cache(str(group_root / ".codebeacon"), project_root=str(group_root))
-            if getattr(args, "update", False):
+            if getattr(args, "update", False) and not force:
                 cache.load()
 
             for project in group_projects:
                 print(f"\n  Extracting {project.name} ({project.framework}) ...")
-                files = collect_files(project.path, extra_ignore=extra_ignore)
+                files = collect_files(project.path, extra_ignore=extra_ignore,
+                                      report=ignored)
+                group_corpus[group_root].extend(files)
                 print(f"    {len(files)} source files found")
 
                 def progress(done, total, _name=project.name):
@@ -465,6 +674,8 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 group_waves[group_root].append(wave)
 
             cache.save()
+
+        _emit_ignored_report(ignored, workspace_output_dir)
 
         # Gate: workspace-level failure report covering every project.
         gate = emit_failure_report(
@@ -520,7 +731,10 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             if not waves:
                 continue
             proj_output_dir = str(group_root / ".codebeacon")
-            Path(proj_output_dir).mkdir(parents=True, exist_ok=True)
+            if _ensure_output_dir(Path(proj_output_dir)) != 0:
+                # One unwritable group must not sink the whole deep dive; the
+                # other groups and the workspace graph are still worth having.
+                continue
 
             print(f"\n  Building graph for {label} ...")
             G = build_graph(waves)
@@ -547,25 +761,31 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
                 G,
                 proj_output_dir,
                 repo_path=str(group_root),
-                had_explicit_deletions=getattr(args, "update", False),
+                force=force,
                 project_roots=group_roots,
+                corpus=group_corpus.get(group_root) or [],
+                incomplete=_run_is_incomplete(waves),
             )
             if wr.skipped_shrink:
                 print(
                     f"    Warning: refused to shrink {label} graph; keeping prior beacon.json.",
                     file=sys.stderr,
                 )
+            else:
+                _reapply_knowledge_overlay(group_root, Path(proj_output_dir))
 
             report = analyze(G, communities, cohesion, project_paths=group_roots)
             report.built_at_commit = wr.built_at_commit
             report.current_commit = wr.built_at_commit
-            (Path(proj_output_dir) / "REPORT.md").write_text(
-                report_to_markdown(report), encoding="utf-8"
+            write_text_if_changed(
+                Path(proj_output_dir) / "REPORT.md", report_to_markdown(report)
             )
 
             try:
-                write_tree_html(G, proj_output_dir)
-                write_callflow_html(G, proj_output_dir)
+                write_tree_html(G, proj_output_dir, project_roots=group_roots,
+                                html_assets=html_assets)
+                write_callflow_html(G, proj_output_dir, project_roots=group_roots,
+                                    html_assets=html_assets)
             except (OSError, ValueError) as exc:
                 print(f"    Warning: HTML export failed for {label}: {exc}", file=sys.stderr)
 
@@ -577,7 +797,8 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
 
     # ── Phase 3: Combined workspace graph + outputs ────────────────────────────
     print("\n  Building combined workspace graph ...")
-    workspace_path.mkdir(parents=True, exist_ok=True)
+    if _ensure_output_dir(workspace_path) != 0:
+        return 1
 
     if wiki_only:
         beacon_path = workspace_path / "beacon.json"
@@ -628,47 +849,60 @@ def run_deep_dive_pipeline(projects, workspace_output_dir: str, args) -> int:
             G_all,
             workspace_path,
             repo_path=workspace_output_dir,
-            had_explicit_deletions=getattr(args, "update", False),
-            project_roots={p.name: p.path for p in projects},
+            force=force,
+            project_roots=workspace_roots,
+            corpus=[f for files in group_corpus.values() for f in files],
+            incomplete=_run_is_incomplete(all_waves),
         )
         if wr_all.skipped_shrink:
             print(
-                "  Aborting workspace outputs because the combined graph is smaller than the existing one.",
+                "  Aborting workspace outputs because nodes went missing without an explanation.",
                 file=sys.stderr,
             )
             return 1
 
-        report_all = analyze(G_all, communities_all, cohesion_all, project_paths={p.name: p.path for p in projects})
+        _reapply_knowledge_overlay(workspace_output_dir, workspace_path)
+
+        report_all = analyze(G_all, communities_all, cohesion_all, project_paths=workspace_roots)
         report_all.built_at_commit = wr_all.built_at_commit
         report_all.current_commit = wr_all.built_at_commit
-        (workspace_path / "REPORT.md").write_text(
-            report_to_markdown(report_all), encoding="utf-8"
+        write_text_if_changed(
+            workspace_path / "REPORT.md", report_to_markdown(report_all)
         )
 
         try:
-            write_tree_html(G_all, workspace_path)
-            write_callflow_html(G_all, workspace_path)
+            write_tree_html(G_all, workspace_path, project_roots=workspace_roots,
+                            html_assets=html_assets)
+            write_callflow_html(G_all, workspace_path, project_roots=workspace_roots,
+                                html_assets=html_assets)
         except (OSError, ValueError) as exc:
             print(f"    Warning: workspace HTML export failed: {exc}", file=sys.stderr)
 
-    workspace_roots = {p.name: p.path for p in projects}
     if gen_wiki:
         print("  Generating combined wiki ...")
-        generate_wiki(G_all, communities_all, workspace_output_dir, project_roots=workspace_roots)
-        print(f"    Wiki written to {workspace_output_dir}/wiki/")
+        changed = generate_wiki(
+            G_all, communities_all, workspace_output_dir, project_roots=workspace_roots)
+        print(f"    Wiki written to {workspace_output_dir}/wiki/ ({changed} page(s) changed)")
 
     if gen_obsidian:
         from codebeacon.export.obsidian import VaultNotOwnedError
         print("  Generating combined Obsidian vault ...")
+        obs_stats: dict[str, int] = {}
         try:
             n_notes = generate_obsidian_vault(
                 G_all, communities_all, workspace_output_dir,
                 obsidian_dir=obsidian_dir, project_roots=workspace_roots,
+                stats=obs_stats,
             )
         except VaultNotOwnedError as exc:  # --obsidian-dir points at a non-empty user vault (#1506)
             print(f"    Skipping Obsidian export: {exc}", file=sys.stderr)
             n_notes = 0
-        print(f"    {n_notes} notes written to {obsidian_dir or workspace_output_dir + '/obsidian'}/")
+        print(
+            f"    {n_notes} notes written to "
+            f"{obsidian_dir or workspace_output_dir + '/obsidian'}/ "
+            f"({obs_stats.get('changed', 0)} changed, "
+            f"{obs_stats.get('removed', 0)} removed)"
+        )
 
     if gen_context:
         print("  Generating combined context map ...")
@@ -721,13 +955,18 @@ def write_project_artifact_outputs(
 
     if wiki:
         print(f"  [{label}] Generating wiki ...")
-        generate_wiki(G, communities, proj_output_dir, project_roots=project_roots)
+        changed = generate_wiki(G, communities, proj_output_dir, project_roots=project_roots)
+        print(f"    {changed} page(s) changed")
 
     if obsidian:
         print(f"  [{label}] Generating Obsidian vault ...")
+        obs_stats: dict[str, int] = {}
         generate_obsidian_vault(
-            G, communities, proj_output_dir, obsidian_dir=None, project_roots=project_roots
+            G, communities, proj_output_dir, obsidian_dir=None,
+            project_roots=project_roots, stats=obs_stats,
         )
+        print(f"    {obs_stats.get('changed', 0)} note(s) changed, "
+              f"{obs_stats.get('removed', 0)} removed")
 
     if targets is None or targets:
         print(f"  [{label}] Generating context map ...")

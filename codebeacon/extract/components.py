@@ -148,48 +148,110 @@ def _annotate_page_routes(
                 is_page = True
 
     if is_page:
-        for comp in components:
+        # A route file's page component is its default export. The named exports
+        # beside it are route-segment config (Next.js App Router `metadata`,
+        # `revalidate`, `dynamic`) or helpers — now that those are noded too,
+        # marking them all would present every one as a "Page Component" in the
+        # wiki. Uppercase is the component naming convention; when nothing in the
+        # file follows it (SvelteKit's `+page` stem, an anonymous SFC, a route
+        # file of plain functions) fall back to marking everything.
+        named = [c for c in components if c.name[:1].isupper()]
+        for comp in (named or components):
             comp.is_page = True
+
+
+def _is_type_only(node) -> bool:
+    """True for a TypeScript type-only export — ``export type { T }`` or the
+    per-specifier ``export { type T, runtime }`` form.
+
+    The ``type`` keyword is an anonymous child of the export_statement (or of the
+    export_specifier), so it never appears in a capture; it has to be read off
+    the node. A type-only export names no runtime symbol, so noding it would
+    invent a declaration that does not exist at runtime.
+    """
+    return any(child.type == "type" and not child.is_named for child in node.children)
 
 
 # ── Per-framework interpreters ────────────────────────────────────────────────
 
+_REACT_PARENT_KEYS = (
+    "component.export_func", "component.export_func_upper",
+    "component.export_default_func", "component.export_arrow",
+    "component.local_arrow", "component.hoc",
+    "component.hoc_local", "component.hoc_bare_export",
+    "component.hoc_bare_local", "component.export_fnexpr",
+    "component.local_fnexpr", "component.local_func",
+    "export.decl", "export.object", "export.clause",
+)
+
+
 def _interpret_react(
     file_path: str, matches: list, framework: str,
 ) -> list[ComponentInfo]:
-    """React/Next.js: exported uppercase functions/arrows + hooks + props."""
+    """React/Next.js: exported functions/arrows/symbols + hooks + props."""
     components: dict[str, ComponentInfo] = {}  # name → ComponentInfo
     comp_ranges: dict[str, tuple[int, int] | None] = {}  # name → (start_byte, end_byte)
     props: list[str] = []
     hook_sites: list[tuple[int, str]] = []    # (byte pos, hook name)
     import_sites: list[tuple[int, str]] = []  # (byte pos, import path)
+    # `export { x }` specifiers are applied after the main loop so an inline
+    # declaration of the same name always wins the line number, whatever order
+    # tree-sitter returns the two patterns in.
+    clause_specs: list[tuple[str, object]] = []  # (name, export_statement node)
+
+    def _record(name: str, parent) -> None:
+        """Register a declaration node, first spelling wins."""
+        if not name or name in components:
+            return
+        components[name] = ComponentInfo(
+            name=name,
+            source_file=file_path,
+            line=parent.start_point[0] + 1 if parent is not None else 1,
+            framework=framework,
+        )
+        comp_ranges[name] = (
+            (parent.start_byte, parent.end_byte) if parent is not None else None
+        )
 
     for _idx, caps in matches:
+        # Line + byte range come from the parent export/declaration node
+        parent = None
+        for k in _REACT_PARENT_KEYS:
+            if k in caps:
+                parent = caps[k][0]
+                break
+
         # Exported function component
         for cap_key in ("component.func_name", "component.arrow_name", "component.memo_name"):
             if cap_key in caps:
-                name = node_text(caps[cap_key][0])
-                if name and name not in components:
-                    # Determine line + byte range from the parent export/declaration
-                    parent_key = None
-                    for k in ("component.export_func", "component.export_func_upper",
-                              "component.export_default_func", "component.export_arrow",
-                              "component.local_arrow", "component.hoc",
-                              "component.hoc_local", "component.hoc_bare_export",
-                              "component.hoc_bare_local", "component.export_fnexpr",
-                              "component.local_fnexpr", "component.local_func"):
-                        if k in caps:
-                            parent_key = k
-                            break
-                    parent = caps[parent_key][0] if parent_key else None
-                    line = parent.start_point[0] + 1 if parent else 1
-                    components[name] = ComponentInfo(
-                        name=name,
-                        source_file=file_path,
-                        line=line,
-                        framework=framework,
-                    )
-                    comp_ranges[name] = (parent.start_byte, parent.end_byte) if parent else None
+                _record(node_text(caps[cap_key][0]), parent)
+
+        # Exported module symbol of any case (hook, store, util, constant)
+        if "export.name" in caps:
+            for name_node in caps["export.name"]:
+                _record(node_text(name_node), parent)
+
+        # Callable members of an exported object literal. The member label is
+        # qualified (`repo.findById`) — a bare `create` / `get` / `remove` would
+        # be matched by graph/build.py's module-basename→label import binding and
+        # fabricate edges into unrelated files.
+        if "export.member" in caps and "export.owner" in caps:
+            owner = node_text(caps["export.owner"][0])
+            for member_node in caps["export.member"]:
+                member = node_text(member_node)
+                if owner and member:
+                    _record(f"{owner}.{member}", member_node.parent or parent)
+
+        # export { x, y as z } — deferred, and never for a re-export
+        if "export.spec" in caps and "export.clause" in caps:
+            stmt = caps["export.clause"][0]
+            if stmt.child_by_field_name("source") is None and not _is_type_only(stmt):
+                for spec in caps["export.spec"]:
+                    if _is_type_only(spec):
+                        continue
+                    named = spec.child_by_field_name("alias") or spec.child_by_field_name("name")
+                    if named is not None:
+                        clause_specs.append((node_text(named), stmt))
 
         # Hooks — record call site so it can be scoped to its enclosing component
         if "hook.name" in caps:
@@ -209,6 +271,9 @@ def _interpret_react(
             path = node_text(node).strip("'\"")
             if not path.startswith("."):
                 import_sites.append((node.start_byte, path))
+
+    for name, stmt in clause_specs:
+        _record(name, stmt)
 
     def _owner(pos: int) -> str | None:
         """Innermost component whose byte range encloses ``pos`` (None if file-level)."""

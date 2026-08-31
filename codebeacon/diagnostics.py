@@ -20,11 +20,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+from codebeacon.common.io import write_text_if_changed
 from codebeacon.wave import ExtractionFailure, WaveResult
 
 
 EXTRACTION_FAILURES_FILENAME = "extraction-failures.json"
 SEMANTIC_STATS_FILENAME = "semantic-stats.json"
+IGNORED_FILENAME = "ignored.json"
 
 # Default threshold: if >1% of attempted files fail extraction, the CLI
 # returns a non-zero exit code. Tunable via --max-failure-rate.
@@ -89,11 +91,115 @@ def write_extraction_failures(
         return report, None
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
+    write_text_if_changed(
+        out_path,
         json.dumps(report.to_dict(), indent=2, sort_keys=True, ensure_ascii=False),
-        encoding="utf-8",
     )
     return report, out_path
+
+
+# ── What the file collector left out ──────────────────────────────────────────
+
+@dataclass
+class IgnoredReport:
+    """Why files and directories are missing from the collected corpus.
+
+    An over-broad ignore rule and a clean scan look identical from the outside:
+    both report N files and exit 0. This bucket is what makes the difference
+    visible — every pruned subtree, dropped file and unreadable directory is
+    recorded with a cause, so "where did my module go?" is one artefact away.
+
+    Bounded twice over so a pathological tree cannot bloat the artefact: a
+    pruned directory contributes exactly one entry no matter how many files sit
+    beneath it, per-directory file lists stop at ``max_per_dir``, and each
+    bucket stops at ``max_entries``. The counts stay exact past both caps.
+    """
+
+    max_entries: int = 500
+    max_per_dir: int = 20
+
+    dirs: list[dict] = field(default_factory=list)
+    files: list[dict] = field(default_factory=list)
+    permission_denied: list[str] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+    truncated: bool = False
+
+    # Not serialised: per-parent-directory tallies backing ``max_per_dir``.
+    _per_dir: dict[str, int] = field(default_factory=dict, repr=False)
+
+    def add_dir(self, path: str, reason: str) -> None:
+        self.counts[reason] = self.counts.get(reason, 0) + 1
+        if len(self.dirs) < self.max_entries:
+            self.dirs.append({"path": path, "reason": reason})
+        else:
+            self.truncated = True
+
+    def add_file(self, path: str, reason: str) -> None:
+        self.counts[reason] = self.counts.get(reason, 0) + 1
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        seen = self._per_dir.get(parent, 0)
+        self._per_dir[parent] = seen + 1
+        if seen >= self.max_per_dir or len(self.files) >= self.max_entries:
+            self.truncated = True
+            return
+        self.files.append({"path": path, "reason": reason})
+
+    def add_permission_denied(self, path: str) -> None:
+        self.counts["permission_denied"] = self.counts.get("permission_denied", 0) + 1
+        if len(self.permission_denied) < self.max_entries:
+            self.permission_denied.append(path)
+        else:
+            self.truncated = True
+
+    @property
+    def incomplete(self) -> bool:
+        """True when the corpus is short through no decision of ours.
+
+        A subtree we could not read is not the same as a subtree the user
+        excluded: the files may well still exist. Callers that compare corpus
+        sizes across runs — the shrink guard above all — must treat this as a
+        reason to stay armed rather than to accept a smaller graph.
+        """
+        return bool(self.permission_denied)
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    def to_dict(self) -> dict:
+        return {
+            "counts": dict(self.counts),
+            "total": self.total,
+            "truncated": self.truncated,
+            "incomplete": self.incomplete,
+            "dirs": self.dirs,
+            "files": self.files,
+            "permission_denied": self.permission_denied,
+        }
+
+
+def write_ignored_report(
+    report: IgnoredReport,
+    output_dir: str | Path,
+) -> Optional[Path]:
+    """Write ignored.json (only when something was actually ignored).
+
+    Mirrors :func:`write_extraction_failures`: an empty run removes a stale file
+    from a previous scan rather than leaving a list that no longer applies.
+    """
+    out_path = Path(output_dir) / IGNORED_FILENAME
+
+    if report.total == 0:
+        if out_path.exists():
+            out_path.unlink()
+        return None
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_text_if_changed(
+        out_path,
+        json.dumps(report.to_dict(), indent=2, sort_keys=True, ensure_ascii=False),
+    )
+    return out_path
 
 
 # ── Semantic-pipeline stats (LLM enrichment) ──────────────────────────────────
@@ -124,8 +230,8 @@ def write_semantic_stats(
     """Write semantic-stats.json next to beacon.json."""
     out_path = Path(output_dir) / SEMANTIC_STATS_FILENAME
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
+    write_text_if_changed(
+        out_path,
         json.dumps(stats.to_dict(), indent=2, sort_keys=True, ensure_ascii=False),
-        encoding="utf-8",
     )
     return out_path

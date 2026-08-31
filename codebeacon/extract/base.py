@@ -21,6 +21,10 @@ from tree_sitter import Language, Parser, Query, QueryCursor, Node
 # ── Grammar registry ─────────────────────────────────────────────────────────
 
 _LANG_CACHE: dict[str, Optional[Language]] = {}
+# grammar name → why it could not be loaded. Populated alongside a None cache
+# entry so the failure can be reported with its real cause at the point a file
+# needing that grammar is parsed, long after the one-time warning was emitted.
+_LANG_ERROR: dict[str, str] = {}
 # Guards first-load of a grammar. Without it, two wave worker threads hitting
 # the same uncached grammar each build their OWN Language instance and the
 # loser's overwrites the cache. The winner thread then fails the
@@ -95,6 +99,14 @@ EXT_TO_GRAMMAR: dict[str, str] = {
     ".tsx":   "tsx",
     ".go":    "go",
     ".rb":    "ruby",
+    # Rake task files are plain Ruby and the ruby grammar parses them verbatim.
+    # Unregistered here, they parsed to nothing: the classes and requires a
+    # lib/tasks/*.rake file declares were invisible while the identical content
+    # in a .rb file extracted normally. rails.scm is selected by framework, not
+    # by extension, so this mapping plus the scanner's extension set is the
+    # whole change. (The extensionless `Rakefile` cannot be expressed by an
+    # extension-keyed map and is still skipped.)
+    ".rake":  "ruby",
     ".php":   "php",
     ".cs":    "csharp",
     ".rs":    "rust",
@@ -137,13 +149,38 @@ def get_language(name: str) -> Optional[Language]:
         return _load_language_locked(name)
 
 
+def _unavailable(name: str, reason: str) -> None:
+    """Cache a grammar as unavailable, remember why, and warn once."""
+    _LANG_CACHE[name] = None
+    _LANG_ERROR[name] = reason
+    warnings.warn(reason, stacklevel=4)
+
+
+def _module_version(module_name: str) -> str:
+    """Best-effort installed version of a grammar package, for error messages."""
+    try:
+        from importlib.metadata import version
+
+        return version(module_name.replace("_", "-"))
+    except Exception:
+        return "unknown"
+
+
+def grammar_unavailable_reason(name: str) -> str:
+    """Why grammar *name* is unavailable, in a form worth showing a user."""
+    return _LANG_ERROR.get(name, f"Grammar '{name}' is unavailable.")
+
+
 def _load_language_locked(name: str) -> Optional[Language]:
     if name in _LANG_CACHE:
         return _LANG_CACHE[name]
 
     module_name = _GRAMMAR_MODULES.get(name)
     if not module_name:
+        # Unknown grammar name — not a user-actionable install problem, so no
+        # warning (a rogue extension must not spam a scan of hundreds of files).
         _LANG_CACHE[name] = None
+        _LANG_ERROR[name] = f"No grammar module is registered for '{name}'."
         return None
 
     try:
@@ -164,14 +201,28 @@ def _load_language_locked(name: str) -> Optional[Language]:
         else:
             lang = Language(mod.language())
         _LANG_CACHE[name] = lang
+        _LANG_ERROR.pop(name, None)
         return lang
-    except (ImportError, AttributeError):
-        warnings.warn(
+    except ImportError:
+        _unavailable(
+            name,
             f"Grammar '{name}' not installed. "
             f"Install with: pip install codebeacon[{_pip_extra(name)}]",
-            stacklevel=3,
         )
-        _LANG_CACHE[name] = None
+        return None
+    except AttributeError as exc:
+        # The package IS installed but no longer exposes the entry point we
+        # call. Folding this into the ImportError branch advised reinstalling
+        # something already present, which sends the user down the wrong path —
+        # the fix is a version pin. This is the grammar-drift failure mode the
+        # 0.6.6 upper-bound pins were introduced for, so name the real cause.
+        _unavailable(
+            name,
+            f"Grammar '{name}': module '{module_name}' is installed "
+            f"(version {_module_version(module_name)}) but does not expose the "
+            f"expected entry point ({exc}). The grammar package's API changed — "
+            f"pin a compatible version rather than reinstalling.",
+        )
         return None
 
 
@@ -214,6 +265,23 @@ class GrammarQueryError(Exception):
     regression, not an expected skip. (Upper-bound grammar pins in pyproject and
     the .scm compile test in tests/test_graphify_parity_0_6_6.py are the
     first line of defence; this is the runtime backstop.)
+    """
+
+
+class GrammarUnavailableError(Exception):
+    """The grammar needed for a file codebeacon chose to scan cannot be loaded.
+
+    Distinct from :class:`GrammarQueryError` (a query that no longer compiles):
+    here the grammar itself is missing, or is installed but no longer exposes
+    the entry point we call.
+
+    Raised rather than returning an empty extraction because the file's
+    extension is one codebeacon *claims* to support — it decided to scan the
+    file, so producing zero nodes for it is a failure, not a skip. Silently
+    returning ``[]`` let a whole language vanish from the graph while the run
+    printed nothing and exited 0; routed through
+    :class:`~codebeacon.wave.ExtractionFailure` it reaches
+    ``extraction-failures.json`` and the ``--max-failure-rate`` gate instead.
     """
 
 
@@ -265,18 +333,21 @@ def parse_file(file_path: str) -> Optional[tuple[Node, Language]]:
     """Parse a source file and return (root_node, language).
 
     For .vue files, returns None — use extract_vue_sections() instead.
+
+    Raises :class:`GrammarUnavailableError` when the extension maps to a
+    grammar codebeacon supports but that grammar cannot be loaded.
     """
     ext = Path(file_path).suffix.lower()
     grammar = EXT_TO_GRAMMAR.get(ext)
 
     if grammar is None:
-        return None
+        return None  # not a language we claim to read — a genuine skip
     if grammar == "_vue_sfc":
         return None  # handled separately
 
     lang = get_language(grammar)
     if lang is None:
-        return None
+        raise GrammarUnavailableError(grammar_unavailable_reason(grammar))
 
     try:
         content = Path(file_path).read_bytes()

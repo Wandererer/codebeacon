@@ -27,13 +27,22 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
-from codebeacon.common.safety import cap_filename, dedup_stem, escape_frontmatter_value, sanitize_label
+from codebeacon.common.io import write_text_if_changed
+from codebeacon.common.safety import (
+    cap_filename,
+    dedup_stem,
+    escape_frontmatter_value,
+    sanitize_label,
+    undot_filename,
+)
 from codebeacon.graph.write import relativize_source_file
 
 
@@ -66,6 +75,15 @@ _WIN_RESERVED = frozenset(
 # it may safely clear/regenerate the vault (graphify #1506).
 _VAULT_MARKER = ".codebeacon-vault.json"
 
+# Scratch directory the 12 steps run in before their results are committed into
+# the vault. A dot-name so Obsidian ignores it and every sweep in this module
+# skips it; kept short so a staged path is barely longer than its final one.
+_STAGING_DIR = ".cb-staging"
+
+# Vault entries that do not count as "someone else's content" when deciding
+# whether an empty-looking directory is safe to adopt.
+_OURS_ALWAYS = frozenset({_VAULT_MARKER, _STAGING_DIR})
+
 
 class VaultNotOwnedError(ValueError):
     """Raised when ``--obsidian-dir`` points at a directory codebeacon does not
@@ -75,12 +93,48 @@ class VaultNotOwnedError(ValueError):
     """
 
 
+# How many notes the adoption probe reads before giving up. A vault we wrote is
+# uniform, so a mixed vault reveals itself in the first handful of files; the cap
+# just stops a huge user vault from costing a full read of every note.
+_ADOPTION_SAMPLE = 200
+
+# Frontmatter tag (``  - codebeacon/code``) or footer tag (``#codebeacon/code``)
+# that only a codebeacon-generated note carries.
+_OWN_MARKER_RE = re.compile(r"(?m)^\s*-\s*codebeacon/|#codebeacon/")
+
+
+def _every_note_is_ours(vault: Path) -> bool:
+    """True when the vault holds notes and EVERY one of them is codebeacon's.
+
+    A vault written by codebeacon before the ownership marker existed has no
+    ``.codebeacon-vault.json``, so the empty-directory probe refuses it and the
+    vault stays permanently unwritable via ``--obsidian-dir`` — for a directory
+    codebeacon itself created (graphify #949-17). Recognising our own notes
+    re-adopts it. The test is all-or-nothing: one note without our marker means a
+    human has been writing here, and we refuse. Read errors fail closed.
+    """
+    seen = 0
+    try:
+        for md in sorted(vault.rglob("*.md")):
+            if any(part.startswith(".") for part in md.relative_to(vault).parts):
+                continue
+            seen += 1
+            if seen > _ADOPTION_SAMPLE:
+                break
+            if not _OWN_MARKER_RE.search(md.read_text(encoding="utf-8", errors="ignore")):
+                return False
+    except OSError:
+        return False
+    return seen > 0
+
+
 def _is_codebeacon_owned_vault(vault: Path, is_default: bool) -> bool:
     """True when it is safe for codebeacon to wipe & regenerate ``vault``.
 
     Owned when it is the default ``output_dir/obsidian`` (we created it), when a
-    prior run left the ownership marker, or when it is GENUINELY EMPTY (nothing
-    but, at most, our marker) — a brand-new directory is safe to adopt. A
+    prior run left the ownership marker, when it is GENUINELY EMPTY (nothing but,
+    at most, our marker), or when every note in it carries codebeacon's own tags
+    (a vault from a pre-marker release — see ``_every_note_is_ours``). A
     directory that merely holds no ``.md`` yet is NOT safe: a real Obsidian vault
     starts with a ``.obsidian/`` config folder (and possibly ``.canvas`` /
     attachments) and zero notes, so a ``.md``-count probe would wrongly adopt it,
@@ -92,9 +146,11 @@ def _is_codebeacon_owned_vault(vault: Path, is_default: bool) -> bool:
     if (vault / _VAULT_MARKER).exists():
         return True
     try:
-        return not any(p.name != _VAULT_MARKER for p in vault.iterdir())
+        if not any(p.name not in _OURS_ALWAYS for p in vault.iterdir()):
+            return True
     except OSError:
         return False  # cannot prove it is empty → refuse rather than wipe
+    return _every_note_is_ours(vault)
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -105,6 +161,7 @@ def generate_obsidian_vault(
     output_dir: str | Path,
     obsidian_dir: str | Path | None = None,
     project_roots: dict[str, str] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> int:
     """Generate a fully post-processed Obsidian vault.
 
@@ -113,9 +170,12 @@ def generate_obsidian_vault(
         communities:  node_id → community_id mapping
         output_dir:   codebeacon output root (.codebeacon/)
         obsidian_dir: override vault path; defaults to output_dir/obsidian/
+        stats:        optional dict filled with ``changed`` (notes actually
+                      rewritten), ``removed`` (stale notes swept) and ``total``,
+                      so a caller can report "4 of 3,200 notes changed".
 
     Returns:
-        Total number of notes written.
+        Total number of notes in the vault.
     """
     is_default = obsidian_dir is None
     vault = Path(obsidian_dir) if obsidian_dir else Path(output_dir) / "obsidian"
@@ -138,60 +198,130 @@ def generate_obsidian_vault(
         )
     # Stamp the ownership marker so subsequent runs recognise this vault as ours.
     # It is a dot-file, so the sweep below (which skips dot-paths) preserves it.
-    (vault / _VAULT_MARKER).write_text(
+    write_text_if_changed(
+        vault / _VAULT_MARKER,
         json.dumps({"tool": "codebeacon", "owns": "obsidian-vault"}),
-        encoding="utf-8",
     )
 
-    # Clear stale notes from previous runs so step 1 regenerates cleanly. The
-    # whole vault is generated from the graph, so we sweep every *.md anywhere
-    # under it — not just one level inside service folders. Notes left at the
-    # vault root (e.g. by a prior run that crashed before step 5/8 moved them)
-    # or in deeper nesting were previously orphaned across re-scans. We skip
-    # dot-directories like .obsidian so config/graph.json survive.
-    for md in vault.rglob("*.md"):
-        if any(part.startswith(".") for part in md.relative_to(vault).parts):
-            continue
-        md.unlink()
+    # The 12 steps run against a scratch directory, not the vault itself.
+    #
+    # They are a chain of read-modify-write passes — step 1 emits a raw note and
+    # steps 2-11 rewrite it in place — so a note's final content is only known
+    # once the chain has finished. Running them directly on the vault therefore
+    # touched every note on every scan even when the corpus was byte-identical:
+    # step 1 alone always differs from the post-processed file already on disk.
+    # That moved the mtime of the entire committed `.codebeacon/obsidian` tree
+    # each run, re-firing Obsidian's indexer, sync clients, and codebeacon's own
+    # `watch` mode (graphify #3060).
+    #
+    # Staging keeps the steps exactly as they were and moves the idempotence to
+    # one place: `_commit_staged` compares each finished note against the vault
+    # and writes only the ones that differ, then sweeps the notes this run did
+    # not produce (which is also what makes the old up-front unlink unnecessary).
+    staging = vault / _STAGING_DIR
+    shutil.rmtree(staging, ignore_errors=True)  # residue from an aborted run
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        # Step 1 — basic note generation
+        _step1_generate_notes(G, communities, staging, project_roots)
 
-    # Step 1 — basic note generation
-    _step1_generate_notes(G, communities, vault, project_roots)
+        # Step 2 — broken wikilink normalisation
+        _step2_fix_wikilinks(staging)
 
-    # Step 2 — broken wikilink normalisation
-    _step2_fix_wikilinks(vault)
+        # Step 3 — cross-language imports removal (Java↔TS)
+        _step3_remove_cross_language(staging)
 
-    # Step 3 — cross-language imports removal (Java↔TS)
-    _step3_remove_cross_language(vault)
+        # Step 4 — Community_N tag → service folder name
+        _step4_fix_community_tags(staging)
 
-    # Step 4 — Community_N tag → service folder name
-    _step4_fix_community_tags(vault)
+        # Step 5 — move notes to service subfolders
+        _step5_move_to_subfolders(staging)
 
-    # Step 5 — move notes to service subfolders
-    _step5_move_to_subfolders(vault)
+        # Step 6 — deduplicate same source_file notes
+        _step6_dedup_notes(staging)
 
-    # Step 6 — deduplicate same source_file notes
-    _step6_dedup_notes(vault)
+        # Step 7 — inject Members section from methods/fields
+        _step7_inject_members(G, staging)
 
-    # Step 7 — inject Members section from methods/fields
-    _step7_inject_members(G, vault)
+        # Step 8 — move any remaining root-level notes
+        _step8_move_remaining(staging)
 
-    # Step 8 — move any remaining root-level notes
-    _step8_move_remaining(vault)
+        # Step 9 — service index hub notes + backlinks
+        _step9_hub_notes(staging)
 
-    # Step 9 — service index hub notes + backlinks
-    _step9_hub_notes(vault)
+        # Step 10 — qualify wikilinks [[X]] → [[svc/X]]
+        _step10_qualify_wikilinks(staging)
 
-    # Step 10 — qualify wikilinks [[X]] → [[svc/X]]
-    _step10_qualify_wikilinks(vault)
+        # Step 11 — remove cross-service false links
+        _step11_remove_cross_service_links(staging)
 
-    # Step 11 — remove cross-service false links
-    _step11_remove_cross_service_links(vault)
+        changed, removed = _commit_staged(staging, vault)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
-    # Step 12 — write .obsidian/graph.json
+    # Step 12 — write .obsidian/graph.json (vault config, never staged)
     _step12_graph_json(vault)
 
     total = sum(1 for _ in vault.rglob("*.md"))
+    if stats is not None:
+        stats["changed"] = changed
+        stats["removed"] = removed
+        stats["total"] = total
     return total
+
+
+def _commit_staged(staging: Path, vault: Path) -> tuple[int, int]:
+    """Publish the finished notes into ``vault``; return (changed, removed).
+
+    A note is written only when its content differs from what the vault already
+    holds, so an unchanged corpus leaves every mtime alone. Notes in the vault
+    that this run did not produce are then deleted — the deferred form of the
+    up-front sweep, and the reason a node leaving the graph no longer orphans
+    its note. Dot-paths are skipped in both directions: ``.obsidian/`` config and
+    the ownership marker are ours to keep.
+
+    A note that cannot be written (a destination that overruns the filesystem's
+    limits, a name the platform rejects) costs that one note and a warning,
+    where it used to raise out of the exporter and lose the whole vault.
+    """
+    changed = 0
+    kept: set[Path] = set()
+    for src in sorted(staging.rglob("*.md")):
+        rel = src.relative_to(staging)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        dest = vault / rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if write_text_if_changed(dest, src.read_text(encoding="utf-8", errors="replace")):
+                changed += 1
+        except OSError as exc:
+            print(f"    Warning: skipped Obsidian note {rel}: {exc}", file=sys.stderr)
+            continue
+        kept.add(dest)
+
+    removed = 0
+    for md in sorted(vault.rglob("*.md")):
+        rel = md.relative_to(vault)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if md in kept:
+            continue
+        try:
+            md.unlink()
+            removed += 1
+        except OSError:
+            pass
+
+    # Deepest-first so a service folder emptied by the sweep collapses too.
+    for d in sorted((p for p in vault.rglob("*") if p.is_dir()), reverse=True):
+        if any(part.startswith(".") for part in d.relative_to(vault).parts):
+            continue
+        try:
+            d.rmdir()
+        except OSError:
+            pass  # not empty → still in use
+    return changed, removed
 
 
 # ── Step 1: Generate notes ─────────────────────────────────────────────────────
@@ -218,6 +348,13 @@ def _step1_generate_notes(
     # each other's note on a case-insensitive filesystem (graphify #1453/#1504).
     claimed: dict[str, str] = {}
 
+    # A note is born at the vault root but lives at <vault>/<service>/, so the
+    # filename budget has to be measured against the deeper path — that is the
+    # one that overruns PATH_MAX. Steps 5 and 8 derive the same folder name from
+    # the same capped project string, so the two agree.
+    def dest_for(project: str) -> Path:
+        return vault / _service_folder(project, vault)
+
     for node_id, data in G.nodes(data=True):
         ntype = data.get("type") or "unknown"  # `or` so an explicit None coerces too
         if ntype == "external":
@@ -234,7 +371,9 @@ def _step1_generate_notes(
         framework = data.get("framework", "")
         community_id = communities.get(node_id, -1)
 
-        note_name = dedup_stem(_safe_note_name(label), node_id, claimed)
+        note_name = dedup_stem(
+            _safe_note_name(label, dest_dir=dest_for(project)), node_id, claimed
+        )
         content   = _build_note(
             node_id    = node_id,
             label      = label,
@@ -247,10 +386,15 @@ def _step1_generate_notes(
             out_edges  = out_edges.get(node_id, []),
             in_edges   = in_edges.get(node_id, []),
             G          = G,
+            dest_for   = dest_for,
         )
 
         note_path = vault / f"{note_name}.md"
-        note_path.write_text(content, encoding="utf-8")
+        try:
+            note_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            # One impossible filename costs one note, not the whole vault.
+            print(f"    Warning: skipped Obsidian note {note_name}: {exc}", file=sys.stderr)
 
 
 def _build_note(
@@ -265,8 +409,17 @@ def _build_note(
     out_edges: list[tuple[str, dict]],
     in_edges: list[tuple[str, dict]],
     G: nx.DiGraph,
+    dest_for: "Callable[[str], Path] | None" = None,
 ) -> str:
-    """Render a single Obsidian note from node data."""
+    """Render a single Obsidian note from node data.
+
+    ``dest_for`` maps a project name to the directory its notes land in, so a
+    wikilink's target stem is capped against the same destination as the file it
+    points at — otherwise a destination-shortened filename and its inbound links
+    would disagree.
+    """
+    def _target_name(lbl: str, proj: str) -> str:
+        return _safe_note_name(lbl, dest_dir=dest_for(proj) if dest_for else None)
 
     # ── Frontmatter ──
     # Every value below is run through escape_frontmatter_value so a tree-sitter
@@ -320,7 +473,7 @@ def _build_note(
         if tgt_data.get("type") == "external":
             continue
         tgt_label = tgt_data.get("label") or tgt_id
-        tgt_name  = _safe_note_name(tgt_label)
+        tgt_name  = _target_name(tgt_label, tgt_data.get("project") or "")
         relation  = edata.get("relation", "")
         conf      = edata.get("confidence", "EXTRACTED")
         all_conn_lines.append(f"- [[{tgt_name}]] - `{relation}` [{conf}]")
@@ -331,7 +484,7 @@ def _build_note(
         if src_data.get("type") == "external":
             continue
         src_label = src_data.get("label") or src_id
-        src_name  = _safe_note_name(src_label)
+        src_name  = _target_name(src_label, src_data.get("project") or "")
         relation  = edata.get("relation", "")
         conf      = edata.get("confidence", "EXTRACTED")
         # Label incoming as reverse perspective
@@ -479,15 +632,16 @@ def _reverse_relation(relation: str) -> str:
     return inv.get(relation, f"←{relation}")
 
 
-def _safe_note_name(label: str) -> str:
+def _safe_note_name(label: str, *, dest_dir: Path | None = None) -> str:
     """Convert node label to a safe filename stem (no path separators).
 
     The byte cap (via ``cap_filename``) prevents a very long label — or an 85+
-    character CJK class name — from overflowing the 255-byte filesystem limit
-    and crashing ``_step1_generate_notes`` with ENAMETOOLONG. Because every
+    character CJK class name — from overflowing the filesystem's per-component
+    limit and crashing ``_step1_generate_notes`` with ENAMETOOLONG. Because every
     wikilink target is generated through this same function, the note's
     filename and the links pointing at it stay byte-for-byte consistent even
-    after truncation.
+    after truncation. ``dest_dir`` narrows the cap to what the note's actual
+    destination directory can hold (graphify #943-6/#2109).
 
     A ``None``/empty label collapses to ``"unnamed"`` — the graph tolerates a
     None label (build.py keeps the node), so the exporter must too rather than
@@ -495,23 +649,46 @@ def _safe_note_name(label: str) -> str:
     """
     if not label:
         return "unnamed"
+    # sanitize_label FIRST: a label carrying a tab, newline, C0 control, or a
+    # bidi override otherwise reaches the filesystem verbatim — a literal newline
+    # inside a filename on POSIX, and an OSError that aborts the ENTIRE vault on
+    # Windows, where those characters are illegal (graphify #929-6/#948-1). It
+    # folds \t/\r/\n to spaces, drops controls and bidi marks, and collapses
+    # runs of whitespace, while preserving non-ASCII letters (Hangul, CJK).
+    # Sanitizing before the cap also keeps the byte budget spent on real
+    # characters and stops a truncation landing mid-normalisation.
+    cleaned = sanitize_label(label)
     # Replace characters that confuse Obsidian wikilinks OR are illegal in a
     # Windows filename (< > : " ? * in addition to the / \ # ^ | [ ] we already
     # stripped). Flask typed converters (``<int:id>``), Express ``:id``,
     # wildcards, and query strings all embed these; an unstripped one makes
     # ``write_text`` raise WinError 123 and abort the whole export on Windows.
-    cleaned = re.sub(r'[/\\#^|[\]<>:"?*]', "_", label).strip()
+    cleaned = re.sub(r'[/\\#^|[\]<>:"?*]', "_", cleaned).strip()
+    # A leading dot hides the note in Obsidian and makes it invisible to the
+    # stale-note sweep, which skips dot-paths to protect .obsidian/.
+    cleaned = undot_filename(cleaned)
     # Windows reserved device names are un-writable even with the .md suffix.
     if cleaned.upper() in _WIN_RESERVED:
         return "unnamed"
-    return cap_filename(cleaned)
+    return cap_filename(cleaned, dest_dir=dest_dir)
+
+
+def _service_folder(project: str, vault: Path) -> str:
+    """Vault subdirectory a project's notes live in.
+
+    One definition shared by step 1 (which writes straight into it), step 5 and
+    step 8 (which move strays into it), so a note can never be placed under one
+    spelling and swept under another.
+    """
+    return cap_filename(project or "_unknown", dest_dir=vault)
 
 
 # ── Step 2: Fix broken wikilinks ──────────────────────────────────────────────
 
 def _step2_fix_wikilinks(vault: Path) -> None:
     """Normalise wikilinks whose target has a case mismatch."""
-    existing = {f.stem: f.stem for f in vault.glob("*.md")}
+    notes = sorted(vault.glob("*.md"))
+    existing = {f.stem: f.stem for f in notes}
 
     def _norm(s: str) -> str:
         return re.sub(r"[\s_-]", "", s).lower()
@@ -519,7 +696,7 @@ def _step2_fix_wikilinks(vault: Path) -> None:
     norm_to_actual: dict[str, str] = {_norm(k): k for k in existing}
     broken_map: dict[str, str] = {}
 
-    for md in vault.glob("*.md"):
+    for md in notes:
         for m in _WIKILINK_RE.finditer(md.read_text(errors="ignore")):
             stem = m.group(1)
             if stem not in existing:
@@ -530,7 +707,7 @@ def _step2_fix_wikilinks(vault: Path) -> None:
     if not broken_map:
         return
 
-    for md in vault.glob("*.md"):
+    for md in notes:
         content = md.read_text(errors="ignore")
         new_c = content
         for broken, correct in broken_map.items():
@@ -549,7 +726,7 @@ def _step3_remove_cross_language(vault: Path) -> None:
     ts_drop   = re.compile(r"^- \[\[[^\]]*\.(?:tsx?|jsx?)\]\] - `imports(?:_from)?` .*\n?", re.MULTILINE)
     java_drop = re.compile(r"^- \[\[[^\]]*\.(?:java|kt)\]\] - `imports(?:_from)?` .*\n?", re.MULTILINE)
 
-    for md in vault.glob("*.md"):
+    for md in sorted(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
         new_c = content
 
@@ -575,7 +752,7 @@ def _step3_remove_cross_language(vault: Path) -> None:
 def _step4_fix_community_tags(vault: Path) -> None:
     """Replace Community_N / Community_None tags with service folder from source_file."""
 
-    for md in vault.glob("*.md"):
+    for md in sorted(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
         m = _PROJECT_RE.search(content)
         folder = m.group(1) if m and m.group(1) else None
@@ -598,19 +775,24 @@ def _step4_fix_community_tags(vault: Path) -> None:
 # ── Step 5: Move to service subfolders ───────────────────────────────────────
 
 def _step5_move_to_subfolders(vault: Path) -> None:
-    """Move root-level notes into <vault>/<service>/ based on source_file."""
+    """Move root-level notes into <vault>/<service>/ based on source_file.
 
-    for md in list(vault.glob("*.md")):
+    Step 1 now writes each note directly into its service folder, so in a normal
+    run there is nothing left at the root and this is a no-op. It still runs for
+    notes that reach the root another way — a vault left half-processed by an
+    interrupted run.
+    """
+    for md in sorted(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
         m = _PROJECT_RE.search(content)
         # Cap the folder name (mirrors step 8) so a very long / multi-byte
-        # project name can't overflow the 255-byte filesystem limit and crash
-        # mkdir mid-export — this is the hot path every note passes through, so
-        # an uncapped name here aborts before step 8's cap can ever run.
-        folder = cap_filename(m.group(1)) if m and m.group(1) else "_unknown"
+        # project name can't overflow the filesystem limit and crash mkdir
+        # mid-export — this is the hot path every note passes through, so an
+        # uncapped name here aborts before step 8's cap can ever run.
+        folder = _service_folder(m.group(1) if m else "", vault)
 
         dest_dir = vault / folder
-        dest_dir.mkdir(exist_ok=True)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / md.name
 
         if not dest.exists():
@@ -629,7 +811,8 @@ def _step6_dedup_notes(vault: Path) -> None:
     """
     by_src: dict[str, list[Path]] = defaultdict(list)
 
-    for md in vault.rglob("*.md"):
+    notes = sorted(vault.rglob("*.md"))
+    for md in notes:
         content = md.read_text(errors="ignore")
         m = _SOURCE_RE.search(content)
         if m and m.group(1):
@@ -637,7 +820,7 @@ def _step6_dedup_notes(vault: Path) -> None:
 
     remap: dict[str, str] = {}
 
-    for sf, files in by_src.items():
+    for sf, files in sorted(by_src.items()):
         if len(files) < 2:
             continue
         primary = _pick_primary(files)
@@ -648,7 +831,7 @@ def _step6_dedup_notes(vault: Path) -> None:
 
     # Rewrite wikilinks pointing at deleted notes
     if remap:
-        for md in vault.rglob("*.md"):
+        for md in sorted(vault.rglob("*.md")):
             content = md.read_text(errors="ignore")
             new_c = content
             for old, new in remap.items():
@@ -695,7 +878,7 @@ def _step7_inject_members(G: nx.DiGraph, vault: Path) -> None:
 
     # Build: source_file → vault note path
     sf_to_note: dict[str, Path] = {}
-    for md in vault.rglob("*.md"):
+    for md in sorted(vault.rglob("*.md")):
         content = md.read_text(errors="ignore")
         m = _SOURCE_RE.search(content)
         if m and m.group(1):
@@ -732,17 +915,17 @@ def _step7_inject_members(G: nx.DiGraph, vault: Path) -> None:
 def _step8_move_remaining(vault: Path) -> None:
     """Move any notes still at root level to their service subfolder."""
 
-    for md in list(vault.glob("*.md")):
+    for md in sorted(vault.glob("*.md")):
         content = md.read_text(errors="ignore")
         m = _PROJECT_RE.search(content)
         if m and m.group(1):
             # Cap here so the folder, the Step-9 hub note (`<svc>/<svc>.md`),
             # and every backlink derived from the folder name stay consistent
-            # and under the 255-byte filesystem limit — note filenames are
-            # capped in _safe_note_name but this path wasn't.
-            svc = cap_filename(m.group(1))
+            # and under the filesystem limit — note filenames are capped in
+            # _safe_note_name but this path wasn't.
+            svc = _service_folder(m.group(1), vault)
             dest_dir = vault / svc
-            dest_dir.mkdir(exist_ok=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / md.name
             if not dest.exists():
                 md.rename(dest)
@@ -758,7 +941,9 @@ def _step8_move_remaining(vault: Path) -> None:
 def _step9_hub_notes(vault: Path) -> None:
     """Create a service/<service>.md index hub note + add backlinks."""
 
-    service_dirs = [d for d in vault.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    service_dirs = sorted(
+        d for d in vault.iterdir() if d.is_dir() and not d.name.startswith(".")
+    )
 
     for svc_dir in service_dirs:
         svc = svc_dir.name
@@ -820,14 +1005,15 @@ def _step9_hub_notes(vault: Path) -> None:
 def _step10_qualify_wikilinks(vault: Path) -> None:
     """Rewrite [[X]] → [[svc/X]] to disambiguate same-name notes in different services."""
 
+    notes = sorted(vault.rglob("*.md"))
     # Build: stem → set of services containing that stem
     stem_svcs: dict[str, set[str]] = defaultdict(set)
-    for md in vault.rglob("*.md"):
+    for md in notes:
         stem_svcs[md.stem].add(md.parent.name)
 
     all_svc_names = {d.name for d in vault.iterdir() if d.is_dir() and not d.name.startswith(".")}
 
-    for md in vault.rglob("*.md"):
+    for md in notes:
         my_svc = md.parent.name
         content = md.read_text(errors="ignore")
 
@@ -862,9 +1048,10 @@ def _step11_remove_cross_service_links(vault: Path) -> None:
 
     all_svc_names = {d.name for d in vault.iterdir() if d.is_dir() and not d.name.startswith(".")}
 
+    notes = sorted(vault.rglob("*.md"))
     # Build stem → service mapping (post qualification, most links have svc/stem)
     stem_to_svc: dict[str, str] = {}
-    for md in vault.rglob("*.md"):
+    for md in notes:
         stem_to_svc[md.stem] = md.parent.name
 
     # Identify frontend service names heuristically
@@ -873,7 +1060,7 @@ def _step11_remove_cross_service_links(vault: Path) -> None:
     def _is_frontend(svc: str) -> bool:
         return any(svc.startswith(p) for p in _front_prefixes)
 
-    for md in vault.rglob("*.md"):
+    for md in notes:
         src_svc = md.parent.name
         content = md.read_text(errors="ignore")
         lines = content.split("\n")
@@ -959,7 +1146,7 @@ def _step12_graph_json(vault: Path) -> None:
         "close":              False,
     }
 
-    (obsidian_config / "graph.json").write_text(
+    write_text_if_changed(
+        obsidian_config / "graph.json",
         json.dumps(graph_config, indent=2),
-        encoding="utf-8",
     )

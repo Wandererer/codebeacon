@@ -29,6 +29,25 @@ class OutputConfig:
     # false to keep the old monolithic CLAUDE.md. Single-project output is
     # unaffected either way.
     rules_split: bool = True
+    # Where the generated HTML views get mermaid/d3 from: "local" vendors them
+    # into .codebeacon/_assets/ so the graph opens with no network (the
+    # local-first default); "cdn" links them from a CDN and keeps the output dir
+    # small.
+    html_assets: str = "local"
+
+
+@dataclass
+class ScanConfig:
+    """Settings that shape which files a scan collects.
+
+    ``exclude`` holds gitignore-style patterns merged with
+    ``.codebeaconignore``/``.gitignore``. It lives in codebeacon.yaml (not just
+    behind ``--exclude``) because the unattended rebuild paths — the post-commit
+    hook and ``codebeacon watch`` — pass no flags of their own, and an exclusion
+    that only exists on one developer's command line is one the hook re-scans.
+    """
+
+    exclude: list = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +69,7 @@ class CodebeaconConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     wave: WaveConfig = field(default_factory=WaveConfig)
     semantic: SemanticConfig = field(default_factory=SemanticConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
     deep_dive: bool = False  # generate per-project outputs + combined workspace
     config_file: str = ""  # path to the loaded yaml file
 
@@ -72,6 +92,41 @@ def _section_mapping(value, key: str) -> dict:
             f"{type(value).__name__}: {value!r}"
         )
     return value
+
+
+_HTML_ASSET_MODES = ("local", "cdn")
+
+
+def _html_assets(value) -> str:
+    """Validate ``output.html_assets``.
+
+    A typo here would silently fall back to a mode the user did not ask for —
+    and "silently linking a CDN" is exactly the behaviour an air-gapped user
+    picked this tool to avoid — so an unknown value is a config error.
+    """
+    if value is None:
+        return "local"
+    text = str(value).strip().lower()
+    if text not in _HTML_ASSET_MODES:
+        raise ValueError(
+            f"'output.html_assets' must be one of {', '.join(_HTML_ASSET_MODES)}, "
+            f"got {value!r}"
+        )
+    return text
+
+
+def _pattern_list(value) -> list:
+    """Normalise a YAML scalar-or-list of gitignore-style patterns."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ValueError(
+            "'scan.exclude' must be a list of gitignore-style patterns, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    return [str(p).strip() for p in value if p is not None and str(p).strip()]
 
 
 def _dump_yaml_atomic(config_path: Path, data) -> None:
@@ -163,7 +218,10 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         obsidian=output_raw.get("obsidian", True),
         context_map_targets=context_map.get("targets", ["CLAUDE.md", ".cursorrules", "AGENTS.md"]),
         rules_split=context_map.get("rules_split", True),
+        html_assets=_html_assets(output_raw.get("html_assets", "local")),
     )
+
+    scan = ScanConfig(exclude=_pattern_list(_section_mapping(raw.get("scan"), "scan").get("exclude")))
 
     wave_raw = _section_mapping(raw.get("wave"), "wave")
     wave = WaveConfig(
@@ -183,6 +241,7 @@ def load_config(path: str | Path) -> CodebeaconConfig:
         output=output,
         wave=wave,
         semantic=semantic,
+        scan=scan,
         deep_dive=bool(raw.get("deep_dive", False)),
         config_file=str(path),
     )
@@ -227,6 +286,10 @@ def generate_config(
         "output": {"dir": output_dir},
         "wave": {"auto": True, "chunk_size": 300, "max_parallel": 5},
         "semantic": {"enabled": False},
+        # Emitted empty so the knob is discoverable: patterns listed here are
+        # honoured by every entry point, including the post-commit hook and
+        # `codebeacon watch`, which never see a --exclude flag.
+        "scan": {"exclude": []},
     }
     if deep_dive:
         data["deep_dive"] = True

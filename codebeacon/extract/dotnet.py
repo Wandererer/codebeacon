@@ -19,10 +19,29 @@ What we capture:
 
 Mirrors graphify #8bcfffd. The output relations are the same names the
 existing graph layer already understands (``imports_from`` /
-``references``), so no downstream changes are needed.
+``references``).
+
+KNOWN LIMITATION — these edges do not currently reach the built graph.
+``_remap_import_edges`` resolves an edge by mapping its endpoints to
+declaration nodes, and a ``.sln`` / ``.csproj`` / ``.razor`` file declares
+nothing, so BOTH endpoints of a project reference are unresolvable and the
+edge is dropped. Fanning out to the declarations under each project
+directory is not an acceptable substitute: that is |A decls| x |B decls|
+edges per reference, the same per-declaration inflation the import fan-out
+gate was added to remove. The honest fix is a node for the manifest itself,
+so a reference becomes one edge between two real nodes — deferred as the
+cross-ecosystem "package-manifest nodes" feature (package.json, pom.xml,
+go.mod and this, decided as one), because doing it for .NET alone would
+fork the node model.
+
+This module is kept, not deleted, because it becomes live the moment that
+tier lands with no change here: targets are already emitted scan-root-
+relative (never absolute), which is exactly the join key a manifest node
+would need.
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -32,6 +51,18 @@ from codebeacon.common.types import Edge
 
 _DOTNET_PROJ_EXTS = frozenset({".csproj", ".fsproj", ".vbproj"})
 _RAZOR_EXTS = frozenset({".razor", ".cshtml"})
+
+# Entity-expansion screen for the one XML parse site in the package.
+#
+# ElementTree refuses EXTERNAL entities outright (no file disclosure, no SSRF),
+# and expat >= 2.4 caps internal expansion at ~10^4x, so a hostile .csproj costs
+# a bounded few MB rather than the classic billion-laughs. But
+# requires-python ">=3.10" admits runtimes linking expat < 2.4, where that cap
+# does not exist and the expansion is unbounded — so refuse the document before
+# it reaches the parser. A three-line stdlib screen is preferred over a
+# defusedxml dependency: codebeacon is positioned for local/air-gapped use and
+# this is the only XML parse in the package.
+_PROJECT_XML_UNSAFE_RE = re.compile(r"<!(DOCTYPE|ENTITY)", re.IGNORECASE)
 
 # .sln line: Project("{GUID}") = "Name", "relative/path.csproj", "{GUID}"
 _SLN_PROJECT_RE = re.compile(
@@ -64,6 +95,19 @@ def _read_text(file_path: str) -> str:
         return ""
 
 
+def _project_ref_target(raw: str) -> str:
+    """Normalise a project reference into a path relative to the referring file.
+
+    ``..\\Core\\Core.csproj`` → ``../Core/Core.csproj``. Deliberately NOT
+    resolved to an absolute path: an absolute target is machine-specific, and
+    absolute paths must never be able to reach a serialised artifact. Nothing
+    is lost — a consumer that wants to follow the reference already has the
+    referring file on ``Edge.source_file`` to join against, and downstream label
+    matching only ever reads the final path segment.
+    """
+    return posixpath.normpath(raw.replace("\\", "/").strip())
+
+
 def _make_edge(source: str, target: str, relation: str) -> Edge:
     return Edge(
         source=source,
@@ -79,20 +123,15 @@ def _extract_sln(file_path: str) -> list[Edge]:
     text = _read_text(file_path)
     edges: list[Edge] = []
     seen: set[str] = set()
-    base = Path(file_path).parent
 
     for m in _SLN_PROJECT_RE.finditer(text):
-        raw = m.group(1).replace("\\", "/").strip()
-        if not raw or raw in seen:
-            continue
-        seen.add(raw)
-        # Resolve relative to the .sln so downstream label matching can pick
+        # Normalised relative to the .sln, so downstream label matching picks
         # up the real .csproj basename even if Windows backslashes were used.
-        try:
-            resolved = (base / raw).resolve().as_posix()
-        except OSError:
-            resolved = raw
-        edges.append(_make_edge(file_path, resolved, "imports_from"))
+        target = _project_ref_target(m.group(1))
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        edges.append(_make_edge(file_path, target, "imports_from"))
     return edges
 
 
@@ -100,6 +139,8 @@ def _extract_csproj(file_path: str) -> list[Edge]:
     text = _read_text(file_path)
     if not text:
         return []
+    if _PROJECT_XML_UNSAFE_RE.search(text):
+        return []  # DOCTYPE/ENTITY declaration — see _PROJECT_XML_UNSAFE_RE
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
@@ -107,7 +148,6 @@ def _extract_csproj(file_path: str) -> list[Edge]:
 
     edges: list[Edge] = []
     seen: set[tuple[str, str]] = set()
-    base = Path(file_path).parent
 
     # MSBuild files sometimes carry a default namespace; iter() with a
     # local-name match is the simplest way to find elements regardless.
@@ -117,11 +157,7 @@ def _extract_csproj(file_path: str) -> list[Edge]:
         if not include:
             continue
         if tag == "ProjectReference":
-            raw = include.replace("\\", "/").strip()
-            try:
-                target = (base / raw).resolve().as_posix()
-            except OSError:
-                target = raw
+            target = _project_ref_target(include)
             key = ("imports_from", target)
             if key in seen:
                 continue

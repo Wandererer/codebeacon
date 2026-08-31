@@ -208,6 +208,83 @@ def _norm_method(name: str) -> str:
     return _HTTP_METHODS.get(name, name.upper() if name else "ANY")
 
 
+# ── Mount graph resolution (FastAPI / Express / Flask) ───────────────────────
+#
+# All three frameworks let a router/blueprint be mounted into ANOTHER
+# router/blueprint, and let the same router be mounted more than once. A flat
+# `name → prefix` dict therefore lost two things at once: the outer prefixes of
+# a cascade (`app.include_router(mid, "/root")` above
+# `mid.include_router(inner, "/x")`), and every mount but the last for a router
+# published at two versions. Both are silent — the wrong path is written to
+# wiki/routes.md with no warning.
+#
+# The resolver below walks the mount graph instead, returning the LIST of
+# effective prefixes a router serves under. Composition differs per framework
+# and was settled by running the real servers:
+#   FastAPI  compose: include_prefix + the router's own APIRouter(prefix=)
+#   Express  compose: mount path only (express.Router() carries no own prefix)
+#   Flask    OVERRIDE: register_blueprint(url_prefix=) REPLACES the
+#            blueprint's own url_prefix; absent, the blueprint's own applies.
+# Cross-FILE mounts are out of scope — resolving them needs (module, varname)
+# router identity, which the extractor does not have.
+
+_MAX_MOUNT_DEPTH = 16        # cycle/pathological-nesting guard
+_MAX_EFFECTIVE_PREFIXES = 32  # a diamond of mounts is multiplicative
+
+
+def _tail_name(text: str) -> str:
+    """Last dotted segment of a (possibly attribute) expression's text.
+
+    ``consumer.consumer_router`` → ``consumer_router``. Routers are keyed on
+    this so a router reached through its module matches the same router
+    reached by a bare local name.
+    """
+    return text.rsplit(".", 1)[-1].strip()
+
+
+def _resolve_alias(name: str, aliases: dict[str, str]) -> str:
+    """Follow an alias chain to its final target, with a cycle guard."""
+    seen: set[str] = set()
+    while name in aliases and name not in seen:
+        seen.add(name)
+        name = aliases[name]
+    return name
+
+
+def _effective_prefixes(
+    name: str,
+    own: dict[str, str],
+    parents: dict[str, list[tuple[str, Optional[str]]]],
+    compose_own: bool,
+    _seen: frozenset = frozenset(),
+) -> list[str]:
+    """Every URL prefix *name* is served under, outermost mount resolved.
+
+    *own* maps a router to the prefix it declares itself; *parents* maps a
+    router to the ``(mounting_router, mount_prefix)`` pairs that mount it, where
+    a mount_prefix of ``None`` means "no prefix was given at mount time".
+    *compose_own* selects composition (FastAPI/Express) over override (Flask).
+    An unmounted router resolves to its own prefix alone.
+    """
+    own_prefix = own.get(name, "")
+    if name not in parents or name in _seen or len(_seen) >= _MAX_MOUNT_DEPTH:
+        return [own_prefix]
+
+    out: list[str] = []
+    for parent, mount_prefix in parents[name]:
+        if compose_own:
+            local = _join(mount_prefix or "", own_prefix)
+        else:
+            local = own_prefix if mount_prefix is None else mount_prefix
+        for up in _effective_prefixes(parent, own, parents, compose_own, _seen | {name}):
+            joined = _join(up, local)
+            if joined not in out:
+                out.append(joined)
+            if len(out) >= _MAX_EFFECTIVE_PREFIXES:
+                return out
+    return out or [own_prefix]
+
+
 def _expand_resource(
     resource: str,
     prefix: str,
@@ -417,15 +494,25 @@ def _interpret_express(file_path: str, matches: list, framework: str) -> list[Ro
       - app.METHOD("/path", handler)
       - router.route("/path").get(h).post(h)…  — every verb in the chain
       - app.use("/prefix", router) mount prefixes, applied to that router's routes
+
+    Mounts are resolved transitively and may be repeated: a router mounted into
+    a router serves under the whole chain, and a router mounted twice serves
+    under both paths (both verified against a running Express server).
     """
-    # Pass 1 — router mount prefixes: app.use("/prefix", router)
-    mount_prefixes: dict[str, str] = {}
+    # Pass 1 — the mount graph: app.use("/prefix", router)
+    mounts: dict[str, list[tuple[str, Optional[str]]]] = {}
     for _idx, caps in matches:
         if "route.use_mount" in caps and "route.mount_router" in caps:
             router = node_text(caps["route.mount_router"][0])
+            parent = node_text(caps["route.mount_parent"][0]) if "route.mount_parent" in caps else ""
             prefix = _clean(node_text(caps["route.use_prefix"][0])) if "route.use_prefix" in caps else ""
             if router:
-                mount_prefixes[router] = prefix
+                mounts.setdefault(router, []).append((parent, prefix))
+
+    def _prefixes(obj: str) -> list[str]:
+        # express.Router() carries no prefix of its own, so composition is
+        # purely the chain of mount paths.
+        return _effective_prefixes(obj, {}, mounts, compose_own=True)
 
     # Chained-route anchors: identifier.route("/path") with byte range for verb correlation
     anchors: list[tuple[int, int, str, str]] = []  # (start, end, path, object)
@@ -453,14 +540,15 @@ def _interpret_express(file_path: str, matches: list, framework: str) -> list[Ro
         obj = node_text(caps["route.object"][0]) if "route.object" in caps else ""
         line = caps["route.path"][0].start_point[0] + 1
 
-        routes.append(RouteInfo(
-            method=_norm_method(method_str),
-            path=_join(mount_prefixes.get(obj, ""), path),
-            handler=obj,
-            source_file=file_path,
-            line=line,
-            framework=framework,
-        ))
+        for prefix in _prefixes(obj):
+            routes.append(RouteInfo(
+                method=_norm_method(method_str),
+                path=_join(prefix, path),
+                handler=obj,
+                source_file=file_path,
+                line=line,
+                framework=framework,
+            ))
 
     # Pass 3 — chained verbs: correlate each verb to the .route(path) anchor whose
     # byte range it encloses (the anchor is the innermost node of the chain).
@@ -471,14 +559,15 @@ def _interpret_express(file_path: str, matches: list, framework: str) -> list[Ro
         method_str = node_text(caps["route.chain_method"][0]).lower()
         for astart, aend, apath, aobj in anchors:
             if vnode.start_byte <= astart and aend <= vnode.end_byte:
-                routes.append(RouteInfo(
-                    method=_norm_method(method_str),
-                    path=_join(mount_prefixes.get(aobj, ""), apath),
-                    handler=aobj,
-                    source_file=file_path,
-                    line=vnode.start_point[0] + 1,
-                    framework=framework,
-                ))
+                for prefix in _prefixes(aobj):
+                    routes.append(RouteInfo(
+                        method=_norm_method(method_str),
+                        path=_join(prefix, apath),
+                        handler=aobj,
+                        source_file=file_path,
+                        line=vnode.start_point[0] + 1,
+                        framework=framework,
+                    ))
                 break
 
     return routes
@@ -557,45 +646,115 @@ def _interpret_nestjs(file_path: str, matches: list, framework: str) -> list[Rou
     return routes
 
 
+def _parse_include_router(call_node) -> Optional[tuple[str, str, str]]:
+    """Pull ``(includer, child_router, mount_prefix)`` from an include_router call.
+
+    Done in Python rather than in the query because the shapes multiply:
+    the includer may be an identifier or an attribute chain
+    (``api.v1.app.include_router``), and the child router may be positional,
+    an attribute, or the ``router=`` keyword. Enumerating the cross product in
+    ``.scm`` needs one pattern per combination — and every extra pattern is
+    another chance for two of them to fire on the same call.
+
+    Returns None when no child router can be identified (e.g. the router is the
+    result of a call, which this extractor cannot name).
+    """
+    fn = call_node.child_by_field_name("function")
+    if fn is None:
+        return None
+    obj = fn.child_by_field_name("object")
+    includer = _tail_name(node_text(obj)) if obj is not None else ""
+
+    args = call_node.child_by_field_name("arguments")
+    if args is None:
+        return None
+
+    child = ""
+    prefix = ""
+    for arg in args.named_children:
+        if arg.type == "keyword_argument":
+            key = arg.child_by_field_name("name")
+            value = arg.child_by_field_name("value")
+            if key is None or value is None:
+                continue
+            key_name = node_text(key)
+            if key_name == "prefix" and value.type == "string":
+                prefix = _clean(node_text(value))
+            elif key_name == "router" and not child:
+                child = _tail_name(node_text(value))
+        elif not child and arg.type in ("identifier", "attribute"):
+            child = _tail_name(node_text(arg))
+
+    if not child:
+        return None
+    return includer, child, prefix
+
+
 def _interpret_fastapi(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
-    """FastAPI @app.get/@router.post with APIRouter prefix tracking."""
-    router_prefixes: dict[str, str] = {}  # router_var_name → prefix
+    """FastAPI @app.get/@router.post with transitive APIRouter mount resolution.
+
+    FastAPI COMPOSES prefixes: ``APIRouter(prefix="/users")`` mounted with
+    ``include_router(router, prefix="/api/v1")`` serves ``/api/v1/users/…``
+    (verified against a real ``app.openapi()``). The former single prefix map
+    let the include write clobber the declaration write — Python forces the
+    router to be assigned before it is included, so the loss was deterministic,
+    not order-dependent.
+    """
+    decl_prefix: dict[str, str] = {}                          # router → own prefix
+    aliases: dict[str, str] = {}                              # local name → router
+    parents: dict[str, list[tuple[str, Optional[str]]]] = {}  # router → mounts
+    seen_calls: set[int] = set()                              # dedupe by call node
     routes: list[RouteInfo] = []
 
-    # Pass 1 — collect ALL router prefixes first. app.include_router(router, prefix=…)
-    # usually appears AFTER the @router.get handlers, so a single interleaved pass
-    # resolved the prefix too late and silently dropped it (order-dependent).
+    # Pass 1 — the whole mount graph, before any route is emitted. An include
+    # normally sits BELOW the handlers it prefixes, so nothing can be resolved
+    # in a single interleaved pass.
     for _idx, caps in matches:
-        # APIRouter(prefix="/api/v1")
         if "route.router_decl" in caps and "route.prefix" in caps:
             name = node_text(caps["route.router_name"][0]) if "route.router_name" in caps else ""
-            prefix = _clean(node_text(caps["route.prefix"][0]))
-            router_prefixes[name] = prefix
+            if name:
+                decl_prefix[name] = _clean(node_text(caps["route.prefix"][0]))
 
-        # app.include_router(router, prefix="...")
-        if "router.include" in caps and "router.include_router" in caps:
-            name = node_text(caps["router.include_router"][0])
-            if "router.include_prefix" in caps:
-                router_prefixes[name] = _clean(node_text(caps["router.include_prefix"][0]))
+        if "route.alias" in caps and "route.alias_name" in caps and "route.alias_target" in caps:
+            local = node_text(caps["route.alias_name"][0])
+            target = _tail_name(node_text(caps["route.alias_target"][0]))
+            if target and local != target:
+                aliases.setdefault(local, target)
 
-    # Pass 2 — emit routes with fully-populated prefix map.
+        if "router.include_call" in caps:
+            node = caps["router.include_call"][0]
+            if node.start_byte not in seen_calls:
+                seen_calls.add(node.start_byte)
+                parsed = _parse_include_router(node)
+                if parsed is not None:
+                    includer, child, prefix = parsed
+                    parents.setdefault(child, []).append((includer, prefix))
+
+    # An alias only stands in for a router that has no identity of its own. A
+    # name that declares its own prefix, or that is mounted under its own name,
+    # is the real router — following an alias past it would discard exactly the
+    # information the resolver needs.
+    for local in [n for n in aliases if n in decl_prefix or n in parents]:
+        del aliases[local]
+
+    # Pass 2 — emit one route per effective mount prefix.
     for _idx, caps in matches:
-        # @app.get("/path") or @router.post("/path")
         if "route.handler" in caps and "route.path" in caps:
             path = _clean(node_text(caps["route.path"][0]))
             method = node_text(caps["route.method"][0]) if "route.method" in caps else "get"
             obj = node_text(caps["route.object"][0]) if "route.object" in caps else ""
             handler = node_text(caps["route.func_name"][0]) if "route.func_name" in caps else ""
             line = caps["route.path"][0].start_point[0] + 1
-            prefix = router_prefixes.get(obj, "")
-            routes.append(RouteInfo(
-                method=method.upper(),
-                path=_join(prefix, path),
-                handler=handler,
-                source_file=file_path,
-                line=line,
-                framework="fastapi",
-            ))
+            router = _resolve_alias(_tail_name(obj), aliases)
+            for prefix in _effective_prefixes(router, decl_prefix, parents, compose_own=True):
+                routes.append(RouteInfo(
+                    method=method.upper(),
+                    path=_join(prefix, path),
+                    handler=handler,
+                    source_file=file_path,
+                    line=line,
+                    framework="fastapi",
+                ))
     return routes
 
 
@@ -619,14 +778,20 @@ def _interpret_django(file_path: str, matches: list, framework: str) -> list[Rou
 
 
 def _interpret_flask(file_path: str, matches: list, framework: str) -> list[RouteInfo]:
-    """Flask @app.route / Blueprint with url_prefix tracking."""
-    bp_prefixes: dict[str, str] = {}      # blueprint var name → url_prefix
-    register_prefixes: dict[str, str] = {} # bp var name → registered prefix
+    """Flask @app.route / Blueprint with transitive url_prefix resolution.
+
+    Flask's composition rule is the opposite of FastAPI's and was settled
+    against a real ``app.url_map``: a ``register_blueprint(bp, url_prefix=…)``
+    REPLACES the blueprint's own ``url_prefix`` rather than composing with it.
+    Only the registrar's own effective prefix composes — which is what makes
+    Flask 2.0 nested blueprints (``parent.register_blueprint(child)``) work.
+    """
+    bp_prefixes: dict[str, str] = {}                            # blueprint → own url_prefix
+    registrations: dict[str, list[tuple[str, Optional[str]]]] = {}
     routes: list[RouteInfo] = []
 
-    # Pass 1 — collect ALL prefixes first. register_blueprint(bp, url_prefix=…)
-    # usually appears AFTER the @bp.route decorators, so a single interleaved pass
-    # resolved the override too late and silently dropped it (order-dependent).
+    # Pass 1 — collect declarations and registrations first. A registration
+    # normally sits BELOW the @bp.route decorators it re-prefixes.
     for _idx, caps in matches:
         if "blueprint.decl" in caps and "blueprint.name" in caps:
             name = node_text(caps["blueprint.name"][0])
@@ -634,46 +799,48 @@ def _interpret_flask(file_path: str, matches: list, framework: str) -> list[Rout
             bp_prefixes[name] = prefix
 
         if "app.register" in caps and "app.register_bp" in caps:
-            # Only record a register-time prefix when one is actually captured —
-            # guarding the write exactly like the FastAPI sibling above. An
-            # unconditional register_prefixes[name] = "" would shadow the
-            # blueprint's OWN url_prefix in pass 2 (the resolver's fallback to
-            # bp_prefixes never fires once the key exists), breaking the dominant
-            # `app.register_blueprint(bp)` no-override idiom.
-            if "app.register_prefix" in caps:
-                name = node_text(caps["app.register_bp"][0])
-                register_prefixes[name] = _clean(node_text(caps["app.register_prefix"][0]))
+            name = node_text(caps["app.register_bp"][0])
+            parent = node_text(caps["app.register_parent"][0]) if "app.register_parent" in caps else ""
+            # None (not "") when no url_prefix was passed: the resolver reads
+            # None as "keep the blueprint's own prefix". An empty string would
+            # instead mean "registered at the root", wrongly erasing the
+            # blueprint's own url_prefix on the dominant bare-register idiom.
+            prefix = (
+                _clean(node_text(caps["app.register_prefix"][0]))
+                if "app.register_prefix" in caps else None
+            )
+            registrations.setdefault(name, []).append((parent, prefix))
 
-    # Pass 2 — emit routes with fully-populated prefix maps.
+    # Pass 2 — emit one route per effective registration prefix.
     for _idx, caps in matches:
         if "route.handler" in caps and "route.path" in caps:
             path = _clean(node_text(caps["route.path"][0]))
             obj = node_text(caps["route.object"][0]) if "route.object" in caps else ""
             handler = node_text(caps["route.func_name"][0]) if "route.func_name" in caps else ""
             line = caps["route.path"][0].start_point[0] + 1
-            prefix = register_prefixes.get(obj, bp_prefixes.get(obj, ""))
-            full_path = _join(prefix, path)
-
             method_nodes = caps.get("route.methods", [])
-            if method_nodes:
-                for mn in method_nodes:
+
+            for prefix in _effective_prefixes(obj, bp_prefixes, registrations, compose_own=False):
+                full_path = _join(prefix, path)
+                if method_nodes:
+                    for mn in method_nodes:
+                        routes.append(RouteInfo(
+                            method=_clean(node_text(mn)).upper(),
+                            path=full_path,
+                            handler=handler,
+                            source_file=file_path,
+                            line=line,
+                            framework="flask",
+                        ))
+                else:
                     routes.append(RouteInfo(
-                        method=_clean(node_text(mn)).upper(),
+                        method="GET",
                         path=full_path,
                         handler=handler,
                         source_file=file_path,
                         line=line,
                         framework="flask",
                     ))
-            else:
-                routes.append(RouteInfo(
-                    method="GET",
-                    path=full_path,
-                    handler=handler,
-                    source_file=file_path,
-                    line=line,
-                    framework="flask",
-                ))
     return routes
 
 

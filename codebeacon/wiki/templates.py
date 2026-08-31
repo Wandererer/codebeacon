@@ -8,10 +8,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from codebeacon.common.safety import safe_wiki_filename
+from codebeacon.common.safety import safe_wiki_filename, sanitize_label
+
+
+# How many cross-project edges the platform overview lists before capping.
+_CROSS_CONNECTION_CAP = 30
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def truncation_note(total: int, shown: int) -> str:
+    """A one-line note stating what a capped list left out, or "" if nothing.
+
+    Every capped list in the wiki used to render silently, so a reader looking
+    at 30 of 80 cross-project connections had no way to know 50 were missing —
+    and on a repo whose hub file is imported by 160 others, the cap hides
+    exactly the part that matters (graphify #953-14).
+    """
+    if total <= shown:
+        return ""
+    return f"_… and {total - shown} more (showing {shown} of {total})_"
+
 
 def _md_cell(value: str) -> str:
     """Escape a value for a GFM table cell that is wrapped in a code span.
@@ -39,8 +56,14 @@ def _md_link_text(value: str) -> str:
     are source identifiers and never contain brackets, so this is defensive, but
     page-component labels and future graph sources can (BH-S3). Coerces to
     ``str`` so a ``None`` slipping through can't raise (G06).
+
+    A newline is just as fatal and far more likely: a label carrying one breaks
+    the ``[text](target)`` syntax across two lines and the link stops rendering
+    at all, even though the file it points at is correct.
+    ``sanitize_label`` folds it (and tabs, C0 controls, bidi marks) to a space,
+    matching the transform the filename side now applies (graphify #929-6).
     """
-    return str(value).replace("[", "\\[").replace("]", "\\]")
+    return sanitize_label(value).replace("[", "\\[").replace("]", "\\]")
 
 
 def _rel_link(label: str, project: str) -> str:
@@ -353,14 +376,28 @@ def routes_summary(
 
 # ── Project index ─────────────────────────────────────────────────────────────
 
+def _index_entry(item: Any) -> tuple[str, str]:
+    """Normalise one index entry to ``(display label, on-disk stem)``.
+
+    The generator passes ``(label, bucket, stem)`` so the link points at the
+    file it actually wrote — including the salted stem a second same-labelled
+    node lands on, which a stem re-derived from the label could never name
+    (graphify #3032). A bare string is still accepted and falls back to deriving
+    the stem, which is correct whenever no collision occurred.
+    """
+    if isinstance(item, (tuple, list)) and len(item) >= 2:
+        return str(item[0]), str(item[-1])
+    return str(item), safe_wiki_filename(item)
+
+
 def project_index(
     project_name: str,
     framework: str,
     stats: dict[str, int],
-    controllers: list[str],
-    services: list[str],
-    entities: list[str],
-    components: list[str],
+    controllers: list[Any],
+    services: list[Any],
+    entities: list[Any],
+    components: list[Any],
 ) -> str:
     """Per-project index.md.
 
@@ -368,10 +405,10 @@ def project_index(
         project_name: project name
         framework:    detected framework
         stats:        {routes, services, entities, components, ...}
-        controllers:  list of controller names
-        services:     list of service names
-        entities:     list of entity names
-        components:   list of component names
+        controllers:  controller entries — ``(label, bucket, stem)`` or a label
+        services:     service entries, same shape
+        entities:     entity entries, same shape
+        components:   component entries, same shape
     """
     lines = [
         f"# {project_name}",
@@ -393,11 +430,12 @@ def project_index(
         if not names:
             continue
         lines += [f"## {heading}", ""]
-        for name in sorted(names):
-            # Link target uses the same transform the generator names the file
-            # with; the display text stays the raw label but is bracket-escaped
-            # so a label with `[`/`]` can't break the link (BH-S3).
-            lines.append(f"- [{bucket}/{_md_link_text(name)}](./{bucket}/{safe_wiki_filename(name)}.md)")
+        for entry in sorted(names, key=lambda e: _index_entry(e)):
+            # Link target is the stem the generator actually wrote the file
+            # under; the display text stays the raw label but is escaped so a
+            # label with `[`/`]` or a newline can't break the link (BH-S3).
+            label, stem = _index_entry(entry)
+            lines.append(f"- [{bucket}/{_md_link_text(label)}](./{bucket}/{stem}.md)")
         lines.append("")
 
     lines += ["---", "_Back to [index.md](../index.md)_"]
@@ -455,11 +493,14 @@ def platform_overview(
 
     if cross_connections:
         lines += ["## Cross-Project Connections", ""]
-        for cc in cross_connections[:30]:
+        for cc in cross_connections[:_CROSS_CONNECTION_CAP]:
             src = cc.get("source", "")
             tgt = cc.get("target", "")
             rel = cc.get("relation", "")
             lines.append(f"- `{src}` →[{rel}]→ `{tgt}`")
+        note = truncation_note(len(cross_connections), _CROSS_CONNECTION_CAP)
+        if note:
+            lines.append(note)
         lines.append("")
 
     return "\n".join(lines) + "\n"

@@ -20,15 +20,25 @@ from typing import Optional
 import networkx as nx
 
 
+# Every backend that can randomise gets the same fixed seed. Leiden and Louvain
+# are randomised algorithms: without a seed, two clusterings of the *same*
+# unchanged graph land 12% of nodes in different communities (measured on an
+# 836-node graph), which churns the `community` attribute in beacon.json, the
+# obsidian community tags and REPORT.md's "Surprising Connections" on every
+# rescan of untouched code. _relabel_stable canonicalises the community *labels*
+# but cannot repair a genuinely different *partition* — only a seed can.
+_SEED = 42
+
+
 def cluster(G: nx.DiGraph) -> dict[str, int]:
     """Detect communities in the graph.
 
     Returns:
-        node_id → community_id mapping. Community IDs are consecutive integers
-        starting from 0, assigned by a *stable total order* (see
-        :func:`_relabel_stable`) so that an identical graph always yields an
-        identical mapping regardless of which backend ran or the order it
-        happened to enumerate communities in.
+        node_id → community_id mapping covering **every** node in ``G``.
+        Community IDs are consecutive integers starting from 0, assigned by a
+        *stable total order* (see :func:`_relabel_stable`) so that an identical
+        graph always yields an identical mapping regardless of which backend ran
+        or the order it happened to enumerate communities in.
     """
     if G.number_of_nodes() == 0:
         return {}
@@ -36,9 +46,47 @@ def cluster(G: nx.DiGraph) -> dict[str, int]:
     for backend in (_try_graspologic, _try_leidenalg, _try_louvain):
         result = backend(G)
         if result is not None:
-            return _relabel_stable(result)
+            return _relabel_stable(_with_singletons(G, result))
 
-    return _relabel_stable(_connected_components(G))
+    return _relabel_stable(_with_singletons(G, _connected_components(G)))
+
+
+def _canonical_undirected(G: nx.DiGraph) -> nx.Graph:
+    """Undirected view of ``G`` built in a deterministic order, isolates dropped.
+
+    ``DiGraph.to_undirected()`` enumerates in insertion order and lets the last
+    reciprocal edge win, so the *input* handed to a backend can differ run to
+    run even when the graph does not. Sorting nodes and edges makes the input
+    itself byte-stable, which is the other half of the seed fix.
+
+    Degree-0 nodes are left out because the Leiden backends discard them anyway
+    (graspologic warns about exactly this) — :func:`_with_singletons` gives them
+    their own communities afterwards, so nothing is lost and the warning stops.
+    """
+    UG = nx.Graph()
+    for u, v, data in sorted(G.edges(data=True), key=lambda e: (str(e[0]), str(e[1]))):
+        UG.add_edge(u, v, **data)
+    return UG
+
+
+def _with_singletons(G: nx.DiGraph, communities: dict[str, int]) -> dict[str, int]:
+    """Complete a partial partition so every node in ``G`` has a community.
+
+    Leiden backends return only the nodes they kept, so isolated nodes came back
+    with no ``community`` attribute at all — and no consumer checks for that,
+    so they were silently treated as un-communitied rather than as communities
+    of one. Assignment is by sorted node id, so the completion is deterministic.
+    """
+    present = {str(k) for k in communities}
+    missing = sorted((n for n in G.nodes() if str(n) not in present), key=str)
+    if not missing:
+        return communities
+
+    complete = dict(communities)
+    next_cid = max(communities.values(), default=-1) + 1
+    for offset, node in enumerate(missing):
+        complete[node] = next_cid + offset
+    return complete
 
 
 def _relabel_stable(communities: dict[str, int]) -> dict[str, int]:
@@ -120,7 +168,7 @@ def _try_graspologic(G: nx.DiGraph) -> Optional[dict[str, int]]:
     try:
         from graspologic.partition import leiden
 
-        UG = G.to_undirected()
+        UG = _canonical_undirected(G)
         if UG.number_of_edges() == 0:
             return None
 
@@ -128,7 +176,7 @@ def _try_graspologic(G: nx.DiGraph) -> Optional[dict[str, int]]:
         # older/other builds returned a (partition, modularity) tuple. Accept
         # both so the best backend actually runs instead of raising
         # "too many values to unpack" and degrading to the Louvain fallback.
-        result = leiden(UG)
+        result = leiden(UG, random_seed=_SEED)
         communities = result[0] if isinstance(result, tuple) else result
         return {str(k): int(v) for k, v in communities.items()}
     except ImportError:
@@ -144,16 +192,22 @@ def _try_leidenalg(G: nx.DiGraph) -> Optional[dict[str, int]]:
         import leidenalg
         import igraph as ig
 
-        UG = G.to_undirected()
+        UG = _canonical_undirected(G)
         if UG.number_of_edges() == 0:
             return None
 
-        nodes = list(UG.nodes())
+        nodes = sorted(UG.nodes(), key=str)
         node_idx = {n: i for i, n in enumerate(nodes)}
-        edges = [(node_idx[u], node_idx[v]) for u, v in UG.edges()]
+        edges = sorted(
+            (node_idx[u], node_idx[v]) if node_idx[u] <= node_idx[v]
+            else (node_idx[v], node_idx[u])
+            for u, v in UG.edges()
+        )
 
         g = ig.Graph(n=len(nodes), edges=edges, directed=False)
-        partition = leidenalg.find_partition(g, leidenalg.ModularityVertexPartition)
+        partition = leidenalg.find_partition(
+            g, leidenalg.ModularityVertexPartition, seed=_SEED,
+        )
 
         result: dict[str, int] = {}
         for community_id, members in enumerate(partition):
@@ -170,11 +224,11 @@ def _try_leidenalg(G: nx.DiGraph) -> Optional[dict[str, int]]:
 def _try_louvain(G: nx.DiGraph) -> Optional[dict[str, int]]:
     """Louvain via networkx built-in (nx >= 3.0)."""
     try:
-        UG = G.to_undirected()
+        UG = _canonical_undirected(G)
         if UG.number_of_edges() == 0:
             return None
 
-        communities = nx.community.louvain_communities(UG, seed=42)
+        communities = nx.community.louvain_communities(UG, seed=_SEED)
         result: dict[str, int] = {}
         for community_id, members in enumerate(communities):
             for node in members:

@@ -272,7 +272,8 @@ def _detect_language_from_files(directory: Path) -> str:
         # toward vendored JS) just to answer "what language is this project".
         for dirpath, dirnames, filenames in os.walk(directory):
             dirnames[:] = [
-                d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")
+                d for d in dirnames
+                if not d.startswith(".") and not _should_skip_dir(Path(dirpath) / d)
             ]
             for fname in filenames:
                 ext = os.path.splitext(fname)[1].lower()
@@ -287,20 +288,53 @@ def _detect_language_from_files(directory: Path) -> str:
     return max(counts, key=lambda k: counts[k])
 
 
-_SKIP_DIRS = {
-    "node_modules", "__pycache__", ".git", "dist", "build", "target",
-    ".next", ".nuxt", "coverage", ".venv", "venv", "env", ".tox",
+# Always build noise or tooling state — a bare name is enough.
+_UNCONDITIONAL_SKIP_DIRS = {
+    "node_modules", "__pycache__", ".git", "dist",
+    ".next", ".nuxt", ".venv", "venv", ".tox",
 }
 
+# Usually build output, but often enough a real project root that a bare-name
+# match makes projects undiscoverable (a UVM ``env/``, a service under
+# ``build/``). Gated on the same marker probe the file collector uses, so
+# discovery and collection agree: without this, ``public/`` was discovered as a
+# project and then collected zero files from it.
+_CORROBORATED_SKIP_DIRS = {"build", "target", "coverage", "env"}
+
+_SKIP_DIRS = _UNCONDITIONAL_SKIP_DIRS | _CORROBORATED_SKIP_DIRS
 
 
-def _iter_subdirs(directory: Path) -> list[Path]:
-    """Return immediate subdirectories, skipping common non-project dirs."""
+def _should_skip_dir(path: Path) -> bool:
+    """Whether project discovery should ignore the directory at ``path``."""
+    name = path.name
+    if name in _UNCONDITIONAL_SKIP_DIRS:
+        return True
+    if name in _CORROBORATED_SKIP_DIRS:
+        from codebeacon.discover.scanner import _looks_like_build_output
+        return _looks_like_build_output(path, name)
+    return False
+
+
+def _iter_subdirs(directory: Path, matcher=None) -> list[Path]:
+    """Return immediate subdirectories, skipping common non-project dirs.
+
+    ``matcher`` is an optional :class:`~codebeacon.discover.ignore.IgnoreMatcher`
+    built from the scan root's ignore files: an explicit ``!public/`` negation
+    re-includes a directory the heuristics above would skip, giving discovery
+    the same escape hatch the file collector already has.
+    """
     try:
-        return [
-            d for d in sorted(directory.iterdir())
-            if d.is_dir() and not d.name.startswith(".") and d.name not in _SKIP_DIRS
-        ]
+        out = []
+        for d in sorted(directory.iterdir()):
+            if not d.is_dir():
+                continue
+            if matcher is not None and matcher.is_explicitly_included(d.name, is_dir=True):
+                out.append(d)
+                continue
+            if d.name.startswith(".") or _should_skip_dir(d):
+                continue
+            out.append(d)
+        return out
     except (PermissionError, OSError):
         return []
 
@@ -368,9 +402,16 @@ def discover_projects(paths: list[str]) -> list[ProjectInfo]:
     # Level 1: direct subdirs (e.g. DiveAI/, WaveLog/, aptscore/)
     # Level 2: if a subdir has no signature itself, scan its children
     #           (e.g. WaveLog/server, aptscore/frontend, murmur/landing)
+    # A ``!name/`` negation in the scan root's ignore files re-includes a
+    # directory the skip heuristics would drop, so a project deliberately kept
+    # under e.g. ``public/`` stays discoverable.
+    from codebeacon.discover.ignore import IgnoreMatcher
+    from codebeacon.discover.scanner import read_ignore_file
+    matcher = IgnoreMatcher(read_ignore_file(single_path))
+
     subprojects: list[ProjectInfo] = []
     seen_paths: set[str] = set()
-    for subdir in _iter_subdirs(single_path):
+    for subdir in _iter_subdirs(single_path, matcher):
         if _has_project_signature(subdir):
             subprojects.append(_build_project_info(subdir, multi=True))
             seen_paths.add(str(subdir))

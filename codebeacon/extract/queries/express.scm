@@ -53,11 +53,14 @@
 ) @route.chain_verb
 
 ; ── app.use("/prefix", router) — prefix mounting ─────────────────────────────
+; The mounting object is captured too: routers mount into routers
+; (`mid.use("/x", inner); app.use("/root", mid)`), so routes.py resolves the
+; chain transitively instead of treating every mount as rooted at the app.
 
 (expression_statement
   (call_expression
     function: (member_expression
-      object: (identifier) @_obj
+      object: (identifier) @route.mount_parent
       property: (property_identifier) @_use
       (#eq? @_use "use")
     )
@@ -118,6 +121,60 @@
 (class_declaration
   name: (_) @service.name
 ) @service.class
+
+; ── Class heritage (extends / implements) ─────────────────────────────────────
+; Only the NestJS and Angular queries captured heritage, so a plain JS/TS class
+; carried extends=[] and the interface→implementation DI path had no producer
+; for the express/node/react family.
+;
+; The heritage CONTAINER is captured, not its parts, because the two grammars
+; disagree on both halves and this query is allowlisted for all three:
+;   - the class name is (identifier) in JS but (type_identifier) in TS/TSX, so
+;     naming either one makes the pattern an "Impossible pattern" under the
+;     other and run_query raises GrammarQueryError for every file of it;
+;   - TS wraps heritage in extends_clause/implements_clause, JS puts the
+;     expression directly under class_heritage and has no extends_clause node
+;     at all.
+; The (_) wildcard plus a container capture compiles identically under
+; javascript, typescript and tsx (verified against all three); services.py
+; walks the container, where the shape difference is cheap to handle.
+
+(class_declaration
+  name: (_) @service.heritage_class
+  (class_heritage) @service.heritage
+) @service.heritage_decl
+
+; ── CommonJS member exports ───────────────────────────────────────────────────
+; `exports.x = fn` / `module.exports.y = wrap(fn)`. Only exported CLASSES had a
+; pattern, so a CommonJS module's entire public surface produced no nodes.
+;
+; Two separate patterns rather than one alternation on the object: a shared
+; predicate applies to the WHOLE pattern, so an alternation here would force
+; the bare-`exports` branch to satisfy a predicate on a capture it never binds.
+; A computed `exports[key] = …` is a subscript_expression and is excluded by
+; construction — its name is not knowable statically.
+
+(assignment_expression
+  left: (member_expression
+    object: (identifier) @_exports
+    (#eq? @_exports "exports")
+    property: (property_identifier) @service.cjs_export
+  )
+  right: (_) @service.cjs_value
+) @service.cjs_assign
+
+(assignment_expression
+  left: (member_expression
+    object: (member_expression
+      object: (identifier) @_module
+      (#eq? @_module "module")
+      property: (property_identifier) @_exports2
+      (#eq? @_exports2 "exports")
+    )
+    property: (property_identifier) @service.cjs_export
+  )
+  right: (_) @service.cjs_value
+) @service.cjs_assign
 
 ; ── imports ───────────────────────────────────────────────────────────────────
 

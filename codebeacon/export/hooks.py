@@ -2,17 +2,27 @@
 
 ``codebeacon hook install`` does three things in the current repository:
 
-1. Registers a ``codebeacon`` git merge driver in ``.git/config`` that calls
-   ``codebeacon merge-driver`` (see :mod:`codebeacon.export.merge`).
-2. Adds ``*beacon.json merge=codebeacon`` to ``.gitattributes`` so git uses the
+1. Drops a ``post-commit`` hook that detaches a background incremental rebuild
+   (``codebeacon scan . --update``). The hook's directory comes from git
+   (``core.hooksPath``, else ``git rev-parse --git-path hooks``) so Husky-managed
+   repos don't get a parallel set of hooks and worktree/submodule checkouts —
+   where ``.git`` is a FILE — resolve to the shared hooks dir. Rebuild output is
+   redirected to ``~/.cache/codebeacon-rebuild.log``.
+2. Registers a ``codebeacon`` git merge driver in the local git config that
+   calls ``codebeacon merge-driver`` (see :mod:`codebeacon.export.merge`).
+3. Adds ``*beacon.json merge=codebeacon`` to ``.gitattributes`` so git uses the
    driver for ``beacon.json`` (and per-project ``beacon.json`` files in
    deep-dive mode).
-3. Drops a ``post-commit`` hook that detaches a background incremental rebuild
-   (``codebeacon scan . --update``). The hook respects ``core.hooksPath`` so
-   Husky-managed repos don't get a parallel set of hooks. Rebuild output is
-   redirected to ``~/.cache/codebeacon-rebuild.log``.
+
+The hook comes first on purpose: it is the only step that can fail on a path
+git owns, and failing after the config edits left the repo half-configured.
 
 Each step is idempotent — running ``codebeacon hook install`` twice is safe.
+
+The installed hook honours two escapes: ``CODEBEACON_SKIP_HOOK=1`` suppresses
+the rebuild for a scripted or rebase-heavy commit run, and a commit made inside
+a linked worktree is skipped (linked worktrees share the common dir's hooks, so
+the rebuild would scan a different checkout than the one that was committed).
 """
 
 from __future__ import annotations
@@ -23,6 +33,8 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+
+from codebeacon.common.textio import read_text_safe
 
 
 _POST_COMMIT_HOOK_TEMPLATE = r"""#!/usr/bin/env bash
@@ -37,8 +49,22 @@ _POST_COMMIT_HOOK_TEMPLATE = r"""#!/usr/bin/env bash
 LOG="${HOME}/.cache/codebeacon-rebuild.log"
 mkdir -p "$(dirname "$LOG")"
 
+# Escape hatch for scripted/CI/rebase-heavy commit runs:
+#   CODEBEACON_SKIP_HOOK=1 git commit -m ...
+if [ -n "$CODEBEACON_SKIP_HOOK" ]; then
+  exit 0
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$REPO_ROOT" || exit 0
+
+# Linked worktrees share the common dir's hooks, so a commit made in one
+# would rebuild THAT checkout's tree using the main checkout's index. Skip
+# them; run `codebeacon scan . --update` by hand there instead. Detected by
+# --git-dir (per-worktree) diverging from --git-common-dir (shared).
+if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-dir 2>/dev/null)" ]; then
+  exit 0
+fi
 
 # Files touched by the new commit. Falls back to "everything staged" when
 # HEAD~1 doesn't exist (initial commit).
@@ -110,13 +136,27 @@ def install_hooks(repo_path: str | Path) -> int:
         print(f"Error: {repo} is not inside a git working tree.", file=sys.stderr)
         return 1
 
+    # The hook is written FIRST because it is the only step that can fail on a
+    # path git owns (an unwritable hooks dir, a hooksPath pointing at a file).
+    # Failing after the merge-driver and .gitattributes edits used to leave the
+    # repo half-configured — the shape C-50 hit in a worktree checkout.
+    try:
+        hook_path = _install_post_commit(repo)
+    except OSError as exc:
+        print(
+            f"Error: could not install the post-commit hook ({exc}).\n"
+            "No changes were made — fix the hooks path (see `git config "
+            "core.hooksPath` and `git rev-parse --git-path hooks`) and re-run.",
+            file=sys.stderr,
+        )
+        return 1
+
     _register_merge_driver(repo)
     _patch_gitattributes(repo)
-    _install_post_commit(repo)
     print("\ncodebeacon hooks installed.")
-    print("  - merge driver registered (.git/config)")
-    print("  - merge=codebeacon entry in .gitattributes")
-    print("  - post-commit rebuild hook installed")
+    print(f"  - merge driver registered ({_config_path(repo)})")
+    print(f"  - merge=codebeacon entry in {repo / '.gitattributes'}")
+    print(f"  - post-commit rebuild hook: {hook_path}")
     return 0
 
 
@@ -164,33 +204,77 @@ def _register_merge_driver(repo: Path) -> None:
 def _patch_gitattributes(repo: Path) -> None:
     """Add ``*beacon.json merge=codebeacon`` to ``.gitattributes`` if missing."""
     ga = repo / ".gitattributes"
-    existing = ga.read_text(encoding="utf-8") if ga.exists() else ""
+    existing = read_text_safe(ga) if ga.exists() else ""
     if "merge=codebeacon" in existing:
         return
     suffix = "" if not existing or existing.endswith("\n") else "\n"
-    ga.write_text(existing + suffix + "*beacon.json merge=codebeacon\n", encoding="utf-8")
+    # Append rather than rewrite: a .gitattributes that is not valid UTF-8 (or
+    # that some other tool is editing) keeps its original bytes byte-for-byte.
+    with ga.open("a", encoding="utf-8", newline="") as fh:
+        fh.write(suffix + "*beacon.json merge=codebeacon\n")
 
 
-def _install_post_commit(repo: Path) -> None:
-    """Write the ``post-commit`` hook into the right hooks path."""
+def _install_post_commit(repo: Path) -> Path:
+    """Write the ``post-commit`` hook into the right hooks path.
+
+    Returns the hook's path so the caller can report where it landed (which is
+    *not* ``<repo>/.git/hooks`` in a worktree or submodule checkout). Raises
+    ``OSError`` when the hooks directory cannot be created or written.
+    """
     hooks_dir = _hooks_dir(repo)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hook = hooks_dir / "post-commit"
     content = _render_post_commit_hook()
     if hook.exists():
-        existing = hook.read_text(encoding="utf-8")
+        existing = read_text_safe(hook)
         if existing == content:
-            return
+            return hook
         # A codebeacon-authored hook (our marker header) gets refreshed so
         # re-running `hook install` picks up template fixes; anything else
         # that merely mentions codebeacon is the user's — leave it alone.
         if "codebeacon: incremental rebuild" not in existing and "codebeacon" in existing:
-            return
+            return hook
     # newline="\n" pins LF so Python's default newline translation doesn't turn
     # every '\n' into '\r\n' on Windows — a CRLF shebang (`env: bash\r`) and a
     # CRLF heredoc terminator both make the shell hook unrunnable there.
     hook.write_text(content, encoding="utf-8", newline="\n")
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return hook
+
+
+def _git_path(repo: Path, what: str) -> Path | None:
+    """Resolve ``git rev-parse --git-path <what>`` against *repo*.
+
+    git answers with a path relative to the working tree in an ordinary
+    checkout (``.git/hooks``) and with an absolute one where the git dir lives
+    elsewhere — a linked worktree, a submodule, ``$GIT_DIR``. Returns ``None``
+    when git is unavailable or the command fails.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--git-path", what],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    value = out.stdout.strip()
+    if not value:
+        return None
+    p = Path(value)
+    return p if p.is_absolute() else (repo / p)
+
+
+def _config_path(repo: Path) -> Path:
+    """Where ``git config --local`` writes for this checkout (display only)."""
+    return _git_path(repo, "config") or (repo / ".git" / "config")
 
 
 def _hooks_dir(repo: Path) -> Path:
@@ -205,6 +289,12 @@ def _hooks_dir(repo: Path) -> Path:
     Mirrors graphify #554: without the tilde expansion, installing the
     hook into a Husky-managed repo writes the file at
     ``<repo>/~/.husky/post-commit``, which git never executes.
+
+    With no ``core.hooksPath`` set, the directory comes from
+    ``git rev-parse --git-path hooks`` rather than a hardcoded
+    ``<repo>/.git/hooks``: in a ``git worktree`` checkout (and in a submodule)
+    ``.git`` is a FILE, so the old guess raised ``NotADirectoryError`` and the
+    hook was never installed (C-50).
     """
     try:
         out = subprocess.run(
@@ -225,4 +315,8 @@ def _hooks_dir(repo: Path) -> Path:
             return p.resolve() if p.is_absolute() else (repo / p).resolve()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
+
+    resolved = _git_path(repo, "hooks")
+    if resolved is not None:
+        return resolved
     return repo / ".git" / "hooks"

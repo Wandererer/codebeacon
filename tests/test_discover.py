@@ -32,17 +32,20 @@ class TestScanner:
         assert "lib.js" not in names
         assert "index.js" in names
 
-    def test_ignores_all_artifact_dirs(self, tmp_path):
-        """All IGNORE_DIRS entries are excluded."""
-        # pick 3 representative artifact dirs
-        for d in ["target", "dist", "__pycache__"]:
+    def test_ignores_unconditional_artifact_dirs(self, tmp_path):
+        """UNCONDITIONAL_IGNORE_DIRS entries are always excluded.
+
+        0.7.1: ambiguous names (target, build, env, ...) now prune only with
+        corroborating markers, so the representatives here are all from the
+        unconditional set."""
+        for d in ["node_modules", "dist", "__pycache__"]:
             (tmp_path / d).mkdir()
             (tmp_path / d / "Foo.java").write_text("class Foo{}")
         (tmp_path / "src.java").write_text("class Src{}")
         result = collect_files(str(tmp_path))
         for f in result:
             parts = Path(f).parts
-            for bad in ["target", "dist", "__pycache__"]:
+            for bad in ["node_modules", "dist", "__pycache__"]:
                 assert bad not in parts
 
     def test_only_code_extensions(self, tmp_path):

@@ -73,18 +73,39 @@
 ) @route.namespace_block
 
 ; ── ApplicationRecord / ActiveRecord model ────────────────────────────────────
+;
+; Two SEPARATE patterns, not one alternation. Both bases were previously listed
+; as branches of a single `[...]` alternation carrying both predicates, and
+; tree-sitter applies a pattern's predicates to the whole pattern: the
+; bare-constant branch then had to satisfy `#eq? "Base"` as well, which is
+; impossible, so `class Post < ApplicationRecord` — the canonical Rails model —
+; matched NOTHING and no Rails app ever produced an entity from it.
+;
+; The scope_resolution branch is also anchored on its scope. Matching the tail
+; constant alone promoted any `class Report < Reporting::Base` to an
+; ActiveRecord model purely because the superclass path ends in `Base`, the
+; same tail-name over-match laravel.scm's Eloquent allowlist already guards
+; against.
 
+; class Post < ApplicationRecord
 (class
   name: (constant) @entity.class_name
   superclass: (superclass
-    [
-      (constant) @_base
-      (#match? @_base "^(ApplicationRecord|ActiveRecord)$")
-      (scope_resolution
-        name: (constant) @_base
-        (#eq? @_base "Base")
-      )
-    ]
+    (constant) @_base
+    (#match? @_base "^(ApplicationRecord|ActiveRecord)$")
+  )
+) @entity.model
+
+; class Widget < ActiveRecord::Base
+(class
+  name: (constant) @entity.class_name
+  superclass: (superclass
+    (scope_resolution
+      scope: (constant) @_scope
+      (#eq? @_scope "ActiveRecord")
+      name: (constant) @_base
+      (#eq? @_base "Base")
+    )
   )
 ) @entity.model
 

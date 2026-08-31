@@ -11,6 +11,7 @@ Design:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from codebeacon.common.types import ServiceInfo, UnresolvedRef
@@ -166,10 +167,78 @@ def _collect_heritage(matches: list) -> dict[str, tuple[list[str], list[str]]]:
             bucket = implements.setdefault(cname, [])
             if val and val not in bucket:
                 bucket.append(val)
+        # express.scm captures the heritage CONTAINER instead of its parts,
+        # because the JS and TS grammars disagree on its internals (see the
+        # comment on that pattern). Unpack it here to the same two buckets.
+        for container in caps.get("service.heritage", []):
+            got_ext, got_impl = _js_heritage(container)
+            for val in got_ext:
+                bucket = extends.setdefault(cname, [])
+                if val not in bucket:
+                    bucket.append(val)
+            for val in got_impl:
+                bucket = implements.setdefault(cname, [])
+                if val not in bucket:
+                    bucket.append(val)
     return {
         cname: (extends.get(cname, []), implements.get(cname, []))
         for cname in set(extends) | set(implements)
     }
+
+
+def _base_name(node) -> str:
+    """Name of a heritage entry, unwrapping a mixin factory call.
+
+    ``extends Mixin(Base)`` names the FACTORY, so the base is ``Mixin`` — the
+    call's text is not a symbol anything can bind to. Both grammars need this,
+    for different reasons: TypeScript's ``extends_clause`` puts the whole
+    ``call_expression`` in its ``value`` field, and JavaScript puts it directly
+    under ``class_heritage``. Without unwrapping, the two disagree on the same
+    source.
+    """
+    if node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+        return node_text(fn) if fn is not None else node_text(node)
+    return node_text(node)
+
+
+def _js_heritage(container) -> tuple[list[str], list[str]]:
+    """``(extends, implements)`` from a JS/TS ``class_heritage`` node.
+
+    TypeScript wraps each half in ``extends_clause`` / ``implements_clause``;
+    JavaScript has neither node type and puts the base expression directly
+    under the container.
+    """
+    extends: list[str] = []
+    implements: list[str] = []
+    for child in container.named_children:
+        if child.type == "extends_clause":
+            value = child.child_by_field_name("value")
+            sources = [value] if value is not None else list(child.named_children)
+            extends.extend(_base_name(node) for node in sources if node is not None)
+        elif child.type == "implements_clause":
+            implements.extend(node_text(node) for node in child.named_children)
+        else:
+            extends.append(_base_name(child))
+    return [e for e in extends if e], [i for i in implements if i]
+
+
+def _cjs_definition_node(value):
+    """The node a CommonJS member export actually points at.
+
+    ``exports.handler = wrap(function actualHandler() {…})`` — the export's
+    definition is the wrapped function, so the line should point there rather
+    than at the wrapper call. The exported NAME is still the property, never
+    the wrapper.
+    """
+    if value is not None and value.type == "call_expression":
+        args = value.child_by_field_name("arguments")
+        if args is not None:
+            for arg in args.named_children:
+                if arg.type in ("function_expression", "arrow_function",
+                                "function", "function_declaration"):
+                    return arg
+    return value
 
 
 def _interpret_noop(
@@ -265,7 +334,11 @@ def _interpret_spring_boot(
 def _interpret_express(
     file_path: str, matches: list, framework: str,
 ) -> tuple[list[ServiceInfo], list[UnresolvedRef]]:
-    """Express/Koa/Fastify: exported classes as services (no DI framework)."""
+    """Express/Koa/Fastify: exported classes and CommonJS member exports.
+
+    No DI framework, but class heritage is captured so a base class declared
+    elsewhere still resolves through SymbolTable.
+    """
     services: list[ServiceInfo] = []
     seen: set[str] = set()
 
@@ -284,6 +357,34 @@ def _interpret_express(
                 line=line,
                 framework=framework,
             ))
+
+    # CommonJS member exports — a separate pass so the class loop's dedupe
+    # `continue` cannot skip them.
+    for _idx, caps in matches:
+        if "service.cjs_assign" not in caps or "service.cjs_export" not in caps:
+            continue
+        name = node_text(caps["service.cjs_export"][0])
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        value = caps["service.cjs_value"][0] if "service.cjs_value" in caps else None
+        anchor = _cjs_definition_node(value) or caps["service.cjs_assign"][0]
+        services.append(ServiceInfo(
+            name=name,
+            class_name=name,
+            source_file=file_path,
+            line=anchor.start_point[0] + 1,
+            framework=framework,
+        ))
+
+    heritage = _collect_heritage(matches)
+    for svc in services:
+        ext, impl = heritage.get(svc.name, ([], []))
+        if ext:
+            svc.extends = ext
+        if impl:
+            svc.implements = impl
+
     return services, []
 
 
@@ -505,40 +606,132 @@ def _interpret_laravel(
     return services, unresolved
 
 
+# C# builtin types that are never a DI dependency. `predefined_type` nodes
+# (int, string, void…) are rejected structurally; these are the spellings that
+# arrive as plain identifiers.
+_CSHARP_NON_DI_TYPES = frozenset({
+    "var", "dynamic", "object", "String", "Object", "Int32", "Int64", "Boolean",
+    "Guid", "DateTime", "DateTimeOffset", "TimeSpan", "Decimal", "Double",
+    "Single", "Byte", "Char",
+})
+
+
+def _csharp_type_name(node) -> str:
+    """Reduce a C# type node's text to the bare type name.
+
+    ``Abc.IMailer`` → ``IMailer``; ``IRepo<User>`` → ``IRepo``. Namespaces and
+    type arguments are not part of the name the graph binds on.
+    """
+    text = node_text(node).strip()
+    text = text.split("<", 1)[0]
+    return text.rsplit(".", 1)[-1].strip()
+
+
 def _interpret_aspnet(
     file_path: str, matches: list, framework: str,
 ) -> tuple[list[ServiceInfo], list[UnresolvedRef]]:
-    """ASP.NET: service classes with interfaces + AddScoped<IFoo, FooImpl>() DI."""
-    services: list[ServiceInfo] = []
-    unresolved: list[UnresolvedRef] = []
-    seen: set[str] = set()
+    """ASP.NET: every class is a service; constructor DI + AddScoped<> bindings.
 
+    Three things were missing before, and they compounded: a class needed a base
+    list to be a node at all, constructor injection (ASP.NET Core's main DI
+    path, both classic and C# 12 primary constructors) was never captured, and
+    the single captured base-list entry was filed as an implemented *interface*
+    even when it was a base *class*.
+    """
+    services: dict[str, ServiceInfo] = {}          # class name → ServiceInfo
+    class_ranges: list[tuple[int, int, str]] = []  # (start, end, class name)
+    bases: dict[str, list[str]] = {}               # class name → base-list entries
+    unresolved: list[UnresolvedRef] = []
+
+    # Pass 1 — every class becomes a node, and its base list is collected.
     for _idx, caps in matches:
         if "service.class" in caps and "service.class_name" in caps:
             name = node_text(caps["service.class_name"][0])
-            if name in seen:
-                continue
-            seen.add(name)
-            iface = node_text(caps["service.interface"][0]) if "service.interface" in caps else ""
             node = caps["service.class"][0]
-            svc = ServiceInfo(
-                name=name,
-                class_name=name,
-                source_file=file_path,
-                line=node.start_point[0] + 1,
-                framework="aspnet",
-            )
-            if iface:
-                svc.annotations.append(f"implements:{iface}")
-                # Structured field drives interface→impl DI resolution; the C#
-                # base_list's first identifier is conventionally the interface
-                # (IFoo) when a class registers via AddScoped<IFoo, FooImpl>().
-                svc.implements.append(iface)
-            services.append(svc)
+            if name and name not in services:
+                services[name] = ServiceInfo(
+                    name=name,
+                    class_name=name,
+                    source_file=file_path,
+                    line=node.start_point[0] + 1,
+                    framework="aspnet",
+                )
+                class_ranges.append((node.start_byte, node.end_byte, name))
 
+        if "service.class_with_base" in caps and "service.base_class_name" in caps:
+            cls_name = node_text(caps["service.base_class_name"][0])
+            for base_node in caps.get("service.base", []):
+                base = _csharp_type_name(base_node)
+                bucket = bases.setdefault(cls_name, [])
+                if base and base not in bucket:
+                    bucket.append(base)
+
+    # Pass 2 — constructor DI, attributed to the innermost enclosing class.
+    # A primary constructor's parameter_list belongs to the class node itself,
+    # so both forms correlate by the same byte-range rule.
+    for _idx, caps in matches:
+        if "di.ctor_param_type" not in caps:
+            continue
+        anchor = caps.get("di.constructor") or caps.get("di.primary_constructor")
+        if not anchor:
+            continue
+        ctor_start = anchor[0].start_byte
+
+        enclosing = ""
+        best_span = None
+        for start, end, name in class_ranges:
+            if start <= ctor_start <= end:
+                span = end - start
+                if best_span is None or span < best_span:
+                    best_span = span
+                    enclosing = name
+        if not enclosing:
+            continue
+
+        svc = services[enclosing]
+        for type_node in caps["di.ctor_param_type"]:
+            if type_node.type == "predefined_type":
+                continue
+            dep = _csharp_type_name(type_node)
+            if not dep or dep in _CSHARP_NON_DI_TYPES:
+                continue
+            if dep not in svc.dependencies:
+                svc.dependencies.append(dep)
+            unresolved.append(UnresolvedRef(
+                source_node_id=_nid(file_path, enclosing),
+                ref_type="inject",
+                ref_name=dep,
+                framework="aspnet",
+            ))
+
+    # Pass 3 — classify base-list entries. C# does not distinguish extends from
+    # implements syntactically, so decide by what is knowable: a base declared
+    # as a class in this file is an ancestor class; otherwise the universal
+    # .NET `IPascalCase` convention marks an interface. Anything else stays
+    # `extends` — C# requires the base class to be listed first, and
+    # SymbolTable folds both fields into one map, so a misread here cannot
+    # misroute DI, only mislabel the wiki.
+    for cls_name, entries in bases.items():
+        svc = services.get(cls_name)
+        if svc is None:
+            continue
+        for base in entries:
+            if base not in services and re.match(r"^I[A-Z]", base):
+                if base not in svc.implements:
+                    svc.implements.append(base)
+                svc.annotations.append(f"implements:{base}")
+            else:
+                if base not in svc.extends:
+                    svc.extends.append(base)
+                svc.annotations.append(f"extends:{base}")
+
+    # Pass 4 — AddScoped<IFoo, FooImpl>() registrations.
+    for _idx, caps in matches:
         if "di.generic_registration" in caps and "di.service_type" in caps and "di.impl_type" in caps:
-            iface = node_text(caps["di.service_type"][0])
-            impl = node_text(caps["di.impl_type"][0])
+            iface = _csharp_type_name(caps["di.service_type"][0])
+            impl = _csharp_type_name(caps["di.impl_type"][0])
+            if not iface or not impl:
+                continue
             unresolved.append(UnresolvedRef(
                 source_node_id=_nid(file_path, impl),
                 ref_type="bind",
@@ -546,7 +739,7 @@ def _interpret_aspnet(
                 framework="aspnet",
             ))
 
-    return services, unresolved
+    return list(services.values()), unresolved
 
 
 def _interpret_actix(

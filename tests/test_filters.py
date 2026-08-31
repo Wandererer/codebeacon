@@ -149,8 +149,10 @@ class TestFilterCrossService:
         result = filter_cross_service(edges, nodes, service_roots)
         assert len(result) == 1
 
-    def test_preserves_non_import_relations(self):
-        """Non-import relations (injects, calls) are never filtered."""
+    def test_cross_service_injects_filtered_calls_preserved(self):
+        """0.7.1 R7(c): `injects` counts as an import-like relation — DI cannot
+        cross a service boundary, so a cross-service injects edge is dropped.
+        `calls` (runtime relation) still passes through."""
         nodes = {
             "A": _node("A", "svc-a/A.java"),
             "B": _node("B", "svc-b/B.java"),
@@ -158,4 +160,6 @@ class TestFilterCrossService:
         service_roots = {"A": "svc-a", "B": "svc-b"}
         edges = [_edge("A", "B", "injects"), _edge("A", "B", "calls")]
         result = filter_cross_service(edges, nodes, service_roots)
-        assert len(result) == 2
+        assert [e for e in result] == [edges[1]], (
+            "expected only the calls edge to survive the cross-service filter"
+        )

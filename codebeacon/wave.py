@@ -25,6 +25,15 @@ from codebeacon.common.types import (
     UnresolvedRef,
 )
 
+# Schema version of the per-file extraction payload produced by ``_extract_file``
+# and stored verbatim in the AST cache. Bump this whenever the dict gains or
+# changes a field, so entries written by an older codebeacon cannot be served
+# for an *unchanged* source file — the content hash cannot catch a payload that
+# is stale because the serialiser changed, not because the file did.
+# 2: ServiceInfo.implements / .extends added (they were silently dropped, which
+#    left every interface→impl DI edge unresolved).
+WAVE_PAYLOAD_SCHEMA = 2
+
 
 @dataclass
 class ExtractionFailure:
@@ -98,7 +107,9 @@ def _extract_file(
     cache_ns = f"{framework}::semantic" if semantic else framework
     if cache is not None:
         cached = cache.get(file_path, framework=cache_ns)
-        if cached is not None:
+        # A payload from an older serialiser is a miss, not a hit: it may be
+        # missing fields this version reads (see WAVE_PAYLOAD_SCHEMA).
+        if cached is not None and cached.get("_schema") == WAVE_PAYLOAD_SCHEMA:
             return {"_cache_hit": True, **cached}
 
     try:
@@ -121,6 +132,7 @@ def _extract_file(
             semantic_edges = extract_semantic_refs(file_path, framework)
 
         result: dict[str, Any] = {
+            "_schema": WAVE_PAYLOAD_SCHEMA,
             "routes": [_route_to_dict(r) for r in routes],
             "services": [_service_to_dict(s) for s in services],
             "entities": [_entity_to_dict(e) for e in entities],
@@ -203,13 +215,19 @@ def _process_chunk(
     semantic: bool = False,
 ) -> list[Union[dict, ExtractionFailure]]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_extract_file, fp, framework, project_path, cache, semantic): fp
+        # Every file is submitted up front (parallelism is unchanged), but the
+        # results are collected in SUBMISSION order, not completion order.
+        # Downstream, graph/build.py resolves label collisions by first-claimer
+        # and common/symbols.py indexes classes in list order, so a completion
+        # -ordered merge made node ids — and therefore wiki/obsidian filenames —
+        # flip between runs on an unchanged corpus. collect_files() yields a
+        # sorted list, so submission order is a stable function of the corpus.
+        submitted = [
+            (fp, pool.submit(_extract_file, fp, framework, project_path, cache, semantic))
             for fp in chunk
-        }
+        ]
         results: list[Union[dict, ExtractionFailure]] = []
-        for future in concurrent.futures.as_completed(futures):
-            fp = futures[future]
+        for fp, future in submitted:
             try:
                 results.append(future.result())
             except Exception as exc:
@@ -259,6 +277,8 @@ def _service_to_dict(s: ServiceInfo) -> dict:
         "methods": list(s.methods),
         "dependencies": list(s.dependencies),
         "annotations": list(s.annotations),
+        "implements": list(s.implements),
+        "extends": list(s.extends),
     }
 
 def _entity_to_dict(e: EntityInfo) -> dict:
@@ -309,6 +329,8 @@ def _dict_to_service(d: dict) -> ServiceInfo:
         methods=d.get("methods", []),
         dependencies=d.get("dependencies", []),
         annotations=d.get("annotations", []),
+        implements=d.get("implements", []),
+        extends=d.get("extends", []),
     )
 
 def _dict_to_entity(d: dict) -> EntityInfo:

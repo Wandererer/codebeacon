@@ -11,6 +11,11 @@ Tools:
     beacon_routes          - list all routes (optional: filter by project)
     beacon_services        - list all services (optional: filter by project)
     beacon_knowledge       - search knowledge notes / list notes linked to a node
+    beacon_pr_context      - wiki articles covering a set of changed files
+
+Every tool accepts ``token_budget`` (default 2000 tokens) and announces any
+trim. A tool that fails returns ``isError: true`` in a normal MCP result — see
+:class:`ToolError` — rather than a JSON-RPC error the client may swallow.
 
 Usage:
     codebeacon serve --dir /path/to/.codebeacon
@@ -19,15 +24,138 @@ Usage:
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
-import os
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 from codebeacon import __version__
-from codebeacon.common.safety import sanitize_label
+from codebeacon.common.safety import defang_model_tokens, sanitize_label
+
+
+# ── Error contract ────────────────────────────────────────────────────────────
+
+class ToolError(Exception):
+    """A recoverable tool-level failure.
+
+    Per the MCP spec a *tool* that fails still produces a successful JSON-RPC
+    response carrying ``isError: true``; only protocol problems (unknown
+    method, malformed request) are JSON-RPC errors. Tools raise this instead of
+    returning error prose so the flag and the message can never disagree —
+    returning ``"Graph not loaded."`` with ``isError: False`` told every calling
+    agent the lookup had succeeded.
+    """
+
+
+# ── Output budget ─────────────────────────────────────────────────────────────
+#
+# One MCP call used to be able to emit ~214k tokens (measured: beacon_query with
+# limit=10000 over a 5,236-node graph). Every tool's text therefore leaves
+# through _apply_budget. A budget of 0 disables trimming, which is what a human
+# at the CLI wants: they asked for N rows and should get N rows.
+
+DEFAULT_TOKEN_BUDGET = 2000
+CHARS_PER_TOKEN = 4
+_NOTICE_RESERVE = 240  # chars held back so the notice itself fits the budget
+MAX_LIMIT = 1000       # ceiling on a model-supplied `limit`
+MAX_DEPTH = 10         # ceiling on a model-supplied traversal `depth`
+
+
+def _apply_budget(text: str, budget_tokens: int) -> str:
+    """Trim `text` to roughly `budget_tokens` tokens, on a line boundary.
+
+    Text that already fits comes back byte-identical — a small result must not
+    grow a notice it does not need. Truncation is always announced in the
+    payload the model reads, never silent.
+    """
+    if budget_tokens <= 0 or len(text) <= budget_tokens * CHARS_PER_TOKEN:
+        return text
+
+    max_chars = budget_tokens * CHARS_PER_TOKEN
+    lines = text.split("\n")
+    room = max(0, max_chars - _NOTICE_RESERVE)
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > room:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if not kept:
+        # A single line wider than the whole budget (a minified file, say):
+        # hard-cut it rather than answering with nothing but the notice.
+        kept = [lines[0][:room] + " …"]
+
+    notice = (
+        f"_Truncated to {len(kept)} of {len(lines)} lines (~{budget_tokens} token "
+        f"budget). Narrow the request — filter by `project`, use a more specific "
+        f"term, or lower `limit` — or raise `token_budget`._"
+    )
+    return "\n".join([notice, ""] + kept)
+
+
+def _int_arg(args: dict, name: str, default: int, *, minimum: int = 0,
+             maximum: int | None = None) -> int:
+    """Read an integer argument, clamped to [minimum, maximum].
+
+    A model can send ``"20"``, ``20.0`` or ``"twenty"``; the first two are
+    accepted and the third becomes a tool error rather than a protocol error.
+    """
+    raw = args.get(name, default)
+    if raw is None or raw == "":
+        raw = default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ToolError(f"'{name}' must be an integer, got {raw!r}.") from None
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _tool(fn):
+    """Apply the two output-side invariants to a tool implementation.
+
+    Every string an agent reads leaves through here, so model-control tokens are
+    neutralised and the token budget is honoured regardless of which tool ran or
+    who called it (MCP dispatch, or `codebeacon query`/`path` on the CLI).
+    """
+    @functools.wraps(fn)
+    def wrapper(idx: "BeaconIndex", args: dict | None = None) -> str:
+        args = args or {}
+        budget = _int_arg(args, "token_budget", DEFAULT_TOKEN_BUDGET,
+                          minimum=0, maximum=1_000_000)
+        return _apply_budget(defang_model_tokens(fn(idx, args)), budget)
+    return wrapper
+
+
+def _require_graph(idx: "BeaconIndex") -> None:
+    """Raise the *actionable* load failure, not a flat 'Graph not loaded.'.
+
+    ``serve()`` deliberately starts without a graph so tools can explain the
+    problem; that explanation (missing beacon.json, or a corrupt one backed up
+    with a .corrupt suffix) previously reached stderr only, where no agent sees
+    it.
+    """
+    if idx.G is not None:
+        return
+    msg = idx.load_error or f"No graph loaded from {idx.beacon_dir}."
+    if "codebeacon scan" not in msg:
+        msg += " Run `codebeacon scan <path>` to build it."
+    raise ToolError(msg)
+
+
+def _normalize_term(name: str) -> str:
+    """Casefold + NFC-normalise a search term and strip framing punctuation.
+
+    ``"`'`` are intentionally included so quoted queries (which agents often
+    generate by reflex) hit the same label. NFC-normalising here and in load()
+    is what lets an NFD "Auditoría" meet its NFC twin (#1338).
+    """
+    return unicodedata.normalize("NFC", name).casefold().strip(".,?!:;()[]{}<>\"'`")
 
 
 # ── Graph loader ──────────────────────────────────────────────────────────────
@@ -39,53 +167,144 @@ class BeaconIndex:
         self.beacon_dir = beacon_dir
         self.wiki_dir = beacon_dir / "wiki"
         self.G = None
+        self.load_error: str | None = None
         self._label_to_ids: dict[str, list[str]] = {}
+        self._id_to_ids: dict[str, list[str]] = {}
 
     def load(self) -> None:
         from ..graph.write import load_beacon
 
         beacon_json = self.beacon_dir / "beacon.json"
         if not beacon_json.exists():
-            raise FileNotFoundError(
+            self.load_error = (
                 f"beacon.json not found at {beacon_json}. "
                 "Run 'codebeacon scan <path>' first."
             )
+            raise FileNotFoundError(self.load_error)
 
         # Reuse read_beacon's edge-key compat shim so the MCP server stays
         # correct across the NetworkX 3.6 links→edges default flip.
-        self.G, _meta = load_beacon(beacon_json)
+        try:
+            self.G, _meta = load_beacon(beacon_json)
+        except Exception as exc:
+            # Remember why, so the tools can hand the agent the rebuild hint
+            # (load_beacon backs a corrupt file up and says so) instead of the
+            # flat "Graph not loaded." every tool used to answer.
+            self.load_error = str(exc)
+            raise
 
-        # Build label → [node_ids] lookup (case-insensitive key).
-        # casefold() — not lower() — so non-ASCII labels (CJK, Cyrillic,
-        # German ß, Turkish i/İ, Greek σ/ς) round-trip correctly and
-        # users searching in their own language get hits. Mirrors
-        # graphify's #020cca2 / #c7a05d6 query-term hardening.
-        # NFC-normalise first: on macOS (APFS/HFS+) filenames — and labels
-        # derived from them — arrive in Unicode NFD, while a label stored in
-        # beacon.json may be NFC. casefold() does not normalise form, so an NFD
-        # "Auditoría" would never equal its NFC twin. Normalise both the stored
-        # key (here) and the query term (find_node_ids) so they meet. (#1338)
+        self._index_nodes()
+        self.load_error = None
+
+    def _index_nodes(self) -> None:
+        """(Re)build the label and node-id lookups from ``self.G``.
+
+        Keys are casefolded — not lower()ed — so non-ASCII labels (CJK,
+        Cyrillic, German ß, Turkish i/İ, Greek σ/ς) round-trip correctly and
+        users searching in their own language get hits. Mirrors graphify's
+        #020cca2 / #c7a05d6 query-term hardening.
+
+        NFC-normalise first: on macOS (APFS/HFS+) filenames — and labels derived
+        from them — arrive in Unicode NFD, while a label stored in beacon.json
+        may be NFC. casefold() does not normalise form, so an NFD "Auditoría"
+        would never equal its NFC twin. Normalising both the stored key (here)
+        and the query term (_normalize_term) is what makes them meet. (#1338)
+        """
+        self._label_to_ids = {}
+        self._id_to_ids = {}
         for node_id, node_data in self.G.nodes(data=True):
             label = unicodedata.normalize("NFC", node_data.get("label", node_id)).casefold()
             self._label_to_ids.setdefault(label, []).append(node_id)
+            self._id_to_ids.setdefault(_normalize_term(node_id), []).append(node_id)
+
+    @classmethod
+    def from_graph(cls, G, beacon_dir: Path | str = ".codebeacon") -> "BeaconIndex":
+        """Build an index over an in-memory graph, skipping beacon.json.
+
+        Same indexes as :meth:`load`, so callers never have to hand-roll them
+        and drift from what the resolver expects.
+        """
+        idx = cls(Path(beacon_dir))
+        idx.G = G
+        idx._index_nodes()
+        return idx
+
+    # ── Name resolution ──────────────────────────────────────────────────────
+    #
+    # ONE policy, four tiers, used by every tool that turns a name into a node.
+    # Before this, blast_radius took ids[0] of a substring scan in graph-build
+    # order, so asking about "User" answered about "UserServiceImpl" whenever
+    # the impl happened to be built first — a confident answer about the wrong
+    # node. Tiers are consulted best-first and a tier is skipped only when it is
+    # empty; within a tier the order is (label, node_id) so insertion order can
+    # never decide the answer.
+
+    _TIER_EXACT_LABEL = 0
+    _TIER_EXACT_ID = 1
+    _TIER_PREFIX = 2
+    _TIER_SUBSTRING = 3
+
+    def _display_label(self, node_id: str) -> str:
+        return self.G.nodes[node_id].get("label", node_id)
+
+    def _ranked(self, name: str) -> list[tuple[int, str, str]]:
+        """(tier, label, node_id) for every node matching `name`, best first."""
+        term = _normalize_term(name)
+        if not term or self.G is None:
+            return []
+
+        best: dict[str, int] = {}
+
+        def _offer(node_id: str, tier: int) -> None:
+            if node_id not in best or tier < best[node_id]:
+                best[node_id] = tier
+
+        for label_cf, ids in self._label_to_ids.items():
+            if label_cf == term:
+                tier = self._TIER_EXACT_LABEL
+            elif label_cf.startswith(term):
+                tier = self._TIER_PREFIX
+            elif term in label_cf:
+                tier = self._TIER_SUBSTRING
+            else:
+                continue
+            for nid in ids:
+                _offer(nid, tier)
+
+        # An id-exact hit ranks above any prefix/substring label hit: an agent
+        # that pasted back a node id from a previous answer means that node.
+        for nid in self._id_to_ids.get(term, ()):
+            _offer(nid, self._TIER_EXACT_ID)
+
+        return sorted((tier, self._display_label(nid), nid) for nid, tier in best.items())
 
     def find_node_ids(self, name: str) -> list[str]:
         """Return node IDs whose label contains `name` (case-insensitive).
 
-        Trailing/leading punctuation is stripped from the search term so
-        natural queries like ``User?``, ``getUser()``, ``OrderService:``
-        still match labels that don't carry the punctuation. Mirrors
-        graphify #978.
+        Every match, most relevant first, so that a caller's ``limit`` (or the
+        token budget) keeps the best rows rather than an arbitrary prefix of
+        build order. Trailing/leading punctuation is stripped from the search
+        term so natural queries like ``User?``, ``getUser()``, ``OrderService:``
+        still match labels that don't carry the punctuation (graphify #978).
         """
-        # ``"`'`` are intentionally included so quoted queries (which agents
-        # often generate by reflex) hit the same label. NFC-normalise to match
-        # the equally-normalised stored keys (see load(); #1338).
-        name_cf = unicodedata.normalize("NFC", name).casefold().strip(".,?!:;()[]{}<>\"'`")
-        results: list[str] = []
-        for label, ids in self._label_to_ids.items():
-            if name_cf in label:
-                results.extend(ids)
-        return results
+        return [nid for _tier, _label, nid in self._ranked(name)]
+
+    def resolve(self, name: str, *, limit: int | None = None) -> list[str]:
+        """Resolve a name to the node IDs of its BEST matching tier.
+
+        The shared policy for every tool (and mirrored by the CLI): an exact
+        label match wins outright; failing that an exact node-id match; failing
+        that a prefix match; failing that a substring match. Only the best
+        non-empty tier is returned, so a tool that must pick one node picks from
+        genuine peers, and more than one result means genuine ambiguity worth
+        reporting to the caller rather than resolving by coin-flip.
+        """
+        ranked = self._ranked(name)
+        if not ranked:
+            return []
+        best_tier = ranked[0][0]
+        ids = [nid for tier, _label, nid in ranked if tier == best_tier]
+        return ids[:limit] if limit else ids
 
     def node_summary(self, node_id: str) -> dict[str, Any]:
         """Return a compact dict for a single node.
@@ -107,53 +326,67 @@ class BeaconIndex:
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+@_tool
 def tool_beacon_wiki_index(idx: BeaconIndex, _args: dict) -> str:
     """Read the global wiki index."""
     index_md = idx.wiki_dir / "index.md"
-    if index_md.exists():
-        return index_md.read_text(encoding="utf-8")
-    return "_No wiki index found. Run 'codebeacon scan' to generate._"
+    if not index_md.exists():
+        raise ToolError(
+            f"No wiki index at {index_md}. Run `codebeacon scan <path>` to generate it."
+        )
+    return index_md.read_text(encoding="utf-8")
 
 
+@_tool
 def tool_beacon_wiki_article(idx: BeaconIndex, args: dict) -> str:
     """Read a wiki article by relative path (e.g. 'api-server/services/UserService.md').
 
     Args:
         path: relative path under wiki/ dir
     """
-    rel = args.get("path", "").lstrip("/")
+    rel = str(args.get("path", "")).lstrip("/")
     if not rel:
-        return "Error: 'path' argument required."
+        raise ToolError("'path' argument required.")
     target = idx.wiki_dir / rel
     # Security: ensure we stay inside wiki_dir
     try:
         target.resolve().relative_to(idx.wiki_dir.resolve())
     except ValueError:
-        return "Error: path escapes wiki directory."
+        raise ToolError(f"Path escapes the wiki directory: {rel}") from None
     if not target.exists():
-        return f"Article not found: {rel}"
+        raise ToolError(
+            f"Article not found: {rel}. Call beacon_wiki_index for the list of articles."
+        )
     return target.read_text(encoding="utf-8")
 
 
+@_tool
 def tool_beacon_query(idx: BeaconIndex, args: dict) -> str:
     """Search nodes by label substring.
 
     Args:
         term: search term (case-insensitive substring match)
-        limit: max results (default 20)
+        limit: max results (default 20, capped at MAX_LIMIT)
+        token_budget: max tokens of output (default 2000; 0 = unlimited)
     """
-    if idx.G is None:
-        return "Graph not loaded."
-    term = args.get("term", "")
-    limit = int(args.get("limit", 20))
+    _require_graph(idx)
+    term = str(args.get("term", ""))
+    limit = _int_arg(args, "limit", 20, minimum=1, maximum=MAX_LIMIT)
     if not term:
-        return "Error: 'term' argument required."
+        raise ToolError("'term' argument required.")
 
-    node_ids = idx.find_node_ids(term)[:limit]
+    matches = idx.find_node_ids(term)
+    node_ids = matches[:limit]
     if not node_ids:
-        return f"No nodes matching '{term}'."
+        return f"No nodes matching '{sanitize_label(term)}'."
 
-    lines = [f"## Nodes matching '{sanitize_label(term)}' ({len(node_ids)} found)\n"]
+    # Report the true total, not the truncated one: an agent told "(20 found)"
+    # when 137 matched has no reason to narrow its search.
+    header = (
+        f"({len(matches)} found)" if len(node_ids) == len(matches)
+        else f"(showing {len(node_ids)} of {len(matches)} — raise `limit` or narrow the term)"
+    )
+    lines = [f"## Nodes matching '{sanitize_label(term)}' {header}\n"]
     for nid in node_ids:
         s = idx.node_summary(nid)
         lines.append(f"- **{s['label']}** ({s['type']}) — {s['project']} — `{s['source_file']}`")
@@ -172,74 +405,97 @@ def tool_beacon_query(idx: BeaconIndex, args: dict) -> str:
     return "\n".join(lines)
 
 
+@_tool
 def tool_beacon_path(idx: BeaconIndex, args: dict) -> str:
     """Find shortest path between two nodes by label.
 
     Args:
-        source: source node label (substring match)
-        target: target node label (substring match)
+        source: source node label (resolved by :meth:`BeaconIndex.resolve`)
+        target: target node label (resolved by :meth:`BeaconIndex.resolve`)
+        token_budget: max tokens of output (default 2000; 0 = unlimited)
     """
     import networkx as nx
 
-    if idx.G is None:
-        return "Graph not loaded."
-    source = args.get("source", "")
-    target = args.get("target", "")
+    _require_graph(idx)
+    source = str(args.get("source", ""))
+    target = str(args.get("target", ""))
     if not source or not target:
-        return "Error: 'source' and 'target' arguments required."
+        raise ToolError("'source' and 'target' arguments required.")
 
-    src_ids = idx.find_node_ids(source)
-    tgt_ids = idx.find_node_ids(target)
+    src_ids = idx.resolve(source)
+    tgt_ids = idx.resolve(target)
     if not src_ids:
-        return f"No node matching source '{source}'."
+        return f"No node matching source '{sanitize_label(source)}'."
     if not tgt_ids:
-        return f"No node matching target '{target}'."
+        return f"No node matching target '{sanitize_label(target)}'."
 
     # Try all combinations, return first found
     for sid in src_ids[:3]:
         for tid in tgt_ids[:3]:
             try:
                 path = nx.shortest_path(idx.G, sid, tid)
-                labels = [idx.G.nodes[n].get("label", n) for n in path]
+                labels = [sanitize_label(idx.G.nodes[n].get("label", n)) for n in path]
                 edges = []
                 for i in range(len(path) - 1):
                     e = idx.G.edges[path[i], path[i + 1]]
-                    edges.append(e.get("relation", "→"))
+                    edges.append(sanitize_label(e.get("relation", "→")))
                 # Interleave labels and relations
                 parts = [labels[0]]
                 for rel, lbl in zip(edges, labels[1:]):
                     parts.append(f" --[{rel}]--> {lbl}")
-                return f"## Path ({len(path)} hops)\n" + "".join(parts)
+                head = f"## Path ({len(path)} hops)\n" + "".join(parts)
+                return head + _ambiguity_note(idx, source, src_ids, sid) \
+                            + _ambiguity_note(idx, target, tgt_ids, tid)
             except nx.NetworkXNoPath:
                 continue
             except nx.NodeNotFound:
                 continue
 
-    return f"No path found between '{source}' and '{target}'."
+    return (
+        f"No path found between '{sanitize_label(source)}' and "
+        f"'{sanitize_label(target)}'."
+    )
 
 
+def _ambiguity_note(idx: BeaconIndex, term: str, ids: list[str], chosen: str) -> str:
+    """Say which node was picked when the name matched several equally well.
+
+    Silence here is what made the old ``ids[0]`` behaviour dangerous: the answer
+    looked authoritative whether or not it was about the node the caller meant.
+    """
+    if len(ids) < 2:
+        return ""
+    others = [sanitize_label(idx._display_label(n)) for n in ids if n != chosen][:5]
+    more = f", +{len(ids) - 1 - len(others)} more" if len(ids) - 1 > len(others) else ""
+    return (
+        f"\n\n_'{sanitize_label(term)}' matched {len(ids)} nodes equally well; "
+        f"answered for `{sanitize_label(chosen)}`. Others: {', '.join(others)}{more}._"
+    )
+
+
+@_tool
 def tool_beacon_blast_radius(idx: BeaconIndex, args: dict) -> str:
     """Show blast radius: downstream + upstream neighbours of a node.
 
     Args:
-        node: node label (substring match)
-        depth: max traversal depth (default 2)
+        node: node label (resolved by :meth:`BeaconIndex.resolve`)
+        depth: max traversal depth (default 2, capped at MAX_DEPTH)
+        limit: max neighbours listed per direction (default 100)
+        token_budget: max tokens of output (default 2000; 0 = unlimited)
     """
-    import networkx as nx
-
-    if idx.G is None:
-        return "Graph not loaded."
-    node_name = args.get("node", "")
-    depth = int(args.get("depth", 2))
+    _require_graph(idx)
+    node_name = str(args.get("node", ""))
+    depth = _int_arg(args, "depth", 2, minimum=1, maximum=MAX_DEPTH)
+    limit = _int_arg(args, "limit", 100, minimum=1, maximum=MAX_LIMIT)
     if not node_name:
-        return "Error: 'node' argument required."
+        raise ToolError("'node' argument required.")
 
-    ids = idx.find_node_ids(node_name)
+    ids = idx.resolve(node_name)
     if not ids:
-        return f"No node matching '{node_name}'."
+        return f"No node matching '{sanitize_label(node_name)}'."
 
     nid = ids[0]
-    label = idx.G.nodes[nid].get("label", nid)
+    label = sanitize_label(idx.G.nodes[nid].get("label", nid))
 
     # Downstream (descendants)
     downstream = set()
@@ -258,33 +514,41 @@ def tool_beacon_blast_radius(idx: BeaconIndex, args: dict) -> str:
     upstream.discard(nid)
 
     lines = [f"## Blast Radius: {label}\n"]
-    lines.append(f"**Upstream callers** ({len(upstream)}):")
-    for u in sorted(upstream, key=lambda n: idx.G.nodes[n].get("label", n)):
-        s = idx.node_summary(u)
-        lines.append(f"- {s['label']} ({s['type']}) — {s['project']}")
 
-    lines.append(f"\n**Downstream affected** (depth={depth}, {len(downstream)} nodes):")
-    for d in sorted(downstream, key=lambda n: idx.G.nodes[n].get("label", n)):
-        s = idx.node_summary(d)
-        lines.append(f"- {s['label']} ({s['type']}) — {s['project']}")
+    def _emit(heading: str, nodes: set[str], extra: str = "") -> None:
+        ordered = sorted(nodes, key=lambda n: (idx.G.nodes[n].get("label", n), n))
+        shown = ordered[:limit]
+        # A hub node can have thousands of neighbours; say so rather than
+        # emitting them all and letting the budget cut mid-list.
+        count = f"{len(ordered)}" if len(shown) == len(ordered) \
+            else f"showing {len(shown)} of {len(ordered)}"
+        lines.append(f"{heading} ({extra}{count}):")
+        for n in shown:
+            s = idx.node_summary(n)
+            lines.append(f"- {s['label']} ({s['type']}) — {s['project']}")
+
+    _emit("**Upstream callers**", upstream)
+    lines.append("")
+    _emit("**Downstream affected**", downstream, extra=f"depth={depth}, ")
 
     if not upstream and not downstream:
         lines.append("_No connections found._")
 
-    return "\n".join(lines)
+    return "\n".join(lines) + _ambiguity_note(idx, node_name, ids, nid)
 
 
+@_tool
 def tool_beacon_routes(idx: BeaconIndex, args: dict) -> str:
     """List all routes, optionally filtered by project.
 
     Args:
         project: filter by project name (optional)
-        limit: max results (default 50)
+        limit: max results (default 50, capped at MAX_LIMIT)
+        token_budget: max tokens of output (default 2000; 0 = unlimited)
     """
-    if idx.G is None:
-        return "Graph not loaded."
-    project_filter = args.get("project", "").lower()
-    limit = int(args.get("limit", 50))
+    _require_graph(idx)
+    project_filter = str(args.get("project", "")).lower()
+    limit = _int_arg(args, "limit", 50, minimum=1, maximum=MAX_LIMIT)
 
     routes = []
     for nid, data in idx.G.nodes(data=True):
@@ -302,32 +566,36 @@ def tool_beacon_routes(idx: BeaconIndex, args: dict) -> str:
         })
 
     routes.sort(key=lambda r: (r["project"], r["method"], r["path"]))
+    total = len(routes)
     routes = routes[:limit]
 
     if not routes:
         return "No routes found."
 
-    lines = [f"## Routes ({len(routes)})\n"]
+    count = f"{total}" if len(routes) == total else f"showing {len(routes)} of {total}"
+    lines = [f"## Routes ({count})\n"]
     lines.append(f"{'Method':<8} {'Path':<40} {'Handler':<30} {'Project'}")
     lines.append("-" * 90)
     for r in routes:
         lines.append(
-            f"{r['method']:<8} {r['path']:<40} {r['handler']:<30} {r['project']}"
+            f"{sanitize_label(r['method']):<8} {sanitize_label(r['path']):<40} "
+            f"{sanitize_label(r['handler']):<30} {sanitize_label(r['project'])}"
         )
     return "\n".join(lines)
 
 
+@_tool
 def tool_beacon_services(idx: BeaconIndex, args: dict) -> str:
     """List all services/classes, optionally filtered by project.
 
     Args:
         project: filter by project name (optional)
-        limit: max results (default 50)
+        limit: max results (default 50, capped at MAX_LIMIT)
+        token_budget: max tokens of output (default 2000; 0 = unlimited)
     """
-    if idx.G is None:
-        return "Graph not loaded."
-    project_filter = args.get("project", "").lower()
-    limit = int(args.get("limit", 50))
+    _require_graph(idx)
+    project_filter = str(args.get("project", "")).lower()
+    limit = _int_arg(args, "limit", 50, minimum=1, maximum=MAX_LIMIT)
 
     services = []
     for nid, data in idx.G.nodes(data=True):
@@ -346,19 +614,25 @@ def tool_beacon_services(idx: BeaconIndex, args: dict) -> str:
         })
 
     services.sort(key=lambda s: (s["project"], s["label"]))
+    total = len(services)
     services = services[:limit]
 
     if not services:
         return "No services found."
 
-    lines = [f"## Services ({len(services)})\n"]
+    count = f"{total}" if len(services) == total else f"showing {len(services)} of {total}"
+    lines = [f"## Services ({count})\n"]
     for s in services:
-        annots = ", ".join(s["annotations"][:3]) if s["annotations"] else ""
+        annots = ", ".join(sanitize_label(a) for a in s["annotations"][:3]) if s["annotations"] else ""
         suffix = f"  [{annots}]" if annots else ""
-        lines.append(f"- **{s['label']}** ({s['project']}){suffix}  `{s['source_file']}`")
+        lines.append(
+            f"- **{sanitize_label(s['label'])}** ({sanitize_label(s['project'])})"
+            f"{suffix}  `{sanitize_label(s['source_file'])}`"
+        )
     return "\n".join(lines)
 
 
+@_tool
 def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
     """Search knowledge notes, or list the notes linked to a code node.
 
@@ -372,18 +646,18 @@ def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
                tags (case-insensitive substring).
         node:  optional node label/id — return only notes that link to a
                matching code node. May be combined with ``query`` to filter.
-        limit: max notes to return (default 20).
+        limit: max notes to return (default 20, capped at MAX_LIMIT).
+        token_budget: max tokens of output (default 2000; 0 = unlimited).
     """
     from codebeacon.common.types import KNOWLEDGE_NODE_TYPE
 
-    if idx.G is None:
-        return "Graph not loaded."
+    _require_graph(idx)
 
-    query = (args.get("query") or "").strip()
-    node = (args.get("node") or "").strip()
-    limit = int(args.get("limit", 20))
+    query = str(args.get("query") or "").strip()
+    node = str(args.get("node") or "").strip()
+    limit = _int_arg(args, "limit", 20, minimum=1, maximum=MAX_LIMIT)
     if not query and not node:
-        return "Error: provide 'query' and/or 'node'."
+        raise ToolError("Provide 'query' and/or 'node'.")
 
     G = idx.G
 
@@ -392,7 +666,7 @@ def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
 
     # Candidate note ids: linked to a given node, else every knowledge note.
     if node:
-        code_ids = idx.find_node_ids(node)
+        code_ids = idx.resolve(node)
         if not code_ids:
             return f"No node matching '{sanitize_label(node)}'."
         note_ids: list[str] = []
@@ -410,6 +684,7 @@ def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
         note_ids = [n for n in note_ids if query_cf in _note_haystack(G, n)]
 
     note_ids.sort(key=lambda n: (G.nodes[n].get("date", ""), G.nodes[n].get("label", n)), reverse=True)
+    total_notes = len(note_ids)
     note_ids = note_ids[:limit]
 
     # A one-line description of the filter for both the header and the empty case.
@@ -423,7 +698,9 @@ def tool_beacon_knowledge(idx: BeaconIndex, args: dict) -> str:
     if not note_ids:
         return f"No knowledge notes {scope}.".replace("  ", " ")
 
-    lines = [f"## Knowledge notes ({len(note_ids)} {scope})".rstrip() + "\n"]
+    count = f"{total_notes}" if len(note_ids) == total_notes \
+        else f"showing {len(note_ids)} of {total_notes}"
+    lines = [f"## Knowledge notes ({count} {scope})".rstrip() + "\n"]
     for nid in note_ids:
         d = G.nodes[nid]
         title = sanitize_label(d.get("label", nid))
@@ -459,86 +736,114 @@ def _note_haystack(G, node_id: str) -> str:
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
+_BUDGET_PROP = {
+    "type": "integer",
+    "description": (
+        f"Max tokens of output (default {DEFAULT_TOKEN_BUDGET}). Output beyond the "
+        "budget is trimmed on a line boundary and the trim is announced. 0 = unlimited."
+    ),
+}
+
+
+def _schema(properties: dict, required: list[str] | None = None) -> dict:
+    """Build an inputSchema with the token budget every tool accepts."""
+    return {
+        "type": "object",
+        "properties": {**properties, "token_budget": _BUDGET_PROP},
+        "required": required or [],
+    }
+
+
 TOOLS = {
     "beacon_wiki_index": {
         "fn": tool_beacon_wiki_index,
         "description": "Return the global wiki index (short overview of all projects and node counts).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "inputSchema": _schema({}),
     },
     "beacon_wiki_article": {
         "fn": tool_beacon_wiki_article,
         "description": "Read a specific wiki article by its relative path under wiki/ (e.g. 'api-server/services/UserService.md').",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Relative path under wiki/ directory"},
-            },
-            "required": ["path"],
-        },
+        "inputSchema": _schema(
+            {"path": {"type": "string", "description": "Relative path under wiki/ directory"}},
+            ["path"],
+        ),
     },
     "beacon_query": {
         "fn": tool_beacon_query,
-        "description": "Search graph nodes by label substring. Returns matching nodes with their edges.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
+        "description": (
+            "Search graph nodes by label. Returns every match, best first (exact label, "
+            "then prefix, then substring), with each node's edges."
+        ),
+        "inputSchema": _schema(
+            {
                 "term": {"type": "string", "description": "Search term (case-insensitive)"},
-                "limit": {"type": "integer", "description": "Max results (default 20)"},
+                "limit": {
+                    "type": "integer",
+                    "description": f"Max results (default 20, max {MAX_LIMIT})",
+                    "minimum": 1, "maximum": MAX_LIMIT,
+                },
             },
-            "required": ["term"],
-        },
+            ["term"],
+        ),
     },
     "beacon_path": {
         "fn": tool_beacon_path,
         "description": "Find the shortest dependency path between two nodes by label.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
+        "inputSchema": _schema(
+            {
                 "source": {"type": "string", "description": "Source node label"},
                 "target": {"type": "string", "description": "Target node label"},
             },
-            "required": ["source", "target"],
-        },
+            ["source", "target"],
+        ),
     },
     "beacon_blast_radius": {
         "fn": tool_beacon_blast_radius,
-        "description": "Show upstream callers and downstream affected nodes for a given node.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
+        "description": (
+            "Show upstream callers and downstream affected nodes for a given node. "
+            "An exact label match always wins; if several nodes match equally the "
+            "answer names which one it used and how many others matched."
+        ),
+        "inputSchema": _schema(
+            {
                 "node": {"type": "string", "description": "Node label to analyze"},
-                "depth": {"type": "integer", "description": "Downstream traversal depth (default 2)"},
+                "depth": {
+                    "type": "integer",
+                    "description": f"Downstream traversal depth (default 2, max {MAX_DEPTH})",
+                    "minimum": 1, "maximum": MAX_DEPTH,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Max neighbours listed per direction (default 100, max {MAX_LIMIT})",
+                    "minimum": 1, "maximum": MAX_LIMIT,
+                },
             },
-            "required": ["node"],
-        },
+            ["node"],
+        ),
     },
     "beacon_routes": {
         "fn": tool_beacon_routes,
         "description": "List all HTTP routes in the knowledge graph, optionally filtered by project.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project": {"type": "string", "description": "Filter by project name (optional)"},
-                "limit": {"type": "integer", "description": "Max results (default 50)"},
+        "inputSchema": _schema({
+            "project": {"type": "string", "description": "Filter by project name (optional)"},
+            "limit": {
+                "type": "integer",
+                "description": f"Max results (default 50, max {MAX_LIMIT})",
+                "minimum": 1, "maximum": MAX_LIMIT,
             },
-            "required": [],
-        },
+        }),
     },
     "beacon_services": {
         "fn": tool_beacon_services,
         "description": "List all service/class nodes in the knowledge graph, optionally filtered by project.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project": {"type": "string", "description": "Filter by project name (optional)"},
-                "limit": {"type": "integer", "description": "Max results (default 50)"},
+        "inputSchema": _schema({
+            "project": {"type": "string", "description": "Filter by project name (optional)"},
+            "limit": {
+                "type": "integer",
+                "description": f"Max results (default 50, max {MAX_LIMIT})",
+                "minimum": 1, "maximum": MAX_LIMIT,
             },
-            "required": [],
-        },
+        }),
     },
     "beacon_knowledge": {
         "fn": tool_beacon_knowledge,
@@ -547,15 +852,15 @@ TOOLS = {
             "keyword, or list the notes linked to a given code node. Use this to learn "
             "*why* the code looks the way it does — the decisions behind a service."
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Keyword(s) matched against note title/summary/category/tags"},
-                "node": {"type": "string", "description": "Optional node label/id — return only notes linked to it"},
-                "limit": {"type": "integer", "description": "Max notes to return (default 20)"},
+        "inputSchema": _schema({
+            "query": {"type": "string", "description": "Keyword(s) matched against note title/summary/category/tags"},
+            "node": {"type": "string", "description": "Optional node label/id — return only notes linked to it"},
+            "limit": {
+                "type": "integer",
+                "description": f"Max notes to return (default 20, max {MAX_LIMIT})",
+                "minimum": 1, "maximum": MAX_LIMIT,
             },
-            "required": [],
-        },
+        }),
     },
     "beacon_pr_context": {
         "fn": "PLACEHOLDER",  # patched below to avoid forward-reference issues
@@ -564,27 +869,32 @@ TOOLS = {
             "paths covering the affected slice of the knowledge graph. Use this at the start "
             "of a PR review to read just the docs that matter."
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Changed file paths (repo-relative).",
-                },
-                "base": {
-                    "type": "string",
-                    "description": "Optional: git ref to diff against (e.g. main). If set, paths are augmented with `git diff --name-only base...HEAD`.",
-                },
-                "depth": {"type": "integer", "description": "Upstream walk depth (default 3)"},
-                "limit": {"type": "integer", "description": "Max wiki paths (default 50)"},
+        "inputSchema": _schema({
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Changed file paths (repo-relative).",
             },
-            "required": [],
-        },
+            "base": {
+                "type": "string",
+                "description": "Optional: git ref to diff against (e.g. main). If set, paths are augmented with `git diff --name-only base...HEAD`.",
+            },
+            "depth": {
+                "type": "integer",
+                "description": f"Upstream walk depth (default 3, max {MAX_DEPTH})",
+                "minimum": 1, "maximum": MAX_DEPTH,
+            },
+            "limit": {
+                "type": "integer",
+                "description": f"Max wiki paths (default 50, max {MAX_LIMIT})",
+                "minimum": 1, "maximum": MAX_LIMIT,
+            },
+        }),
     },
 }
 
 
+@_tool
 def tool_beacon_pr_context(idx: BeaconIndex, args: dict) -> str:
     """Given changed files, return the wiki articles in their blast radius.
 
@@ -595,18 +905,17 @@ def tool_beacon_pr_context(idx: BeaconIndex, args: dict) -> str:
     """
     from codebeacon.affected import affected_from_paths, git_changed_files
 
-    if idx.G is None:
-        return "Graph not loaded."
+    _require_graph(idx)
 
     paths = list(args.get("paths") or [])
-    base = (args.get("base") or "").strip()
+    base = str(args.get("base") or "").strip()
     if base:
         paths.extend(git_changed_files(base, "HEAD", repo=idx.beacon_dir.parent))
     if not paths:
-        return "No changed paths supplied. Pass `paths` or `base`."
+        raise ToolError("No changed paths supplied. Pass `paths` or `base`.")
 
-    depth = int(args.get("depth", 3))
-    limit = int(args.get("limit", 50))
+    depth = _int_arg(args, "depth", 3, minimum=1, maximum=MAX_DEPTH)
+    limit = _int_arg(args, "limit", 50, minimum=1, maximum=MAX_LIMIT)
 
     try:
         result = affected_from_paths(
@@ -617,7 +926,7 @@ def tool_beacon_pr_context(idx: BeaconIndex, args: dict) -> str:
             include_wiki_paths=True,
         )
     except FileNotFoundError as exc:
-        return f"Error: {exc}"
+        raise ToolError(str(exc)) from None
 
     if not result.wiki_paths:
         return (
@@ -628,7 +937,7 @@ def tool_beacon_pr_context(idx: BeaconIndex, args: dict) -> str:
 
     lines = [f"## PR context ({len(result.wiki_paths)} article(s))\n"]
     for wp in result.wiki_paths:
-        lines.append(f"- `wiki/{wp}`")
+        lines.append(f"- `wiki/{sanitize_label(wp)}`")
     return "\n".join(lines)
 
 
@@ -646,6 +955,32 @@ def _write(obj: dict) -> None:
 
 def _error(req_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def run_tool(idx: BeaconIndex, name: str, args: dict | None = None) -> tuple[str, bool]:
+    """Run a registered tool; return ``(text, is_error)``.
+
+    The single entry point for every consumer — MCP dispatch and the CLI — so
+    the error contract is decided in one place. ``KeyError`` for an unknown tool
+    name is deliberately left to the caller: that is a protocol-level problem
+    (JSON-RPC -32601), not a tool failure.
+    """
+    fn = TOOLS[name]["fn"]
+    try:
+        return fn(idx, args or {}), False
+    except ToolError as exc:
+        return _finalize_error(str(exc)), True
+    except Exception as exc:
+        # A crash inside a tool is still a *tool* result per the MCP spec, so
+        # the model gets to see it and retry; the traceback context goes to the
+        # server's stderr for the operator.
+        print(f"[codebeacon-mcp] error in {name}: {exc}", file=sys.stderr)
+        return _finalize_error(f"{type(exc).__name__}: {exc}"), True
+
+
+def _finalize_error(text: str) -> str:
+    """Error text is agent-visible too: defang it and keep it bounded."""
+    return _apply_budget(defang_model_tokens(text), DEFAULT_TOKEN_BUDGET)
 
 
 def _dispatch(idx: BeaconIndex, message: Any) -> dict | None:
@@ -697,18 +1032,13 @@ def _dispatch(idx: BeaconIndex, message: Any) -> dict | None:
         if tool_name not in TOOLS:
             return _error(req_id, -32601, f"Unknown tool: {tool_name}")
 
-        try:
-            result_text = TOOLS[tool_name]["fn"](idx, tool_args)
-        except Exception as exc:
-            print(f"[codebeacon-mcp] error in {tool_name}: {exc}", file=sys.stderr)
-            return _error(req_id, -32603, str(exc))
-
+        result_text, is_error = run_tool(idx, tool_name, tool_args)
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
                 "content": [{"type": "text", "text": result_text}],
-                "isError": False,
+                "isError": is_error,
             },
         }
 
@@ -727,7 +1057,9 @@ def serve(beacon_dir: str | Path) -> None:
         # FileNotFoundError: no beacon.json yet. ValueError: corrupt/truncated
         # beacon.json (load_beacon backs it up + raises). Either way, still start
         # the server so the client can connect and tools explain the error rather
-        # than crashing at startup with a traceback (graphify #1536).
+        # than crashing at startup with a traceback (graphify #1536). load() has
+        # recorded the reason on idx.load_error, which is what the tools hand
+        # back to the agent — stderr alone never reaches it.
         print(f"[codebeacon-mcp] {e}", file=sys.stderr)
 
     print(f"[codebeacon-mcp] serving from {beacon_dir}", file=sys.stderr)

@@ -16,19 +16,21 @@ Output structure:
             components/<Name>.md
 
 Public API:
-    generate_wiki(G, communities, output_dir)  → None
+    generate_wiki(G, communities, output_dir)  → int (files actually rewritten)
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
+from codebeacon.common.io import write_text_if_changed
 from codebeacon.common.safety import dedup_stem, safe_wiki_filename
 from codebeacon.graph.write import relativize_source_file
 from codebeacon.wiki import templates
@@ -57,17 +59,18 @@ def _is_controller(label: str, annotations: list[str]) -> bool:
     return label.endswith(_CONTROLLER_NAME_SUFFIXES)
 
 
-def _safe_filename(label: str) -> str:
+def _safe_filename(label: str, dest_dir: Path | None = None) -> str:
     """Strip filename-unsafe characters, then cap the stem to a safe byte length.
 
     The byte cap stops a pathologically long class label (or an 85+ character
-    CJK name) from overflowing the 255-byte filesystem limit and crashing the
-    whole wiki write with ENAMETOOLONG. ``cap_filename`` keeps long-prefix
+    CJK name) from overflowing the filesystem's per-component limit and crashing
+    the whole wiki write with ENAMETOOLONG. ``cap_filename`` keeps long-prefix
     labels distinct via a hash suffix, so two capped names never collide.
+    ``dest_dir`` narrows the budget to what that directory can actually hold.
     """
     # Delegates to the shared transform so generator filenames and template
     # links can never drift apart again.
-    return safe_wiki_filename(label)
+    return safe_wiki_filename(label, dest_dir=dest_dir)
 
 
 def _project_type_map(
@@ -92,31 +95,41 @@ def _iter_project_articles(
     G: nx.DiGraph,
     project_name: str,
     type_map: dict[str, list[tuple[str, dict]]],
+    proj_dir: Path | None = None,
 ) -> Iterator[tuple[str, dict, str, str]]:
     """Yield ``(node_id, data, bucket, stem)`` for every per-node article of a
     project, in write order, replaying the collision-salting.
 
-    Single source of truth for on-disk article filenames: both the writer
-    (``_write_project``) and the resolver (``node_to_wiki_path``) consume it, so
-    the salted stem a colliding node lands on can never drift between the two
-    (BH-W2). ``dedup_stem`` salts the *second* distinct node that maps to an
+    Single source of truth for on-disk article filenames: the writer
+    (``_write_project``), the index links, the stale-article prune, and the
+    resolver (``node_to_wiki_path``) all consume it, so the salted stem a
+    colliding node lands on can never drift between them (BH-W2).
+    ``dedup_stem`` salts the *second* distinct node that maps to an
     already-claimed ``<bucket>/<stem>`` key, so the class → entity → component
     order below must match the writer's exactly.
+
+    ``proj_dir`` — the project's directory on disk — makes the byte budget
+    destination-aware. It is optional because the resolver has only the graph;
+    on any filesystem where the budget is not actually reduced (the normal case)
+    both produce the same stem.
     """
+    def stem_for(label: str, bucket: str) -> str:
+        return _safe_filename(label, (proj_dir / bucket) if proj_dir else None)
+
     claimed: dict[str, str] = {}
     for node_id, data in type_map.get("class", []):
         label = data.get("label") or node_id
         annotations = data.get("annotations") or []
         bucket = "controllers" if _is_controller(label, annotations) else "services"
-        stem = dedup_stem(_safe_filename(label), node_id, claimed, bucket)
+        stem = dedup_stem(stem_for(label, bucket), node_id, claimed, bucket)
         yield node_id, data, bucket, stem
     for node_id, data in type_map.get("entity", []):
         label = data.get("label") or node_id
-        stem = dedup_stem(_safe_filename(label), node_id, claimed, "entities")
+        stem = dedup_stem(stem_for(label, "entities"), node_id, claimed, "entities")
         yield node_id, data, "entities", stem
     for node_id, data in type_map.get("component", []):
         label = data.get("label") or node_id
-        stem = dedup_stem(_safe_filename(label), node_id, claimed, "components")
+        stem = dedup_stem(stem_for(label, "components"), node_id, claimed, "components")
         yield node_id, data, "components", stem
 
 
@@ -224,8 +237,19 @@ def _cross_project_edges(G: nx.DiGraph) -> list[dict[str, Any]]:
 
 # ── Route collector ───────────────────────────────────────────────────────────
 
-def _collect_routes(G: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
-    """Collect route nodes grouped by project."""
+def _collect_routes(
+    G: nx.DiGraph,
+    project_roots: dict[str, str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Collect route nodes grouped by project.
+
+    ``source_file`` is relativized here, the way every other article branch does
+    it at emit time. Without this the routes table — the one wiki page built from
+    route nodes rather than class/entity/component nodes — was the single place
+    that still published the build machine's absolute path, complete with the
+    developer's username, into a committed artifact nobody else can resolve
+    (graphify #3223/#942-10).
+    """
     routes_by_project: dict[str, list[dict[str, Any]]] = {}
     for node_id, data in G.nodes(data=True):
         if data.get("type") != "route":
@@ -235,7 +259,9 @@ def _collect_routes(G: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
             "method": data.get("method", ""),
             "path": data.get("path", ""),
             "handler": data.get("label", ""),
-            "source_file": data.get("source_file", ""),
+            "source_file": relativize_source_file(
+                data.get("source_file", ""), (project_roots or {}).get(project)
+            ),
             "framework": data.get("framework", ""),
             "tags": data.get("tags", []),
         })
@@ -249,7 +275,7 @@ def generate_wiki(
     communities: dict[str, int],
     output_dir: str | Path,
     project_roots: dict[str, str] | None = None,
-) -> None:
+) -> int:
     """Generate full wiki from the knowledge graph.
 
     Args:
@@ -260,6 +286,12 @@ def generate_wiki(
                        each article's ``source_file`` is emitted relative to its
                        project root so committed wiki files stay machine-portable
                        (graphify #1417).
+
+    Returns:
+        How many wiki files this run actually rewrote. Every page is regenerated
+        on every scan, but only the ones whose content differs are written, so a
+        rebuild of an unchanged repository returns 0 and leaves every mtime in
+        ``.codebeacon/wiki`` alone (graphify #3060).
     """
     wiki_dir = Path(output_dir) / "wiki"
     wiki_dir.mkdir(parents=True, exist_ok=True)
@@ -275,18 +307,21 @@ def generate_wiki(
 
     # Drop any wiki files for nodes that are no longer in the graph (incremental
     # rebuilds otherwise leak stale articles forever). Mirrors graphify #936.
-    _prune_stale_articles(wiki_dir, projects)
+    _prune_stale_articles(wiki_dir, projects, G)
 
     # Collect routes for routes.md (all projects)
-    routes_by_project = _collect_routes(G)
+    routes_by_project = _collect_routes(G, project_roots)
 
     # Per-project stats accumulator for overview
     project_summary: list[dict[str, Any]] = []
+    changed = 0
 
     for project_name, type_map in sorted(projects.items()):
         proj_dir = wiki_dir / project_name
         project_root = (project_roots or {}).get(project_name)
-        _write_project(G, project_name, type_map, routes_by_project, proj_dir, project_root)
+        changed += _write_project(
+            G, project_name, type_map, routes_by_project, proj_dir, project_root
+        )
 
         # Collect summary stats
         route_count = len(routes_by_project.get(project_name, []))
@@ -337,7 +372,7 @@ def generate_wiki(
 
     # Write global files (delegated to index.py's generate_index)
     from codebeacon.wiki.index import generate_index
-    generate_index(
+    changed += generate_index(
         wiki_dir=wiki_dir,
         project_summary=project_summary,
         routes_by_project=routes_by_project,
@@ -347,7 +382,8 @@ def generate_wiki(
 
     # Every article is now on disk; downgrade any link whose target article was
     # never written so navigation never lands on a missing page (graphify #1444).
-    _downgrade_dead_links(wiki_dir)
+    changed += _downgrade_dead_links(wiki_dir)
+    return changed
 
 
 # Matches a portable relative markdown link `[display](./stem.md)` as emitted by
@@ -355,7 +391,7 @@ def generate_wiki(
 _REL_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(\./([^)/]+)\.md\)")
 
 
-def _downgrade_dead_links(wiki_dir: Path) -> None:
+def _downgrade_dead_links(wiki_dir: Path) -> int:
     """Repair or downgrade ``[text](./X.md)`` links so none dangle.
 
     ``templates._rel_link`` emits a ``./X.md`` link for every referenced label
@@ -375,7 +411,10 @@ def _downgrade_dead_links(wiki_dir: Path) -> None:
     stem is never matched against an unrelated project. Cosmetic: no graph/data
     change. ``../`` links (e.g. the back-link) are not matched by the regex and
     are left untouched.
+
+    Returns how many files it rewrote, for the caller's changed-page tally.
     """
+    changed = 0
     # Group every article by its project scope (immediate child dir of wiki_dir;
     # global root-level files share the "" scope).
     by_scope: dict[str, list[Path]] = {}
@@ -412,8 +451,9 @@ def _downgrade_dead_links(wiki_dir: Path) -> None:
                 return m.group(1)  # dangling → plain text
 
             new = _REL_MD_LINK_RE.sub(_repl, text)
-            if new != text:
-                md.write_text(new, encoding="utf-8")
+            if new != text and _write_file(md, new):
+                changed += 1
+    return changed
 
 
 # ── Controller route matching ─────────────────────────────────────────────────
@@ -452,9 +492,10 @@ def _write_project(
     routes_by_project: dict[str, list[dict[str, Any]]],
     proj_dir: Path,
     project_root: str | None = None,
-) -> None:
-    """Write all wiki files for one project."""
+) -> int:
+    """Write all wiki files for one project; return how many files changed."""
     proj_dir.mkdir(parents=True, exist_ok=True)
+    changed = 0
 
     # node_id → (bucket, on-disk stem), computed via the same iterator
     # node_to_wiki_path replays. Salting the second of two same-bucket labels
@@ -463,11 +504,19 @@ def _write_project(
     # which file a node owns (BH-W2).
     stem_of = {
         nid: (bucket, stem)
-        for nid, _d, bucket, stem in _iter_project_articles(G, project_name, type_map)
+        for nid, _d, bucket, stem in _iter_project_articles(
+            G, project_name, type_map, proj_dir
+        )
     }
 
-    controllers: list[str] = []
-    services: list[str] = []
+    # (display label, bucket, on-disk stem) per index section. The index has to
+    # link the STEM, not a stem re-derived from the label: two same-labelled
+    # nodes in one bucket produce `PaymentService.md` and the salted
+    # `PaymentService_h5463b7.md`, and re-deriving pointed BOTH index rows at
+    # the first file, leaving the second article written but unreachable from
+    # the index the lookup strategy starts at (graphify #3032).
+    controllers: list[tuple[str, str, str]] = []
+    services: list[tuple[str, str, str]] = []
 
     # Class nodes → controller or service
     for node_id, data in type_map.get("class", []):
@@ -481,8 +530,9 @@ def _write_project(
         called_by = _predecessors_labels(G, node_id, _CALL_RELATIONS)
         calls = _successors_labels(G, node_id, _CALL_RELATIONS)
 
+        bucket, stem = stem_of[node_id]
         if _is_controller(label, annotations):
-            controllers.append(label)
+            controllers.append((label, bucket, stem))
             # Gather routes for this controller. Match the route handler's class
             # segment EXACTLY — a plain `label in handler` substring test
             # fabricated routes from any controller whose name is a superstring
@@ -504,9 +554,9 @@ def _write_project(
                 calls=calls,
                 project_name=project_name,
             )
-            _write_file(proj_dir / "controllers" / f"{stem_of[node_id][1]}.md", content)
+            changed += _write_file(proj_dir / bucket / f"{stem}.md", content)
         else:
-            services.append(label)
+            services.append((label, bucket, stem))
             entities = _related_entities(G, node_id)
             content = templates.service_article(
                 label=label,
@@ -519,13 +569,13 @@ def _write_project(
                 annotations=annotations,
                 project_name=project_name,
             )
-            _write_file(proj_dir / "services" / f"{stem_of[node_id][1]}.md", content)
+            changed += _write_file(proj_dir / bucket / f"{stem}.md", content)
 
     # Entity nodes
-    entity_names: list[str] = []
+    entity_names: list[tuple[str, str, str]] = []
     for node_id, data in type_map.get("entity", []):
         label = data.get("label") or node_id
-        entity_names.append(label)
+        entity_names.append((label, *stem_of[node_id]))
         table_name = data.get("table_name", "")
         fields = data.get("fields", [])
         relations = data.get("relations", [])
@@ -543,13 +593,13 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        _write_file(proj_dir / "entities" / f"{stem_of[node_id][1]}.md", content)
+        changed += _write_file(proj_dir / "entities" / f"{stem_of[node_id][1]}.md", content)
 
     # Component nodes
-    component_names: list[str] = []
+    component_names: list[tuple[str, str, str]] = []
     for node_id, data in type_map.get("component", []):
         label = data.get("label") or node_id
-        component_names.append(label)
+        component_names.append((label, *stem_of[node_id]))
         props = data.get("props", [])
         hooks = data.get("hooks", [])
         imports_list = data.get("imports", [])
@@ -569,7 +619,7 @@ def _write_project(
             framework=framework,
             project_name=project_name,
         )
-        _write_file(proj_dir / "components" / f"{stem_of[node_id][1]}.md", content)
+        changed += _write_file(proj_dir / "components" / f"{stem_of[node_id][1]}.md", content)
 
     # Detect framework from any node in this project
     framework = ""
@@ -586,7 +636,7 @@ def _write_project(
     proj_routes = routes_by_project.get(project_name, [])
     if proj_routes:
         content = templates.routes_summary({project_name: proj_routes})
-        _write_file(proj_dir / "routes.md", content)
+        changed += _write_file(proj_dir / "routes.md", content)
 
     # Per-project index.md
     stats = {
@@ -604,14 +654,26 @@ def _write_project(
         entities=entity_names,
         components=component_names,
     )
-    _write_file(proj_dir / "index.md", content)
+    changed += _write_file(proj_dir / "index.md", content)
+    return changed
 
 
 # ── File writer ───────────────────────────────────────────────────────────────
 
-def _write_file(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+def _write_file(path: Path, content: str) -> bool:
+    """Write one wiki page, skipping the write when it would not change.
+
+    Returns True when the file was actually written. An unwritable page (a
+    destination that overruns the filesystem's limits) is reported and skipped
+    rather than raised, so one impossible filename costs one article instead of
+    the whole wiki (graphify #943-6).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return write_text_if_changed(path, content)
+    except OSError as exc:
+        print(f"    Warning: skipped wiki page {path.name}: {exc}", file=sys.stderr)
+        return False
 
 
 # ── Stale article pruning ─────────────────────────────────────────────────────
@@ -626,6 +688,7 @@ _WIKI_TYPE_DIRS = {
 def _prune_stale_articles(
     wiki_dir: Path,
     projects: dict[str, dict[str, list[tuple[str, dict]]]],
+    G: nx.DiGraph | None = None,
 ) -> None:
     """Delete per-node .md files whose underlying graph node no longer exists.
 
@@ -637,6 +700,12 @@ def _prune_stale_articles(
     (``controllers/`` / ``services/`` / ``entities/`` / ``components/``) are
     pruned. Global files (``index.md``, ``routes.md``, ``overview.md``) are
     always fully rewritten, so they self-heal.
+
+    Expectations come from ``_iter_project_articles``, the same iterator the
+    writer names files with. Re-deriving them from the bare label instead missed
+    every SALTED stem, so each run deleted the salted article and immediately
+    rewrote it — churn on a file that never changed, and a window in which the
+    article was simply absent.
     """
     if not wiki_dir.exists():
         return
@@ -653,21 +722,10 @@ def _prune_stale_articles(
             "entities": set(),
             "components": set(),
         }
-        for node_id, data in type_map.get("class", []):
-            label = data.get("label", "")
-            if not label:
-                continue
-            fname = f"{_safe_filename(label)}.md"
-            bucket = "controllers" if _is_controller(label, data.get("annotations", [])) else "services"
-            expected[bucket].add(fname)
-        for node_id, data in type_map.get("entity", []):
-            label = data.get("label", "")
-            if label:
-                expected["entities"].add(f"{_safe_filename(label)}.md")
-        for node_id, data in type_map.get("component", []):
-            label = data.get("label", "")
-            if label:
-                expected["components"].add(f"{_safe_filename(label)}.md")
+        for _nid, _data, bucket, stem in _iter_project_articles(
+            G if G is not None else nx.DiGraph(), project_name, type_map, proj_dir
+        ):
+            expected[bucket].add(f"{stem}.md")
 
         for subdir_name, keep in expected.items():
             subdir = proj_dir / subdir_name

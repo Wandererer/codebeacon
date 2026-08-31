@@ -1,9 +1,9 @@
 """Self-contained D3 v7 collapsible-tree view of ``beacon.json``.
 
 Writes a single ``beacon.html`` to the output directory. The page embeds the
-graph as inert JSON inside a ``<script type="application/json">`` tag — all
-node labels and source paths are HTML-escaped at write time so a malicious
-identifier from source code cannot inject script.
+graph as inert JSON inside a ``<script type="application/json">`` tag; the
+payload is JSON-escaped so a malicious identifier from source code can neither
+close the script tag nor reach the page as markup.
 
 Public API:
 
@@ -12,14 +12,15 @@ Public API:
 
 from __future__ import annotations
 
-import html
 import json
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
+from codebeacon.common.io import portable_source_path, write_text_if_changed
 from codebeacon.common.safety import sanitize_label
+from codebeacon.export.assets import html_head_scripts
 
 
 def write_tree_html(
@@ -27,15 +28,22 @@ def write_tree_html(
     output_dir: str | Path,
     *,
     top_n: int = 400,
+    project_roots: dict[str, str] | None = None,
+    html_assets: str = "local",
 ) -> Path:
     """Write ``beacon.html`` (D3 collapsible tree) into ``output_dir``.
 
     Args:
-        G:          knowledge graph.
-        output_dir: directory to write into; created if missing.
-        top_n:      maximum number of nodes per project to keep in the tree
-                    (sorted by total degree, descending). Prevents the HTML
-                    from ballooning on monorepos.
+        G:             knowledge graph.
+        output_dir:    directory to write into; created if missing.
+        top_n:         maximum number of nodes per project to keep in the tree
+                       (sorted by total degree, descending). Prevents the HTML
+                       from ballooning on monorepos.
+        project_roots: optional project → absolute root, so each node's
+                       ``source_file`` is published relative to its project
+                       rather than to the build machine.
+        html_assets:   ``"local"`` (default) vendors D3 next to the page so it
+                       renders offline; ``"cdn"`` restores the CDN ``<script>``.
 
     Returns:
         Path to the written file.
@@ -44,16 +52,48 @@ def write_tree_html(
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "beacon.html"
 
-    tree = _build_tree(G, top_n=top_n)
+    tree = _build_tree(G, top_n=top_n, project_roots=project_roots, output_dir=out_dir)
     embedded = json.dumps(tree, ensure_ascii=False)
-    page = _HTML_TEMPLATE.replace("__DATA__", html.escape(embedded, quote=False))
-    target.write_text(page, encoding="utf-8")
+    page = _HTML_TEMPLATE.replace("__DATA__", _json_for_script_tag(embedded))
+    page = page.replace("__SCRIPTS__", html_head_scripts(out_dir, ("d3",), html_assets))
+    write_text_if_changed(target, page)
     return target
+
+
+def _json_for_script_tag(payload: str) -> str:
+    """Escape a JSON document for embedding in ``<script type=application/json>``.
+
+    HTML-escaping the payload here was wrong in both directions. Inside a script
+    element the parser is in script-data state and does NOT decode entities, so
+    ``JSON.parse`` received ``List&lt;String&gt;`` verbatim and D3 rendered the
+    entity text — which every Flask or ASP.NET typed route converter
+    (``/user/<int:user_id>``) triggers, so it was routine, not an edge case.
+
+    Escaping is still load-bearing: a label containing ``</script>`` would
+    otherwise close the tag. Doing it JSON-side keeps both properties — no ``<``
+    survives in the byte stream, and ``JSON.parse`` decodes ``\\u003c`` back to
+    the original character. ``&`` goes too (it cannot start an entity here, but
+    it costs nothing and removes the question), and U+2028/U+2029 because they
+    are line terminators to a JavaScript parser.
+    """
+    return (
+        payload.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace(" ", "\\u2028")
+        .replace(" ", "\\u2029")
+    )
 
 
 # ── Tree construction ────────────────────────────────────────────────────────
 
-def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
+def _build_tree(
+    G: nx.DiGraph,
+    *,
+    top_n: int,
+    project_roots: dict[str, str] | None = None,
+    output_dir: str | Path = ".",
+) -> dict[str, Any]:
     """Build the project → type → node tree consumed by the D3 page."""
     # Project → type → list[node summary]
     projects: dict[str, dict[str, list[dict]]] = {}
@@ -70,7 +110,14 @@ def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
         summary = {
             "id": sanitize_label(node_id),
             "label": sanitize_label(data.get("label", node_id)) or "(unnamed)",
-            "source_file": sanitize_label(data.get("source_file", "")),
+            "source_file": sanitize_label(
+                portable_source_path(
+                    data.get("source_file", "") or "",
+                    data.get("project", "") or "",
+                    project_roots,
+                    output_dir,
+                )
+            ),
             "framework": sanitize_label(data.get("framework", "")),
             "degree": degree.get(node_id, 0),
         }
@@ -78,6 +125,7 @@ def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
 
     # Trim each project to top_n by degree and sort by label.
     root_children: list[dict] = []
+    rendered_total = 0
     for project_name, by_type in sorted(projects.items()):
         flat = [n for nodes in by_type.values() for n in nodes]
         flat.sort(key=lambda n: n["degree"], reverse=True)
@@ -95,6 +143,9 @@ def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
                 "name": type_name,
                 "kind": "type",
                 "count": len(keep),
+                # What the project actually holds, so a trimmed branch says so
+                # instead of presenting the cap as the whole truth (#953-13).
+                "total": len(nodes),
                 "children": [
                     {
                         "name": n["label"],
@@ -108,10 +159,13 @@ def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
                 ],
             })
 
+        kept_here = sum(t["count"] for t in type_children)
+        rendered_total += kept_here
         root_children.append({
             "name": project_name,
             "kind": "project",
-            "count": sum(t["count"] for t in type_children),
+            "count": kept_here,
+            "total": len(flat),
             "children": type_children,
         })
 
@@ -121,6 +175,10 @@ def _build_tree(G: nx.DiGraph, *, top_n: int) -> dict[str, Any]:
         "children": root_children,
         "stats": {
             "node_count": G.number_of_nodes(),
+            # The headline used to read the graph's node count while the tree
+            # rendered at most top_n per project, so a reader had no way to know
+            # how much was missing (graphify #953-13).
+            "rendered_node_count": rendered_total,
             "edge_count": G.number_of_edges(),
             "project_count": len(projects),
         },
@@ -167,14 +225,19 @@ _HTML_TEMPLATE = """<!doctype html>
 <div id="svg-wrap"><svg></svg></div>
 <div id="tooltip"></div>
 <script type="application/json" id="codebeacon-data">__DATA__</script>
-<script src="https://d3js.org/d3.v7.min.js"></script>
+__SCRIPTS__
 <script>
 (function() {
   const raw = document.getElementById("codebeacon-data").textContent;
   const data = JSON.parse(raw);
   const stats = data.stats || {};
+  const total = stats.node_count || 0;
+  const shown = stats.rendered_node_count;
+  const nodeText = (shown !== undefined && shown !== total)
+    ? (shown + " of " + total + " nodes shown")
+    : (total + " nodes");
   document.getElementById("stats").textContent =
-    (stats.node_count || 0) + " nodes · " + (stats.edge_count || 0) + " edges · " + (stats.project_count || 0) + " projects";
+    nodeText + " · " + (stats.edge_count || 0) + " edges · " + (stats.project_count || 0) + " projects";
 
   const color = { project: "#58a6ff", type: "#d2a8ff", node: "#7ee787" };
   const NODE_HEIGHT = 22;
@@ -237,7 +300,9 @@ _HTML_TEMPLATE = """<!doctype html>
           if (data.framework) html += "<br>framework: " + escapeHtml(data.framework);
           html += "<br>degree: " + (data.degree || 0);
         } else if (data.count !== undefined) {
-          html += "<br>" + data.count + " nodes";
+          html += (data.total !== undefined && data.total !== data.count)
+            ? ("<br>showing " + data.count + " of " + data.total + " nodes")
+            : ("<br>" + data.count + " nodes");
         }
         tooltip.html(html).style("opacity", 1).style("left", (event.clientX + 12) + "px").style("top", (event.clientY + 12) + "px");
       })

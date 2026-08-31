@@ -148,6 +148,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     args.output_obsidian = config.output.obsidian
     args.context_map_targets = config.output.context_map_targets
     args.rules_split = config.output.rules_split
+    args.html_assets = config.output.html_assets
+    # Persisted excludes are additive to any --exclude flags: the yaml is the
+    # only place the unattended paths (post-commit hook, `codebeacon watch`)
+    # can learn about an exclusion, and a flag should never silently drop it.
+    args.exclude = _merge_excludes(config.scan.exclude, getattr(args, "exclude", None))
 
     print(f"Using {config.config_file}")
     print(f"Processing {len(config.projects)} project(s)...")
@@ -185,6 +190,15 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return run_pipeline(projects_info, output_dir, args)
 
 
+def _merge_excludes(persisted, from_flags) -> list[str]:
+    """Combine codebeacon.yaml's ``scan.exclude`` with ``--exclude`` flags."""
+    merged: list[str] = []
+    for pattern in [*(persisted or []), *(from_flags or [])]:
+        if pattern and pattern not in merged:
+            merged.append(pattern)
+    return merged
+
+
 def _cmd_watch(args: argparse.Namespace) -> int:
     """``codebeacon watch [path]`` — resync the index when files change.
 
@@ -208,7 +222,22 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         print(f"  Error: not a directory: {root}", file=sys.stderr)
         return 1
 
-    extra_ignore = list(getattr(args, "exclude", []) or [])
+    # The watcher's own ignore filter has to know about excludes the same way
+    # the scan does — otherwise every write under an excluded path wakes a
+    # resync that then ignores the file. `scan --exclude` flags and the yaml's
+    # `scan.exclude` both feed it.
+    from codebeacon.config import find_config, load_config
+
+    persisted: list[str] = []
+    # walk_up mirrors the sync auto-switch in _cmd_scan: watching a sub-project
+    # of a workspace still honours the workspace's config.
+    config_path = find_config(root, walk_up=True)
+    if config_path:
+        try:
+            persisted = load_config(config_path).scan.exclude
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  Warning: ignoring {config_path}: {e}", file=sys.stderr)
+    extra_ignore = _merge_excludes(persisted, getattr(args, "exclude", None))
 
     def _resync(_changed: set) -> int:
         # Reuse the exact incremental path `codebeacon scan <root> --update`
@@ -274,7 +303,17 @@ def _cmd_query(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    print(tool_beacon_query(idx, {"term": args.term, "limit": int(getattr(args, "limit", 20))}))
+    _print_graph_identity(idx, beacon_dir)
+    print(tool_beacon_query(idx, {
+        "term": args.term,
+        "limit": int(getattr(args, "limit", 20)),
+        # The MCP tools cap their output at a token budget so an agent's context
+        # cannot be flooded. A human at a terminal asked for N rows and can
+        # scroll or pipe, so the CLI opts out (0 = unlimited) rather than
+        # printing a notice telling them to raise an argument the CLI has no
+        # flag for. --limit stays the CLI's size control.
+        "token_budget": 0,
+    }))
     return 0
 
 
@@ -289,8 +328,32 @@ def _cmd_path(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    print(tool_beacon_path(idx, {"source": args.source, "target": args.target}))
+    _print_graph_identity(idx, beacon_dir)
+    print(tool_beacon_path(idx, {
+        "source": args.source, "target": args.target, "token_budget": 0,
+    }))
     return 0
+
+
+def _print_graph_identity(idx, beacon_dir: Path) -> None:
+    """Name the graph an answer came from, on stderr.
+
+    A workspace can carry a ``.codebeacon/`` at several levels, and the default
+    resolution is cwd-relative — so an answer needs to say which corpus produced
+    it. stderr keeps it out of a piped/machine-read stdout (see the
+    ``affected --as wiki`` contract).
+    """
+    beacon_path = beacon_dir / "beacon.json"
+    try:
+        shown: str | Path = beacon_path.relative_to(Path.cwd())
+    except ValueError:
+        shown = beacon_path
+    graph = getattr(idx, "G", None)
+    try:
+        counts = f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+    except AttributeError:
+        counts = "unknown size"
+    print(f"graph: {shown} ({counts})", file=sys.stderr)
 
 
 def _resolve_beacon_dir(args: argparse.Namespace) -> Path:
@@ -361,7 +424,8 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
             print(
                 f"  Linked {link.linked_notes}/{total} notes into "
                 f"{link.beacon_path} ({link.reference_edges} references, "
-                f"{link.mention_edges} mentions)"
+                f"{link.mention_edges} mentions, "
+                f"{link.wikilink_edges} wikilinks)"
             )
     return 0
 
@@ -377,10 +441,102 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_install(args: argparse.Namespace) -> int:
+# Markers wrapping the `/codebeacon` registration inside a CLAUDE.md. They are
+# deliberately NOT contextmap's `<!-- codebeacon:start -->` pair: a CLAUDE.md can
+# hold both a generated context map and this trigger, and each writer must only
+# ever rewrite its own region.
+_SKILL_BLOCK_START = "<!-- codebeacon:skill:start -->"
+_SKILL_BLOCK_END = "<!-- codebeacon:skill:end -->"
+
+# Records the sha256 of the SKILL.md we last wrote, so a later install can tell
+# "the shipped file from the previous release" (safe to replace) apart from
+# "the user edited this" (back it up first).
+_INSTALL_MARKER = ".codebeacon-install.json"
+
+
+def _claude_config_dir() -> Path:
+    """Where Claude Code keeps its user-scope profile.
+
+    ``$CLAUDE_CONFIG_DIR`` relocates that profile; honouring it is the
+    difference between installing the skill and writing it into a directory
+    Claude Code never reads.
+    """
+    import os
+
+    configured = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if configured:
+        return Path(os.path.expandvars(os.path.expanduser(configured)))
+    return Path.home() / ".claude"
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _install_skill_file(src: Path, dest: Path) -> str:
+    """Copy SKILL.md over *dest*, never destroying a user-edited file.
+
+    Returns ``"unchanged"``, ``"updated"``, ``"backed-up"``, or ``"kept"``.
+    ``backed-up`` means *dest* held bytes codebeacon did not write (hand edits,
+    or an install that predates the marker file) and they were copied aside
+    before the shipped version landed; ``kept`` means that copy could not be
+    written, so the user's file was left in place rather than destroyed.
+    """
+    import json
     import shutil
+
+    from codebeacon.common.textio import backup_original
+
+    src_hash = _sha256_file(src)
+    marker = dest.parent / _INSTALL_MARKER
+    recorded: str | None = None
+    try:
+        recorded = json.loads(marker.read_text(encoding="utf-8")).get("skill_sha256")
+    except (OSError, ValueError, AttributeError):
+        recorded = None
+
+    status = "updated"
+    if dest.exists():
+        dest_hash = _sha256_file(dest)
+        if dest_hash == src_hash:
+            status = "unchanged"
+        elif recorded is None or dest_hash != recorded:
+            backup = backup_original(dest)
+            status = "backed-up"
+            print(
+                f"warning: {dest} differs from the version codebeacon installed "
+                "— it looks hand-edited.\n"
+                + (
+                    f"         Your copy was saved to {backup} before the shipped "
+                    "SKILL.md was written."
+                    if backup is not None
+                    else "         The backup could NOT be written; the file was "
+                    "left untouched."
+                ),
+                file=sys.stderr,
+            )
+            if backup is None:
+                return "kept"
+
+    if status != "unchanged":
+        shutil.copy2(src, dest)
+    try:
+        marker.write_text(
+            json.dumps({"skill_sha256": src_hash, "version": __version__}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # marker is an optimisation; a failed write only costs a backup later
+    return status
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
     import sys
     from pathlib import Path
+
+    from codebeacon.common.textio import backup_original, read_text_status
 
     # SKILL.md is shipped inside the package at codebeacon/skill/SKILL.md
     skill_src = Path(__file__).parent / "skill" / "SKILL.md"
@@ -398,31 +554,70 @@ def _cmd_install(args: argparse.Namespace) -> int:
         trigger_path_label = ".claude/skills/codebeacon/SKILL.md"
         scope_kind = "project"
     else:
-        scope_root = Path.home() / ".claude"
-        trigger_path_label = "~/.claude/skills/codebeacon/SKILL.md"
+        scope_root = _claude_config_dir()
         scope_kind = "user"
+        default_home = Path.home() / ".claude"
+        trigger_path_label = (
+            "~/.claude/skills/codebeacon/SKILL.md"
+            if scope_root == default_home
+            else str(scope_root / "skills" / "codebeacon" / "SKILL.md")
+        )
 
     skills_dir = scope_root / "skills" / "codebeacon"
     skill_dest = skills_dir / "SKILL.md"
     claude_md = scope_root / "CLAUDE.md"
 
     skills_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(skill_src, skill_dest)
-    print(f"  Copied SKILL.md → {skill_dest}")
+    status = _install_skill_file(skill_src, skill_dest)
+    if status == "unchanged":
+        print(f"  SKILL.md already current → {skill_dest}")
+    elif status == "kept":
+        print(f"  Left {skill_dest} untouched (see the warning above).")
+    else:
+        print(f"  Copied SKILL.md → {skill_dest}")
 
-    trigger_block = (
-        "\n# codebeacon\n"
+    body = (
+        "# codebeacon\n"
         f"- **codebeacon** (`{trigger_path_label}`) - scan source code "
         "→ knowledge graph + wiki. Trigger: `/codebeacon`\n"
         'When the user types `/codebeacon`, invoke the Skill tool with '
         '`skill: "codebeacon"` before doing anything else.\n'
     )
-    existing = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
-    if "# codebeacon" in existing:
+    trigger_block = f"{_SKILL_BLOCK_START}\n{body}{_SKILL_BLOCK_END}\n"
+
+    existing, lossy = read_text_status(claude_md) if claude_md.exists() else ("", False)
+
+    def _write(text: str) -> None:
+        # A file we could not decode losslessly would come back with U+FFFD
+        # where its original bytes were; keep those bytes before overwriting.
+        if lossy:
+            backup = backup_original(claude_md)
+            print(
+                f"warning: {claude_md} is not valid UTF-8; the original bytes "
+                f"were saved to {backup}.",
+                file=sys.stderr,
+            )
+        claude_md.write_text(text, encoding="utf-8")
+
+    start = existing.find(_SKILL_BLOCK_START)
+    end = existing.find(_SKILL_BLOCK_END, start + 1) if start != -1 else -1
+    if start != -1 and end != -1:
+        # Managed block present — rewrite just that region so the registration
+        # tracks the shipped wording (and the resolved SKILL.md path).
+        updated = existing[:start] + trigger_block.rstrip("\n") + existing[end + len(_SKILL_BLOCK_END):]
+        if updated == existing:
+            print(f"  Trigger already up to date in {claude_md}")
+        else:
+            _write(updated)
+            print(f"  Updated codebeacon trigger in {claude_md}")
+    elif any(line.strip() == "# codebeacon" for line in existing.splitlines()):
+        # Registered by an older codebeacon (or by hand) without markers. The
+        # guard is a whole-line match, not a substring: a user's prose that
+        # merely mentions `# codebeacon` must not suppress registration.
         print(f"  Trigger already present in {claude_md} — skipping.")
     else:
-        separator = "\n" if existing and not existing.endswith("\n\n") else ""
-        claude_md.write_text(existing + separator + trigger_block, encoding="utf-8")
+        separator = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
+        _write(existing + separator + trigger_block)
         print(f"  Added codebeacon trigger to {claude_md}")
 
     print(f"\ncodebeacon skill installed ({scope_kind} scope).")
@@ -468,7 +663,10 @@ def _is_uv_venv() -> bool:
         for line in cfg.read_text(encoding="utf-8").splitlines():
             if line.split("=", 1)[0].strip().lower() == "uv":
                 return True
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is not an OSError: a pyvenv.cfg that isn't UTF-8
+        # would otherwise crash `codebeacon upgrade` while it works out which
+        # upgrade command to recommend.
         pass
     return False
 
@@ -702,7 +900,8 @@ def _cmd_semantic_apply(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(
-        f"semantic-apply: applied {result.applied} edge(s), "
+        f"semantic-apply: applied {result.applied} edge(s) and "
+        f"{result.nodes_applied} node(s), "
         f"skipped {result.skipped}; archived {result.chunks_archived} chunk(s); "
         f"archive size: {result.archive_size}"
     )
@@ -781,6 +980,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RATE",
         help="Fail (non-zero exit) when extraction failure rate exceeds RATE (0.0-1.0). Default 0.01 = 1%%.",
     )
+    scan_p.add_argument(
+        "--force", action="store_true",
+        help="Write the graph even when the shrink guard flags an unexplained node loss.",
+    )
     scan_p.set_defaults(func=_cmd_scan)
 
     # sync
@@ -809,6 +1012,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-failure-rate", type=float, default=None,
         metavar="RATE",
         help="Fail (non-zero exit) when extraction failure rate exceeds RATE (0.0-1.0). Default 0.01 = 1%%.",
+    )
+    sync_p.add_argument(
+        "--force", action="store_true",
+        help="Write the graph even when the shrink guard flags an unexplained node loss.",
     )
     sync_p.set_defaults(func=_cmd_sync)
 
@@ -1045,9 +1252,41 @@ def _ensure_utf8_stdio() -> None:
             pass
 
 
+def _discard_stdout() -> None:
+    """Point fd 1 at the null device.
+
+    Called once a ``BrokenPipeError`` has been seen: the interpreter flushes
+    ``sys.stdout`` again at shutdown, and that second flush would re-raise on
+    the dead pipe, printing "Exception ignored" noise and exiting non-zero.
+    """
+    import os
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
 def main() -> None:
     _ensure_utf8_stdio()
     parser = build_parser()
     argv = _maybe_inject_scan(sys.argv[1:])
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    try:
+        rc = args.func(args)
+        # Flush inside the guard: a `codebeacon query … | head` closes the pipe
+        # while output is still buffered, so the EPIPE surfaces here, not in the
+        # command. Exiting 1 with a traceback made CI wrappers and agent
+        # harnesses read a normal `| head` as a failure.
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _discard_stdout()
+        rc = 0
+    except KeyboardInterrupt:
+        try:
+            print("\nInterrupted.", file=sys.stderr)
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+        rc = 130
+    sys.exit(rc)

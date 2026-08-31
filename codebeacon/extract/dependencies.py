@@ -58,7 +58,48 @@ _JS_REQUIRE_RE = re.compile(
     """,
     re.VERBOSE,
 )
+# Dynamic ESM import:
+#   const m = await import('./mod')
+#   import('./mod').then(...)
+# Mirrors graphify #938-5. The SCM queries capture `import_statement`, a
+# statement node; a dynamic import is a call_expression and matched none of
+# them, so a code-split Next.js module had no dependency edge at all. Handled
+# here rather than in 11 query files for the same reason require() is: one
+# regex pass, position-agnostic, so module scope and any nesting depth are
+# covered alike. The lookbehind keeps `myImport(...)` and a member call like
+# `mod.import('x')` out.
+_JS_DYNAMIC_IMPORT_RE = re.compile(
+    r"""(?<![\w.$])import\s*\(   # import(  — not foo.import( / myimport(
+        \s*['\"]([^'\"]+)['\"]  # module string (a non-literal is skipped)
+        \s*\)                    # )
+    """,
+    re.VERBOSE,
+)
 _JS_FAMILY_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
+
+# `import networkx as nx` / `use foo::Bar as Baz` — several grammars capture the
+# alias clause as part of the import target, so the raw string carried it into
+# the graph ("networkx as nx" appeared 36x in a self-scan). Harmless for
+# third-party names, but it means an aliased FIRST-party import can never bind
+# to its declaration. The alias itself is a local binding, not a dependency.
+# The module half is restricted to a bare/dotted/scoped IDENTIFIER shape —
+# `pkg.mod`, `foo::bar`, `App\Models\User`. A JS module string is a path
+# ('./my as file' is a legal, if perverse, filename) and must be left alone.
+_IMPORT_ALIAS_RE = re.compile(
+    r"""^(?P<module>
+            [A-Za-z_$][\w$]*            # first segment
+            (?:(?:\.|::|\\)[\w$]+)*     # . / :: / \ separated tail
+        )
+        \s+as\s+[A-Za-z_$][\w$]*$       # trailing alias binding
+    """,
+    re.VERBOSE,
+)
+
+
+def _strip_import_alias(raw: str) -> str:
+    """Return *raw* without a trailing ``as <alias>`` clause."""
+    m = _IMPORT_ALIAS_RE.match(raw)
+    return m.group("module") if m else raw
 
 
 def _strip_js_comments(source: str) -> str:
@@ -210,7 +251,7 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
         if "import.path" not in caps:
             continue
         for import_node in caps["import.path"]:
-            raw = node_text(import_node).strip("'\"` ")
+            raw = _strip_import_alias(node_text(import_node).strip("'\"` "))
             key = ("imports_from", raw)
             if not raw or key in seen:
                 continue
@@ -233,7 +274,7 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
         # for each so label resolution can bind the real symbol. Mirrors
         # graphify #1146.
         if "import.item" in caps and "import.path" in caps:
-            module_raw = node_text(caps["import.path"][0]).strip("'\"` ")
+            module_raw = _strip_import_alias(node_text(caps["import.path"][0]).strip("'\"` "))
             for item_node in caps["import.item"]:
                 item = node_text(item_node).strip()
                 if not item:
@@ -255,7 +296,7 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
         # Vapor uses @import.name instead of @import.path
         if "import.name" in caps:
             for import_node in caps["import.name"]:
-                raw = node_text(import_node).strip()
+                raw = _strip_import_alias(node_text(import_node).strip())
                 key = ("imports_from", raw)
                 if not raw or key in seen:
                     continue
@@ -293,22 +334,25 @@ def extract_dependencies(file_path: str, framework: str) -> list[Edge]:
                 confidence_score=1.0,
                 source_file=file_path,
             ))
-        for m in _JS_REQUIRE_RE.finditer(source):
-            raw = m.group(1).strip()
-            # `require()` resolves to the same logical edge as `import` —
-            # use the same relation so downstream consumers can't tell
-            # them apart (Webpack / Vite / esbuild treat them as equivalent).
-            key = ("imports_from", raw)
-            if not raw or key in seen:
-                continue
-            seen.add(key)
-            edges.append(Edge(
-                source=file_path,
-                target=raw,
-                relation="imports_from",
-                confidence="EXTRACTED",
-                confidence_score=1.0,
-                source_file=file_path,
-            ))
+        # `require()` and dynamic `import()` both resolve to the same logical
+        # edge as a static import — use the same relation so downstream
+        # consumers can't tell them apart (Webpack / Vite / esbuild treat them
+        # as equivalent), and share `seen` so a module pulled in twice by
+        # different spellings yields one edge.
+        for pattern in (_JS_REQUIRE_RE, _JS_DYNAMIC_IMPORT_RE):
+            for m in pattern.finditer(source):
+                raw = m.group(1).strip()
+                key = ("imports_from", raw)
+                if not raw or key in seen:
+                    continue
+                seen.add(key)
+                edges.append(Edge(
+                    source=file_path,
+                    target=raw,
+                    relation="imports_from",
+                    confidence="EXTRACTED",
+                    confidence_score=1.0,
+                    source_file=file_path,
+                ))
 
     return edges

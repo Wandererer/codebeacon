@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codebeacon"
-version = "0.7.0"
+version = "0.7.1"
 description = "Source code AST analysis tool for AI context generation — unified multi-framework knowledge graph"
 readme = "README.md"
 license = { text = "MIT" }
@@ -127,6 +127,18 @@ dev     = [
 Homepage = "https://github.com/codebeacon/codebeacon"
 Repository = "https://github.com/codebeacon/codebeacon"
 Issues = "https://github.com/codebeacon/codebeacon/issues"
+
+[tool.hatch.build]
+# The vendored browser bundles (D3 for beacon.html, Mermaid for callflow.html)
+# are package DATA, not code. Hatchling picks them up today because they are
+# tracked, but naming them explicitly means a future exclude rule or ignore
+# pattern cannot quietly ship a wheel whose HTML exports render nothing
+# offline — which is the whole point of vendoring them. See
+# codebeacon/export/vendor/README.md for versions, licenses, and checksums.
+artifacts = [
+    "codebeacon/export/vendor/*.js",
+    "codebeacon/export/vendor/LICENSE-*.txt",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["codebeacon"]

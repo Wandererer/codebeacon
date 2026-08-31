@@ -16,13 +16,26 @@ Only the features we need are implemented — this is not a 1:1 git port. In
 particular, ``**`` is supported via Python ``fnmatch``-style ``*`` segments
 where each ``*`` does not cross ``/``, plus an explicit ``**`` token meaning
 zero-or-more directory segments.
+
+Two properties are load-bearing beyond plain pattern matching:
+
+- **Per-rule scoping** (``_Rule.base``). A ``.gitignore`` living in a
+  subdirectory governs only that subtree, exactly like git. Scoping is part of
+  the rule's data rather than a special case in the walk, which is what makes a
+  nested bare ``*`` confine itself to its own directory instead of zeroing the
+  whole corpus (graphify #1873/#1885/#1887).
+- **NFC normalisation** on both sides. macOS hands out NFD directory names
+  while editors write NFC patterns; git precomposes (``core.precomposeunicode``)
+  before matching and so do we, or an accented rule silently matches nothing.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import functools
+import locale
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +46,7 @@ class _Rule:
     negate: bool       # True if the rule started with `!`
     dir_only: bool     # True if the rule ended with `/`
     anchored: bool     # True if the pattern contained `/` (anchored to root)
+    base: str = ""     # POSIX rel-dir the rule was loaded from ("" = scan root)
 
 
 class IgnoreMatcher:
@@ -46,8 +60,21 @@ class IgnoreMatcher:
     matcher's root (use forward slashes, no leading ``./`` or ``/``).
     """
 
-    def __init__(self, lines: list[str]) -> None:
-        self._rules: list[_Rule] = [r for r in (_parse_line(ln) for ln in lines) if r is not None]
+    def __init__(
+        self,
+        lines: list[str],
+        base: str = "",
+        *,
+        tail_lines: list[str] | None = None,
+    ) -> None:
+        rules = [r for r in (_parse_line(ln, base) for ln in lines) if r is not None]
+        # ``tail_lines`` (the CLI's ``--exclude``) always evaluate last, so a
+        # nested ignore file discovered mid-walk can never out-rank an explicit
+        # command-line exclusion under last-match-wins.
+        tail = [r for r in (_parse_line(ln) for ln in (tail_lines or [])) if r is not None]
+        self._rules: list[_Rule] = rules
+        self._tail: list[_Rule] = tail
+        self._ordered: list[_Rule] = rules + tail
         # Memoised directory verdicts so a full walk stays ~O(files·rules) rather
         # than O(files·depth·rules): the parent-directory recursion below queries
         # the same ancestor dirs repeatedly (see :meth:`_dir_ignored`).
@@ -55,11 +82,42 @@ class IgnoreMatcher:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "IgnoreMatcher":
-        try:
-            text = Path(path).read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        text = read_ignore_text(path)
+        if text is None:
             return cls([])
         return cls(text.splitlines())
+
+    def nested(self, lines: list[str], base: str) -> "IgnoreMatcher":
+        """Return a matcher extending this one with ``lines`` scoped to ``base``.
+
+        ``base`` is the POSIX path of the directory the ignore file was read
+        from, relative to the scan root. The new rules are appended *after* the
+        inherited ones (so the deeper file wins under last-match-wins, matching
+        git) but still *before* the ``tail_lines`` from construction.
+
+        Returns ``self`` unchanged when ``lines`` yields no rules, so the common
+        case — a directory with no ignore file, or one holding only comments —
+        allocates nothing and the rule list never grows across sibling subtrees
+        (graphify #2834).
+        """
+        base = _nfc(base).strip("/")
+        new = [r for r in (_parse_line(ln, base) for ln in lines) if r is not None]
+        if not new:
+            return self
+
+        child = IgnoreMatcher.__new__(IgnoreMatcher)
+        child._rules = self._rules + new
+        child._tail = self._tail
+        child._ordered = child._rules + child._tail
+        # A rule scoped to ``base`` can only match strictly *below* ``base``, so
+        # every verdict at or above it is unchanged — carry those over rather
+        # than recomputing the ancestor chain on the child's first query.
+        child._dir_cache = {}
+        d = base
+        while d:
+            child._dir_cache[d] = self._dir_ignored(d)
+            d = _parent_dir(d)
+        return child
 
     def is_ignored(self, rel_path: str, is_dir: bool = False) -> bool:
         """Return True if ``rel_path`` is ignored.
@@ -82,6 +140,7 @@ class IgnoreMatcher:
         re-includes ``.source`` itself but a deeper positive ``.source/testfolder``
         still self-matches and stays ignored.
         """
+        rel_path = _nfc(rel_path)
         if is_dir:
             return self._dir_ignored(rel_path)
         parent = _parent_dir(rel_path)
@@ -109,8 +168,11 @@ class IgnoreMatcher:
     def _self_verdict(self, rel_path: str, is_dir: bool) -> bool:
         """Last-match-wins over rules that *self*-match ``rel_path`` directly."""
         result = False
-        for rule in self._rules:
-            if _matches(rule, rel_path) and (not rule.dir_only or is_dir):
+        for rule in self._ordered:
+            # Cheap guard first: a `dir/` rule cannot decide a file's verdict, so
+            # testing it before the glob spares every dir-only rule a full regex
+            # match on every file (the dominant cost at large rule counts).
+            if (not rule.dir_only or is_dir) and _matches(rule, rel_path):
                 result = not rule.negate
         return result
 
@@ -124,9 +186,10 @@ class IgnoreMatcher:
         ignored: a parent-level ``!.source`` must not silently re-include
         nested dot-folders like ``.source/.vs``.
         """
+        rel_path = _nfc(rel_path)
         last: _Rule | None = None
-        for rule in self._rules:
-            if _matches(rule, rel_path) and (not rule.dir_only or is_dir):
+        for rule in self._ordered:
+            if (not rule.dir_only or is_dir) and _matches(rule, rel_path):
                 last = rule
         return last is not None and last.negate
 
@@ -150,13 +213,24 @@ class IgnoreMatcher:
         ancestor match (see :meth:`is_ignored`), so an anchored ``!a/b/c`` can
         only matter under ``a/``.
         """
-        dir_segs = [s for s in rel_dir.split("/") if s]
-        for rule in self._rules:
+        rel_dir = _nfc(rel_dir)
+        for rule in self._ordered:
             if not rule.negate:
                 continue
+            if rule.base:
+                # The rule only governs its own subtree. If that subtree sits at
+                # or below rel_dir it can certainly rescue something beneath it;
+                # if the two are disjoint it never can.
+                if rule.base == rel_dir or not rel_dir or rule.base.startswith(rel_dir + "/"):
+                    return True
+                if not rel_dir.startswith(rule.base + "/"):
+                    continue
+                sub = rel_dir[len(rule.base) + 1:]
+            else:
+                sub = rel_dir
             if not rule.anchored:
                 return True  # unanchored negation can match a file at any depth
-            if _anchored_can_match_under(rule.pattern, dir_segs):
+            if _anchored_can_match_under(rule.pattern, [s for s in sub.split("/") if s]):
                 return True
         return False
 
@@ -165,6 +239,67 @@ class IgnoreMatcher:
 
 # Per gitignore spec: trailing whitespace is stripped unless escaped.
 _TRAILING_WS_RE = re.compile(r"(?<!\\)\s+$")
+
+
+def _nfc(text: str) -> str:
+    """Return ``text`` in Unicode NFC, cheaply.
+
+    ``is_normalized`` is a fast C-level check that short-circuits on the
+    ASCII-only common path, so this costs essentially nothing for the paths that
+    make up virtually every repo while still giving macOS's NFD directory names
+    the same form as the NFC patterns editors write into ``.gitignore``.
+    """
+    return text if unicodedata.is_normalized("NFC", text) else unicodedata.normalize("NFC", text)
+
+
+# A UTF-16 file starts with one of these; nothing valid in UTF-8 does.
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+
+
+def read_ignore_text(path: str | Path, *, warn: bool = True) -> str | None:
+    """Decode an ignore file, never raising and never silently losing rules.
+
+    Returns ``None`` only when the file is absent or unreadable. Tries, in
+    order: UTF-8 (with a BOM stripped — Windows PowerShell writes one by
+    default, and a BOM glued to the first pattern disables exactly the rule
+    users put first, typically ``secrets/`` or ``*.env``); UTF-16 when the byte
+    order mark says so; the platform's preferred encoding; and finally latin-1,
+    which cannot fail. Anything past the first attempt is reported on stderr,
+    because a dropped exclusion means excluded files get indexed into committed
+    ``.codebeacon/`` artefacts.
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except (FileNotFoundError, OSError):
+        return None
+
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+
+    attempts: list[str] = []
+    if raw[:2] in _UTF16_BOMS:
+        attempts.append("utf-16")
+    preferred = locale.getpreferredencoding(False)
+    if preferred and preferred.lower().replace("-", "") not in ("utf8", "utf16"):
+        attempts.append(preferred)
+    attempts.append("latin-1")
+
+    for enc in attempts:
+        try:
+            text = raw.decode(enc)
+        except (UnicodeDecodeError, LookupError, ValueError):
+            continue
+        if warn:
+            import sys
+            print(
+                f"    Warning: {path} is not UTF-8; decoded as {enc}. "
+                "Re-save it as UTF-8 if its patterns look wrong.",
+                file=sys.stderr,
+            )
+        return text
+    return raw.decode("utf-8", errors="replace")
 
 
 def _parent_dir(rel_path: str) -> str:
@@ -176,10 +311,10 @@ def _parent_dir(rel_path: str) -> str:
     return "/".join(segments[:-1])
 
 
-def _parse_line(raw: str) -> _Rule | None:
+def _parse_line(raw: str, base: str = "") -> _Rule | None:
     if raw is None:
         return None
-    line = _TRAILING_WS_RE.sub("", raw)
+    line = _nfc(_TRAILING_WS_RE.sub("", raw))
     if not line:
         return None
     if line.lstrip().startswith("#"):
@@ -204,17 +339,36 @@ def _parse_line(raw: str) -> _Rule | None:
     if line.startswith("/"):
         line = line[1:]
 
-    return _Rule(pattern=line, negate=negate, dir_only=dir_only, anchored=anchored)
+    return _Rule(
+        pattern=line, negate=negate, dir_only=dir_only, anchored=anchored, base=base
+    )
 
 
 def _matches(rule: _Rule, rel_path: str) -> bool:
     """Return True if ``rule`` matches ``rel_path`` (POSIX-style relative path)."""
+    if rule.base:
+        # A rule read from ``<base>/.gitignore`` governs only paths strictly
+        # beneath ``<base>``, and matches against the remainder — so a nested
+        # bare ``*`` confines itself to its own directory instead of zeroing the
+        # whole corpus, and sibling subtrees are untouched.
+        base = rule.base
+        if not rel_path.startswith(base) or len(rel_path) <= len(base) or rel_path[len(base)] != "/":
+            return False
+        rel_path = rel_path[len(base) + 1:]
+
     pattern = rule.pattern
     # Translate `**` into a special token that fnmatch can't express directly.
     # We handle `**/` and `/**` by trying both stripped and unstripped variants.
     if rule.anchored:
         return _glob_match(pattern, rel_path)
-    # Unanchored: match against any suffix of the path's segments.
+    # Unanchored and `**`-free: the pattern holds no `/` (that is what makes it
+    # unanchored) and a segment regex emits `[^/]*` / `[^/]`, which cannot cross
+    # a separator — so only the basename can ever match, and the O(depth) suffix
+    # loop collapses to a single comparison. Ancestor stickiness is unaffected:
+    # it comes from `_dir_ignored`'s parent recursion, not from this loop.
+    if "**" not in pattern:
+        return _glob_match(pattern, rel_path.rsplit("/", 1)[-1])
+    # Unanchored `**`: match against any suffix of the path's segments.
     segments = rel_path.split("/")
     for i in range(len(segments)):
         candidate = "/".join(segments[i:])

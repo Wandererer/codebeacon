@@ -63,6 +63,7 @@ class GraphReport:
     node_count: int = 0
     edge_count: int = 0
     community_count: int = 0
+    singleton_communities: int = 0   # of those, how many hold exactly one node
     god_nodes: list[GodNode] = field(default_factory=list)
     surprising_connections: list[SurprisingConnection] = field(default_factory=list)
     hub_files: list[HubFile] = field(default_factory=list)
@@ -321,10 +322,15 @@ def analyze(
         project_paths: optional dict mapping project name → absolute project root path.
                        When None, paths are inferred automatically from the graph.
     """
+    sizes: dict[int, int] = defaultdict(int)
+    for cid in (communities or {}).values():
+        sizes[cid] += 1
+
     report = GraphReport(
         node_count=G.number_of_nodes(),
         edge_count=G.number_of_edges(),
-        community_count=len(set(communities.values())) if communities else 0,
+        community_count=len(sizes),
+        singleton_communities=sum(1 for n in sizes.values() if n == 1),
         cohesion_scores=cohesion_scores or {},
         density=nx.density(G),
         isolated_nodes=sum(1 for n in G.nodes() if G.degree(n) == 0),
@@ -339,6 +345,24 @@ def analyze(
     return report
 
 
+def _community_line(report: GraphReport) -> str:
+    """Render the community count, split out when singletons dominate it.
+
+    Every node now belongs to exactly one community, isolated nodes included
+    (graph/cluster.py::_with_singletons), so on a sparsely-connected corpus the
+    raw total is mostly communities of one — a bare "366" reads as far more
+    structure than the graph has. Naming both halves keeps the number honest
+    without hiding it.
+    """
+    if not report.singleton_communities:
+        return str(report.community_count)
+    grouped = report.community_count - report.singleton_communities
+    return (
+        f"{report.community_count} "
+        f"({grouped} with 2+ members, {report.singleton_communities} single-node)"
+    )
+
+
 def report_to_markdown(report: GraphReport) -> str:
     """Render a GraphReport as a Markdown string."""
     lines = [
@@ -347,7 +371,7 @@ def report_to_markdown(report: GraphReport) -> str:
         "## Statistics",
         f"- Nodes: {report.node_count}",
         f"- Edges: {report.edge_count}",
-        f"- Communities: {report.community_count}",
+        f"- Communities: {_community_line(report)}",
         f"- Graph density: {report.density:.4f}",
         f"- Isolated nodes: {report.isolated_nodes}",
     ]
@@ -392,8 +416,13 @@ def report_to_markdown(report: GraphReport) -> str:
         lines.append("")
 
     if report.cohesion_scores:
+        # Capped like every other section. Community IDs are assigned
+        # largest-community-first (graph/cluster.py::_relabel_stable), so the
+        # first ten are the ten biggest — and the tail this drops is mostly the
+        # single-node communities isolated nodes now get, which always score a
+        # meaningless 1.000 (no edges to leave).
         lines += ["## Community Cohesion Scores", ""]
-        for cid, score in sorted(report.cohesion_scores.items()):
+        for cid, score in sorted(report.cohesion_scores.items())[:10]:
             lines.append(f"- Community {cid}: {score:.3f}")
         lines.append("")
 

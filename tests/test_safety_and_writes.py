@@ -175,31 +175,64 @@ class TestWriteBeacon:
         on_disk, _ = load_beacon(tmp_path / "beacon.json")
         assert on_disk.number_of_nodes() == 1
 
-    def test_had_explicit_deletions_bypasses_shrink_guard(self, tmp_path):
-        """Mirrors graphify #6fba4e4.
+    def test_had_explicit_deletions_no_longer_waives_the_guard(self, tmp_path):
+        """INVERTED in the 0.7.1 audit (R1). This used to assert the opposite.
 
-        ``--update`` mode informs the cache of deleted files, so a smaller
-        post-update graph is the expected outcome — not silent corruption.
-        Without this bypass, every delete-heavy commit would leave stale
-        nodes on disk and force the user to pass --force (which disables
-        the guard for legitimate failure modes too)."""
+        ``had_explicit_deletions`` meant "the caller knows files were deleted,
+        skip the guard", and it was wired to the mere presence of ``--update``.
+        Since watch, the post-commit hook and CI all scan with ``--update``,
+        the guard was permanently off on exactly the unattended paths it exists
+        to protect — a 50% node loss wrote silently with exit 0.
+
+        Deletions are now proven from the corpus instead (see
+        ``test_audit_070_pipeline.py``), so the old kwarg is accepted for
+        compatibility but waives nothing on its own."""
         G_big = nx.DiGraph()
         for i in range(5):
             G_big.add_node(f"n{i}")
         write_beacon(G_big, tmp_path)
 
-        # Caller explicitly knows 4 files were deleted → smaller graph OK
         G_small = nx.DiGraph()
         G_small.add_node("n0")
         wr = write_beacon(G_small, tmp_path, had_explicit_deletions=True)
-        assert wr.skipped_shrink is False
-        on_disk, _ = load_beacon(tmp_path / "beacon.json")
-        assert on_disk.number_of_nodes() == 1
 
-    def test_shrink_guard_still_fires_without_explicit_deletions(self, tmp_path):
-        """Regression bookend: ``had_explicit_deletions=False`` (default) MUST
-        still refuse silent shrinkage. Otherwise the new flag would have
-        effectively disabled the guard for every caller."""
+        assert wr.skipped_shrink is True
+        on_disk, _ = load_beacon(tmp_path / "beacon.json")
+        assert on_disk.number_of_nodes() == 5, "prior graph must survive"
+
+    def test_explained_shrink_writes_and_reports_the_cause(self, tmp_path, capsys):
+        """The replacement for the old waiver: a shrink goes through when the
+        run can attribute it, and says why. Here the corpus proves the file is
+        gone, which is what ``--update`` used to merely assert."""
+        src = tmp_path / "src"
+        src.mkdir()
+        keep, gone = src / "keep.py", src / "gone.py"
+        for p in (keep, gone):
+            p.write_text("# x\n", encoding="utf-8")
+
+        out = tmp_path / "out"
+        G_big = nx.DiGraph()
+        for p in (keep, gone):
+            G_big.add_node(f"p::{p.name}", label=p.name, type="class",
+                           project="p", source_file=str(p), line=1)
+        write_beacon(G_big, out, project_roots={"p": str(src)},
+                     corpus=[str(keep), str(gone)])
+
+        gone.unlink()
+        G_small = nx.DiGraph()
+        G_small.add_node("p::keep.py", label="keep.py", type="class",
+                         project="p", source_file=str(keep), line=1)
+        wr = write_beacon(G_small, out, project_roots={"p": str(src)},
+                          corpus=[str(keep)])
+
+        assert wr.skipped_shrink is False
+        on_disk, _ = load_beacon(out / "beacon.json")
+        assert on_disk.number_of_nodes() == 1
+        assert "1 source file(s) deleted" in capsys.readouterr().err
+
+    def test_unexplained_shrink_still_fires(self, tmp_path):
+        """Regression bookend, unchanged in intent: a shrink the run cannot
+        account for must still refuse."""
         G_big = nx.DiGraph()
         for i in range(5):
             G_big.add_node(f"n{i}")
@@ -207,7 +240,7 @@ class TestWriteBeacon:
 
         G_small = nx.DiGraph()
         G_small.add_node("only")
-        wr = write_beacon(G_small, tmp_path, had_explicit_deletions=False)
+        wr = write_beacon(G_small, tmp_path)
         assert wr.skipped_shrink is True
 
     def test_load_strips_meta(self, tmp_path):

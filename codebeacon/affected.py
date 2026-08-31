@@ -17,6 +17,7 @@ Mirrors graphify #e44e6e9 ("v8 affected").
 from __future__ import annotations
 
 import subprocess
+import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,27 @@ class AffectedResult:
         return "\n".join(f"{prefix}/{p}" for p in self.wiki_paths)
 
 
+def _normalise_path(value: str | Path) -> str:
+    """Canonicalise a path for suffix matching.
+
+    Windows separators become ``/``; NFC normalisation lets a macOS git-diff
+    path (NFD) with accented filenames match the NFC ``source_file`` stored in
+    beacon.json (#1338); ``./`` prefixes and interior ``/./`` segments are
+    dropped, because ``git diff`` output and shell completion both hand us
+    ``./src/x.py`` while the graph stores ``src/x.py``. Without that last step a
+    ``./``-prefixed seed silently matched nothing whenever the graph held
+    ABSOLUTE source paths (write.py leaves paths outside every project root
+    absolute), since neither string is then a segment-aligned suffix of the
+    other.
+    """
+    text = unicodedata.normalize("NFC", str(value)).replace("\\", "/")
+    while "/./" in text:
+        text = text.replace("/./", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
 def affected_from_paths(
     beacon_dir: str | Path,
     changed_paths: Iterable[str],
@@ -98,7 +120,7 @@ def affected_from_paths(
     # match by suffix (a relative suffix of the absolute node path). NFC-
     # normalise so a macOS git-diff path (NFD) with accented filenames still
     # matches the NFC source_file stored in beacon.json (#1338).
-    seeds = [unicodedata.normalize("NFC", str(p)).replace("\\", "/") for p in changed_paths]
+    seeds = [_normalise_path(p) for p in changed_paths]
 
     def _suffix_match(a: str, b: str) -> bool:
         # True when one path is a *path-segment-aligned* suffix of the other,
@@ -111,7 +133,7 @@ def affected_from_paths(
 
     seed_node_ids: list[str] = []
     for node_id, data in G.nodes(data=True):
-        src = unicodedata.normalize("NFC", data.get("source_file") or "").replace("\\", "/")
+        src = _normalise_path(data.get("source_file") or "")
         if not src:
             continue
         if any(_suffix_match(src, seed) for seed in seeds):
@@ -197,6 +219,12 @@ def git_changed_files(base: str, head: str = "HEAD", *, repo: str | Path | None 
             stderr=subprocess.STDOUT,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"warning: git diff failed ({exc}); returning empty change set.")
+        # stderr, not stdout: `codebeacon affected --as wiki` is documented as
+        # machine-readable (one wiki path per line), so a warning on stdout is
+        # read by the consumer as if it were a wiki article path.
+        print(
+            f"warning: git diff failed ({exc}); returning empty change set.",
+            file=sys.stderr,
+        )
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]

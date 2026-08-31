@@ -40,6 +40,17 @@ from codebeacon.discover.scanner import (
     read_ignore_file,
 )
 
+# Event types that report a *read*, not a change. watchdog's inotify emitter
+# subscribes to WATCHDOG_ALL_EVENTS, which includes IN_OPEN and IN_CLOSE_NOWRITE,
+# so on Linux merely reading a file dispatches these — and a resync reads every
+# source file it extracts. Without this filter each resync re-arms the debouncer
+# with its own reads and the watcher never idles again (graphify v0.9.50). The
+# macOS FSEvents and Windows backends never emit them, so the filter is a no-op
+# there. Compared as strings (the values of watchdog.events.EVENT_TYPE_OPENED /
+# EVENT_TYPE_CLOSED_NO_WRITE) so watch.py keeps importing without watchdog
+# installed and across watchdog versions that predate either constant.
+READ_ONLY_EVENT_TYPES = frozenset({"opened", "closed_no_write"})
+
 # Printed (to stderr) when `watch` is run without the optional dependency.
 # Mirrors the missing-grammar hint style in extract/base.py.
 WATCHDOG_INSTALL_HINT = (
@@ -83,6 +94,13 @@ def is_watchable_path(root: str | Path, path: str | Path, matcher: IgnoreMatcher
       :func:`_dir_would_be_walked` so the loop-guard on our own output stays a
       single source of truth), and
     * not matched by the ``.codebeaconignore`` rules.
+
+    Each ancestor is handed to ``_dir_would_be_walked`` *with its on-disk path*,
+    which is what the walk itself passes. Ambiguously-named directories
+    (``env/``, ``coverage/``, ``build/``, ``vendor/`` …) are pruned only when
+    corroborating markers say they really are build output, and that decision
+    needs the path — without it the name alone prunes, and the watcher would
+    call a file un-watchable that a scan happily collects.
     """
     root = Path(root)
     p = Path(path)
@@ -104,7 +122,7 @@ def is_watchable_path(root: str | Path, path: str | Path, matcher: IgnoreMatcher
     segments = rel.split("/")
     for i in range(len(segments) - 1):  # every ancestor directory of the file
         rel_dir = "/".join(segments[: i + 1])
-        if not _dir_would_be_walked(segments[i], rel_dir, matcher):
+        if not _dir_would_be_walked(segments[i], rel_dir, matcher, root / rel_dir):
             return False
     if matcher.is_ignored(rel, is_dir=False):
         return False
@@ -226,6 +244,8 @@ def _make_handler(base_cls, root: Path, matcher: IgnoreMatcher, debouncer: Debou
         def on_any_event(self, event) -> None:
             if event.is_directory:
                 return
+            if getattr(event, "event_type", "") in READ_ONLY_EVENT_TYPES:
+                return  # a read, not a change — see READ_ONLY_EVENT_TYPES
             for p in _event_paths(event):
                 if is_watchable_path(root, p, matcher):
                     debouncer.notify(p)

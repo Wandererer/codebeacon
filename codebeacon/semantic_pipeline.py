@@ -30,14 +30,25 @@ Files:
   .codebeacon/semantic/original/_legacy.jsonl    (auto-migrated from 0.3.x)
 
 Schema:
-  task   : {task_id, source_node_id, file_path, framework, excerpt, hint}
+  task   : {task_id, source_node_id, file_path, framework, excerpt, hint,
+            excerpt_truncated, excerpt_chars, file_chars}
   result : {task_id, source_node_id, edges: [{target_name, relation?, confidence_score?}]}
   original: {task_id, source_node_id, file_path?, edges: [...]}
 
-``task_id`` is ``SHA1(file_path + node_id + excerpt_hash[:8])[:16]`` — the
-excerpt hash means a file whose semantic content changed between scans
-gets a fresh task_id, so the agent re-analyses it instead of being
-silently skipped.
+``task_id`` is ``SHA1(file_path + node_id + content_hash[:8])[:16]``, where
+``content_hash`` digests the **whole file** — so an edit anywhere re-dispatches
+it. (Through 0.7.0 the digest covered only the first ``MAX_EXCERPT_CHARS``,
+which made the id blind to every change past that cut; 0.7.1 invalidates prior
+task_ids once, and the affected files are re-analysed on the next prepare.)
+
+A file larger than ``MAX_EXCERPT_CHARS`` is handed to the agent as a head+tail
+slice with the elision marked inline, and the task says so explicitly via
+``excerpt_truncated`` / ``excerpt_chars`` / ``file_chars``.
+
+Everything under ``semantic/`` is agent-authored or hand-editable, so both
+ingest paths (``apply`` and ``_reapply_archive``) validate every row through
+``_validate_llm_node`` / ``_validate_llm_edge``: a malformed row is skipped and
+counted, never allowed to abort the merge or reach beacon.json.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
@@ -55,7 +67,28 @@ from typing import Iterator, Optional
 
 import networkx as nx
 
+from codebeacon.common.safety import sanitize_label
+from codebeacon.common.types import KNOWLEDGE_NODE_TYPE
+from codebeacon.diagnostics import SemanticApplyStats
+
 MAX_EXCERPT_CHARS = 4000
+
+# Head/tail split of a truncated excerpt. References cluster in the imports at
+# the top of a file and in comments throughout, so a pure prefix cut drops the
+# tail of a large file entirely (G-0949-21: 98.3% of a 231k-char Java file).
+_EXCERPT_HEAD_RATIO = 0.7
+
+# Bounds on agent-authored identifiers. An LLM (or a hand-edited archive) can
+# emit anything; these caps stop one row from inflating beacon.json and from
+# carrying an unbounded label into wiki text and MCP output.
+MAX_LLM_ID_CHARS = 200
+MAX_LLM_LABEL_CHARS = 512
+MAX_LLM_TARGET_CHARS = 200
+
+# Provenance stamped on an `external` node this pipeline mints for an edge
+# target the AST never saw: "literal" when the name occurs in the analysed
+# source, "unverified" when it does not.
+_VERIFICATION_VALUES: frozenset[str] = frozenset({"literal", "unverified"})
 
 # Layout
 SEMANTIC_DIRNAME = "semantic"
@@ -88,6 +121,43 @@ class ApplyResult:
     # ``stats`` is None for legacy callers (tests) that don't pass an
     # accumulator; the CLI always populates it.
     stats: Optional["object"] = None  # diagnostics.SemanticApplyStats
+    # Node contributions, counted separately from ``applied`` (which stays
+    # edge-only for callers that print it). A result row carrying a concept
+    # node and no edges is a real contribution and must persist — see
+    # :func:`apply`'s persistence gate.
+    nodes_applied: int = 0
+
+
+@dataclass
+class SemanticIngestStats(SemanticApplyStats):
+    """``SemanticApplyStats`` plus the ingest-validation counters.
+
+    Kept as a subclass rather than new fields on the base so the extra
+    counters flow through ``asdict`` into ``semantic-stats.json`` unchanged,
+    and so an older reader of that file simply sees additional keys.
+    """
+    # Rows an agent (or a hand-edited archive) emitted in an unusable shape:
+    # a non-string id/label, an unhashable label, an oversized identifier.
+    # Each is skipped individually — one bad row must never abort a merge.
+    nodes_rejected_invalid: int = 0
+    edges_rejected_invalid: int = 0
+    # Nodes that actually reached the graph this run.
+    nodes_accepted: int = 0
+    # Result chunks whose file yielded no usable row under any parse strategy.
+    chunks_unrecoverable: int = 0
+    # Edge targets that minted a NEW external node, split by whether the name
+    # literally occurs in the analysed source (see ``verification`` node attr).
+    edge_targets_literal: int = 0
+    edge_targets_unverified: int = 0
+
+
+@dataclass
+class _ReplayStats:
+    """Counters filled in by :func:`_reapply_archive` (optional out-param)."""
+    nodes_added: int = 0
+    nodes_rejected_invalid: int = 0
+    edges_rejected_invalid: int = 0
+    entries_rejected_invalid: int = 0
 
 
 # Edges with confidence_score below this threshold are dropped during apply().
@@ -209,18 +279,72 @@ def _excerpt_hash(excerpt: str) -> str:
     return hashlib.sha1(excerpt.encode("utf-8", errors="replace")).hexdigest()[:8]
 
 
-def _task_id(file_path: str, node_id: str, excerpt: str) -> str:
-    """task_id is content-aware: changes when the analysed excerpt changes."""
-    fingerprint = f"{file_path}|{node_id}|{_excerpt_hash(excerpt)}"
+def _task_id(file_path: str, node_id: str, content_hash: str) -> str:
+    """task_id is content-aware: changes when the analysed FILE changes.
+
+    ``content_hash`` digests the whole file, not the excerpt handed to the
+    agent. Hashing the excerpt made the id blind to every edit past
+    :data:`MAX_EXCERPT_CHARS`, so a large file could be rewritten wholesale and
+    never be re-dispatched (G-0949-21). Callers pass
+    :attr:`_Excerpt.content_hash`.
+    """
+    fingerprint = f"{file_path}|{node_id}|{content_hash}"
     return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:16]
 
 
-def _read_excerpt(file_path: str) -> Optional[str]:
+@dataclass
+class _Excerpt:
+    """The slice of a file handed to the agent, plus what was left out."""
+
+    text: str            # what the agent sees (already sliced)
+    file_chars: int      # size of the whole file
+    truncated: bool
+    content_hash: str    # digest of the WHOLE file — drives task_id
+
+
+def _slice_excerpt(text: str, budget: int = MAX_EXCERPT_CHARS) -> tuple[str, bool]:
+    """Return ``(excerpt, truncated)`` — a head+tail slice within ``budget``.
+
+    A plain prefix cut throws away the end of a large file entirely, and
+    references cluster at both ends: imports and class declarations at the top,
+    explanatory comments and helper usage at the bottom. So an oversized file
+    contributes a head and a tail with an explicit elision marker between them,
+    which also tells the reader (human or agent) that content is missing at
+    exactly the point where it is missing.
+    """
+    if len(text) <= budget:
+        return text, False
+    marker_template = (
+        "\n\n… [codebeacon: {n} of {total} characters elided — "
+        "this excerpt is the head and tail of the file] …\n\n"
+    )
+    # Reserve room for the marker, sized with a placeholder count of the same
+    # magnitude so the final string cannot exceed the budget.
+    reserve = len(marker_template.format(n=len(text), total=len(text)))
+    body = max(budget - reserve, 0)
+    if body < 200:
+        # Budget too small to be worth slicing — fall back to a plain prefix.
+        return text[:budget], True
+    head_len = int(body * _EXCERPT_HEAD_RATIO)
+    tail_len = body - head_len
+    elided = len(text) - head_len - tail_len
+    marker = marker_template.format(n=elided, total=len(text))
+    return text[:head_len] + marker + text[len(text) - tail_len:], True
+
+
+def _read_excerpt(file_path: str) -> Optional[_Excerpt]:
+    """Read ``file_path`` and return the agent-facing excerpt, or ``None``."""
     try:
         text = Path(file_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    return text[:MAX_EXCERPT_CHARS]
+    sliced, truncated = _slice_excerpt(text)
+    return _Excerpt(
+        text=sliced,
+        file_chars=len(text),
+        truncated=truncated,
+        content_hash=_excerpt_hash(text),
+    )
 
 
 _NEIGHBOR_CAP = 12  # avoid blowing chunk size on god-nodes
@@ -300,7 +424,15 @@ def _iter_jsonl(path: Path) -> Iterator[dict]:
     None`` — without this guard, downstream ``obj.get("task_id")``
     raises ``AttributeError`` on the first non-dict record and the
     whole apply step bails out.
+
+    Line-oriented reading already tolerates code fences and interleaved
+    narration. The one shape it cannot see is a *pretty-printed* JSON object
+    or array spanning many lines, which some agents emit despite the JSONL
+    instruction; every line of it fails to parse, so the file reads as empty
+    and the dispatched work is discarded. When the fast path recovers nothing
+    from a non-empty file we retry once over the whole text (G-0948-5).
     """
+    yielded = 0
     try:
         fh = open(path, encoding="utf-8")
     except OSError:
@@ -321,7 +453,38 @@ def _iter_jsonl(path: Path) -> Iterator[dict]:
             if not isinstance(obj, dict):
                 # null, list, str, number — all valid JSON but unusable.
                 continue
+            yielded += 1
             yield obj
+
+    if yielded:
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for obj in _parse_whole_json(text):
+        yield obj
+
+
+def _strip_code_fences(text: str) -> str:
+    """Drop whole-line ``` fences so a fenced document parses as JSON."""
+    kept = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+    return "\n".join(kept)
+
+
+def _parse_whole_json(text: str) -> list[dict]:
+    """Parse ``text`` as one JSON document; return the dict rows it holds."""
+    if not text.strip():
+        return []
+    try:
+        obj = json.loads(_strip_code_fences(text))
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return []
+    if isinstance(obj, dict):
+        return [obj]
+    if isinstance(obj, list):
+        return [item for item in obj if isinstance(item, dict)]
+    return []
 
 
 def _read_archive(beacon_dir: Path) -> list[dict]:
@@ -370,15 +533,25 @@ def _pick_candidates(G: nx.DiGraph) -> list[_Candidate]:
         n for n, d in G.nodes(data=True) if d.get("type") == "external"
     }
 
+    # Files that are eligible to be analysed at all. The semantic pass exists to
+    # infer references out of SOURCE CODE, so the overlay tiers are excluded:
+    # a knowledge note already has its own linker (knowledge/link.py) reading
+    # the same markdown with better-targeted heuristics, and concept/document/
+    # paper nodes are LLM output, not input. This matters now that a scan
+    # re-applies the knowledge overlay (R2) — without it, a 1,000-note vault
+    # would dispatch 1,000 spurious tasks on the next semantic-prepare.
+    analysable_files: set[str] = set()
+
     # Base score: any source-bearing, non-external node gives its file a +1.
     # Done in a single pass that also records the first real node per file
     # and the file's framework label.
     for node_id, data in G.nodes(data=True):
-        if data.get("type") == "external":
+        if str(data.get("type", "")) in _NON_ANALYSABLE_NODE_TYPES:
             continue
         sf = data.get("source_file", "")
         if not sf:
             continue
+        analysable_files.add(sf)
         if sf not in file_score:
             file_score[sf] = 1
         file_node.setdefault(sf, node_id)
@@ -436,6 +609,11 @@ def _pick_candidates(G: nx.DiGraph) -> list[_Candidate]:
     candidates: list[_Candidate] = []
     for sf, score in file_score.items():
         if score <= 0:
+            continue
+        # Single chokepoint: the boost passes above use ``+=`` on a defaultdict
+        # and can mint an entry for a file the base pass deliberately skipped,
+        # so eligibility is re-checked here rather than in each boost.
+        if sf not in analysable_files:
             continue
         if sf not in file_node:
             file_node[sf] = sf
@@ -500,6 +678,15 @@ ALLOWED_LLM_NODE_TYPES: frozenset[str] = frozenset({
     "concept", "document", "paper",
 })
 
+# Node types whose source file is NOT a candidate for semantic analysis:
+# ``external`` stubs have no file at all, the LLM-minted tiers are this
+# pipeline's own output, and knowledge notes belong to the knowledge linker.
+# Kept local rather than imported from graph/write.py to avoid a module cycle
+# (that module mirrors the same tiering for the shrink baseline).
+_NON_ANALYSABLE_NODE_TYPES: frozenset[str] = (
+    ALLOWED_LLM_NODE_TYPES | {"external", KNOWLEDGE_NODE_TYPE}
+)
+
 
 def _normalize_relation(raw: Optional[str]) -> str:
     rel = (raw or "").strip().lower()
@@ -552,6 +739,101 @@ def _coerce_score(raw: object, default: float = 0.7) -> float:
     return score
 
 
+# ── Ingest validation (the untrusted-input boundary) ──────────────────────────
+#
+# Everything under ``semantic/`` is agent-authored or hand-editable text, so it
+# is untrusted input in the ordinary sense: it can be any JSON shape at all.
+# Before 0.7.1 only ``file_type`` and ``source_file`` were checked, which left
+# four ways for a single bad row to take down a whole run — an unhashable label
+# aborted the merge on ``label_idx.setdefault``, a non-string ``file_type``
+# aborted it on ``.strip()``, and a non-string or NUL-bearing label was accepted
+# and then broke every later export from a durable beacon.json.
+#
+# Both ingest paths (``apply`` and ``_reapply_archive``) now run every node and
+# edge through the same pair of validators. The contract is deliberate: a row
+# that fails is SKIPPED and COUNTED, never raised — one malformed row must not
+# cost the user the rest of the chunk.
+
+
+def _validate_llm_node(node: object) -> Optional[dict]:
+    """Return a sanitized node dict, or ``None`` when the row is unusable.
+
+    ``id`` and ``label`` must be non-empty strings within
+    :data:`MAX_LLM_ID_CHARS` / :data:`MAX_LLM_LABEL_CHARS` after
+    :func:`common.safety.sanitize_label`, which is what strips the NUL bytes,
+    C0 controls, and bidi marks that later break the obsidian and wiki writers.
+    ``file_type`` must be a string (``_merge_node`` calls ``.strip()`` on it).
+    """
+    if not isinstance(node, dict):
+        return None
+    nid = node.get("id")
+    label = node.get("label")
+    if not isinstance(nid, str) or not isinstance(label, str):
+        return None
+    if len(nid) > MAX_LLM_ID_CHARS or len(label) > MAX_LLM_LABEL_CHARS:
+        return None
+    nid = sanitize_label(nid)
+    label = sanitize_label(label)
+    if not nid or not label:
+        return None
+    file_type = node.get("file_type", "")
+    if not isinstance(file_type, str):
+        return None
+    source_file = node.get("source_file", "")
+    if not isinstance(source_file, str) or len(source_file) > MAX_LLM_ID_CHARS:
+        source_file = ""
+    else:
+        source_file = sanitize_label(source_file)
+    return {
+        "id": nid,
+        "label": label,
+        "file_type": file_type,
+        "source_file": source_file,
+    }
+
+
+def _validate_llm_edge(edge: object) -> Optional[dict]:
+    """Return a sanitized edge dict, or ``None`` when the row is unusable.
+
+    ``target_name`` must be a bounded, non-empty string — it becomes an
+    external node's label when it does not resolve, so an unbounded or
+    control-bearing value would land in the graph verbatim. ``relation`` and
+    ``confidence`` are dropped to ``None`` when non-string, because
+    ``_classify_relation`` / ``_normalize_confidence`` call ``.strip()`` on
+    them and would otherwise raise on an int.
+    """
+    if not isinstance(edge, dict):
+        return None
+    target = edge.get("target_name")
+    if not isinstance(target, str) or len(target) > MAX_LLM_TARGET_CHARS:
+        return None
+    target = sanitize_label(target)
+    if not target:
+        return None
+    relation = edge.get("relation")
+    if not isinstance(relation, str):
+        relation = None
+    confidence = edge.get("confidence")
+    if not isinstance(confidence, str):
+        confidence = None
+    # Only the two values this pipeline mints are honoured on the way back in;
+    # the archive is hand-editable, and an arbitrary string here would end up
+    # as a node attribute that consumers read as provenance. The isinstance
+    # check has to come first: `x in frozenset` raises TypeError on an
+    # unhashable x, which is the very failure mode this validator exists to
+    # stop (an unhashable label aborting a whole merge — G-0918-4).
+    verification = edge.get("verification")
+    if not isinstance(verification, str) or verification not in _VERIFICATION_VALUES:
+        verification = None
+    return {
+        "target_name": target,
+        "relation": relation,
+        "confidence": confidence,
+        "confidence_score": edge.get("confidence_score"),
+        "verification": verification,
+    }
+
+
 def _merge_edge(
     G: nx.DiGraph,
     label_idx: dict[str, str],
@@ -560,7 +842,19 @@ def _merge_edge(
     relation: str = "references",
     score: float = 0.7,
     confidence: str = "INFERRED",
+    verification: Optional[str] = None,
 ) -> bool:
+    """Add one inferred edge. ``verification`` stamps a NEWLY MINTED target.
+
+    An unresolved ``target_name`` mints an ``external`` node, and that node is
+    the graph's only record of a name the agent supplied rather than the AST
+    extracted. ``verification`` (``"literal"`` when the name occurs in the
+    analysed source, ``"unverified"`` when it does not) makes the distinction
+    legible to consumers instead of leaving an inferred stub indistinguishable
+    from an AST-extracted unresolved import (G-0918-5). It is only applied to a
+    node this call creates — an existing node's provenance is not ours to
+    rewrite.
+    """
     if not _is_type_name(target_name):
         return False
     if source_node_id not in G:
@@ -568,14 +862,16 @@ def _merge_edge(
     target_id = label_idx.get(target_name, target_name)
     source_file = G.nodes[source_node_id].get("source_file", "")
     if target_id not in G:
-        G.add_node(
-            target_id,
-            label=target_name,
-            type="external",
-            source_file="",
-            line=0,
-            project="",
-        )
+        attrs = {
+            "label": target_name,
+            "type": "external",
+            "source_file": "",
+            "line": 0,
+            "project": "",
+        }
+        if verification:
+            attrs["verification"] = verification
+        G.add_node(target_id, **attrs)
     if G.has_edge(source_node_id, target_id):
         return False
     G.add_edge(
@@ -587,6 +883,38 @@ def _merge_edge(
         source_file=source_file,
     )
     return True
+
+
+def _target_occurs_in_source(
+    target: str,
+    task_spec: dict,
+    cache: dict[str, str],
+) -> bool:
+    """True when ``target`` appears literally in the analysed source text.
+
+    Checks the excerpt first — it is already in memory and is exactly what the
+    agent was shown. When the excerpt was a partial view, a name living in the
+    elided middle would read as unverified even though it is right there in the
+    file, so a truncated task falls back to reading the file once per run.
+    """
+    if not target:
+        return False
+    excerpt = task_spec.get("excerpt")
+    if isinstance(excerpt, str) and target in excerpt:
+        return True
+    if not task_spec.get("excerpt_truncated"):
+        return False
+    file_path = task_spec.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return False
+    text = cache.get(file_path)
+    if text is None:
+        try:
+            text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        cache[file_path] = text
+    return bool(text) and target in text
 
 
 def _merge_node(
@@ -645,24 +973,51 @@ def _merge_node(
     return True
 
 
-def _reapply_archive(G: nx.DiGraph, archive: list[dict]) -> tuple[int, list[dict]]:
+def _entry_list(entry: dict, key: str) -> list:
+    """Return ``entry[key]`` when it is a list, else ``[]``.
+
+    The archive is durable plain JSONL that survives every rescan — a 0.3.x
+    migration, a hand-edit, or a partial write can leave ``nodes`` as a dict or
+    a string. Iterating a dict yields its keys, so the old
+    ``entry.get(key) or []`` handed ``str`` objects to ``node.get`` and aborted
+    ``prepare()`` outright (G-0932-3).
+    """
+    value = entry.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _reapply_archive(
+    G: nx.DiGraph,
+    archive: list[dict],
+    stats: Optional[_ReplayStats] = None,
+) -> tuple[int, list[dict]]:
     """Replay every archived node + edge onto the fresh graph (idempotent).
 
-    Returns ``(reapplied, kept_archive)``. Archive entries whose source node
-    is missing from the graph (after node replay) are dropped from
-    ``kept_archive`` — they correspond to deleted code and would otherwise
-    stick around forever, polluting the dedup set.
+    Returns ``(reapplied, kept_archive)`` where ``reapplied`` counts EDGES.
+    Pass a :class:`_ReplayStats` as ``stats`` to also learn how many nodes were
+    replayed and how many malformed rows were skipped — the node count matters
+    because an archive entry may legitimately carry nodes and no edges.
+
+    Archive entries whose source node is missing from the graph (after node
+    replay) are dropped from ``kept_archive`` — they correspond to deleted code
+    and would otherwise stick around forever, polluting the dedup set.
 
     Backward-compat: 0.3.1-format entries carry only ``edges`` (no
     ``nodes``/``hyperedges`` keys); those keys default to ``[]`` so the same
     replay code path handles both formats. Hyperedges are persisted in the
     archive but not yet projected into the graph — see ``apply()`` for the
     pending schema work.
+
+    Every row goes through :func:`_validate_llm_node` / :func:`_validate_llm_edge`,
+    the same contract ``apply()`` enforces, so a poisoned archive degrades to
+    skipped rows instead of a traceback the user can only fix by hand-editing
+    JSONL.
     """
     label_idx = _label_index(G)
     # Snapshot code nodes' source_files once so replayed concept/document/
     # paper nodes get the same G12 source_file guard as a fresh apply().
     protected_sf = _code_source_files(G)
+    stats = stats if stats is not None else _ReplayStats()
     reapplied = 0
     kept: list[dict] = []
     # Pass 1: replay nodes so subsequent edge targets can resolve to them.
@@ -670,30 +1025,42 @@ def _reapply_archive(G: nx.DiGraph, archive: list[dict]) -> tuple[int, list[dict
     # a concept node from chunk A may be referenced by an edge from chunk B
     # whose source is still alive.
     for entry in archive:
-        for node in entry.get("nodes") or []:
-            _merge_node(
+        if not isinstance(entry, dict):
+            stats.entries_rejected_invalid += 1
+            continue
+        for node in _entry_list(entry, "nodes"):
+            clean = _validate_llm_node(node)
+            if clean is None:
+                stats.nodes_rejected_invalid += 1
+                continue
+            if _merge_node(
                 G, label_idx,
-                node_id=node.get("id", ""),
-                label=node.get("label", ""),
-                file_type=node.get("file_type", ""),
-                source_file=node.get("source_file", ""),
+                node_id=clean["id"],
+                label=clean["label"],
+                file_type=clean["file_type"],
+                source_file=clean["source_file"],
                 protected_source_files=protected_sf,
-            )
+            ):
+                stats.nodes_added += 1
     # Pass 2: replay edges, drop entries whose source is missing.
     for entry in archive:
+        if not isinstance(entry, dict):
+            continue
         source = entry.get("source_node_id")
-        if not source or source not in G:
+        if not isinstance(source, str) or not source or source not in G:
             continue
         kept.append(entry)
-        for edge in entry.get("edges") or []:
-            target = (edge or {}).get("target_name")
-            if not target:
+        for edge in _entry_list(entry, "edges"):
+            clean = _validate_llm_edge(edge)
+            if clean is None:
+                stats.edges_rejected_invalid += 1
                 continue
             if _merge_edge(
-                G, label_idx, source, target,
-                relation=edge.get("relation") or "references",
-                score=_coerce_score(edge.get("confidence_score"), 0.7),
-                confidence=edge.get("confidence") or "INFERRED",
+                G, label_idx, source, clean["target_name"],
+                relation=clean["relation"] or "references",
+                score=_coerce_score(clean["confidence_score"], 0.7),
+                confidence=clean["confidence"] or "INFERRED",
+                verification=clean["verification"],
             ):
                 reapplied += 1
     return (reapplied, kept)
@@ -762,7 +1129,8 @@ def prepare(
     G, _meta = load_beacon(beacon_path)
     archive = _read_archive(beacon_dir)
     pre_count = len(archive)
-    reapplied, kept_archive = _reapply_archive(G, archive)
+    replay = _ReplayStats()
+    reapplied, kept_archive = _reapply_archive(G, archive, replay)
     pruned = pre_count - len(kept_archive)
 
     # If we pruned anything, rewrite the archive to drop stale entries.
@@ -778,8 +1146,24 @@ def prepare(
             for entry in kept_archive:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    if reapplied:
-        write_beacon(G, beacon_dir, force=True)
+    # Persist whenever the replay changed the graph at all. Gating on the edge
+    # count alone stranded an archived node-only contribution: it was replayed
+    # into the in-memory graph on every prepare() and written out on none of
+    # them (G-0949-12).
+    if reapplied or replay.nodes_added:
+        # Overlay pass: loaded the graph, replayed our own tier onto it, adding
+        # only. See write_beacon's ``overlay_write`` contract.
+        write_beacon(G, beacon_dir, overlay_write=True)
+    if replay.nodes_rejected_invalid or replay.edges_rejected_invalid or \
+            replay.entries_rejected_invalid:
+        warnings.warn(
+            f"semantic-prepare: skipped malformed archive rows "
+            f"({replay.entries_rejected_invalid} entries, "
+            f"{replay.nodes_rejected_invalid} nodes, "
+            f"{replay.edges_rejected_invalid} edges) in "
+            f"{_original_dir(beacon_dir)} — the rest of the archive was replayed.",
+            stacklevel=2,
+        )
 
     done_task_ids = {e.get("task_id") for e in kept_archive if e.get("task_id")}
 
@@ -821,32 +1205,50 @@ def prepare(
         if max_tasks > 0 and written >= max_tasks:
             break
         excerpt = _read_excerpt(cand.file_path)
-        if not excerpt:
+        if excerpt is None or not excerpt.text:
             continue
-        tid = _task_id(cand.file_path, cand.node_id, excerpt)
+        tid = _task_id(cand.file_path, cand.node_id, excerpt.content_hash)
         if tid in done_task_ids:
             continue
         neighbors = _neighbor_context(G, cand.node_id)
+        hint = (
+            "List explicit class/type/service references that appear in "
+            "comments, docstrings, annotations, or are clearly implied "
+            "by the surrounding excerpt. Prefer names that already "
+            "appear under `neighbors.callers` or `neighbors.callees` — "
+            "those are confirmed graph nodes; inventing new names that "
+            "aren't in the graph adds noise."
+        )
+        if excerpt.truncated:
+            # The agent must know it is reasoning about a slice, or it will
+            # answer "the references in this file are X" as though it had read
+            # the whole thing (G-0949-21).
+            hint += (
+                " NOTE: `excerpt` is a partial view of this file "
+                f"({len(excerpt.text)} of {excerpt.file_chars} characters, "
+                "head and tail only — the elision point is marked inline). "
+                "Draw conclusions only from what you can see and do not "
+                "assume the listing is exhaustive."
+            )
         task = {
             "task_id": tid,
             "source_node_id": cand.node_id,
             "file_path": cand.file_path,
             "framework": cand.framework,
-            "excerpt": excerpt,
+            "excerpt": excerpt.text,
+            # Truncation is announced in the task itself as well as in the
+            # hint, so a programmatic consumer (or a later apply) can tell a
+            # partial view from a complete one without re-reading the file.
+            "excerpt_truncated": excerpt.truncated,
+            "excerpt_chars": len(excerpt.text),
+            "file_chars": excerpt.file_chars,
             # Cross-language semantic context: the LLM gets the immediate
             # callers and callees as label hints so it can name references
             # that exist in the graph instead of inventing them. Mirrors
             # graphify #ab4e542. Both lists are capped to keep the chunk
             # payload predictable.
             "neighbors": neighbors,
-            "hint": (
-                "List explicit class/type/service references that appear in "
-                "comments, docstrings, annotations, or are clearly implied "
-                "by the surrounding excerpt. Prefer names that already "
-                "appear under `neighbors.callers` or `neighbors.callees` — "
-                "those are confirmed graph nodes; inventing new names that "
-                "aren't in the graph adds noise."
-            ),
+            "hint": hint,
         }
         current_chunk.append(task)
         written += 1
@@ -889,6 +1291,24 @@ def _snapshot_beacon(beacon_path: Path) -> Optional[Path]:
         return None
 
 
+def _best_effort(what: str, fn, *args, **kwargs) -> None:
+    """Run a post-merge export, reporting any failure without raising.
+
+    Used only for work that happens after ``beacon.json`` is committed. The
+    contract is deliberately two-sided: the merge survives a broken exporter,
+    and a broken exporter is never silent.
+    """
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — an export must not undo the merge
+        print(
+            f"  Warning: {what} regeneration failed after semantic-apply "
+            f"({type(exc).__name__}: {exc}). beacon.json is up to date; "
+            f"re-run `codebeacon scan` to rebuild the exports.",
+            file=sys.stderr,
+        )
+
+
 def apply(
     beacon_dir: str | Path,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE_SCORE,
@@ -911,9 +1331,9 @@ def apply(
     """
     from codebeacon.graph.write import load_beacon, write_beacon
     from codebeacon.graph.cluster import cluster, apply_communities
-    from codebeacon.diagnostics import SemanticApplyStats, write_semantic_stats
+    from codebeacon.diagnostics import write_semantic_stats
 
-    stats = SemanticApplyStats()
+    stats = SemanticIngestStats()
 
     beacon_dir = Path(beacon_dir)
     beacon_path = beacon_dir / "beacon.json"
@@ -948,13 +1368,17 @@ def apply(
     applied = 0
     skipped = 0
     chunks_archived = 0
+    nodes_applied = 0
+    # Per-run cache of file text, used only when an excerpt was truncated and
+    # the literal-occurrence check has to look at the part the agent never saw.
+    source_text_cache: dict[str, str] = {}
 
     for result_path in sorted(rdir.glob("chunk_*.jsonl")):
         chunk_name = result_path.name
         results_by_tid: dict[str, dict] = {}
         for obj in _iter_jsonl(result_path):
             tid = obj.get("task_id")
-            if tid:
+            if isinstance(tid, str) and tid:
                 results_by_tid[tid] = obj
 
         # Pull the original task spec (preserves file_path / excerpt for
@@ -1000,22 +1424,26 @@ def apply(
         kept_nodes_by_tid: dict[str, list[dict]] = {}
         for tid, obj in results_by_tid.items():
             kept_nodes: list[dict] = []
-            for node in obj.get("nodes") or []:
-                if not isinstance(node, dict):
+            for node in _entry_list(obj, "nodes"):
+                clean = _validate_llm_node(node)
+                if clean is None:
+                    stats.nodes_rejected_invalid += 1
                     continue
-                nid = node.get("id", "")
+                nid = clean["id"]
                 if _merge_node(
                     G, label_idx,
                     node_id=nid,
-                    label=node.get("label", ""),
-                    file_type=node.get("file_type", ""),
-                    source_file=node.get("source_file", ""),
+                    label=clean["label"],
+                    file_type=clean["file_type"],
+                    source_file=clean["source_file"],
                     protected_source_files=protected_sf,
                 ):
+                    nodes_applied += 1
+                    stats.nodes_accepted += 1
                     kept_nodes.append({
                         "id": nid,
-                        "label": node.get("label", ""),
-                        "file_type": node.get("file_type", ""),
+                        "label": clean["label"],
+                        "file_type": clean["file_type"],
                         # Archive the sanitized source_file the graph actually
                         # stored (G12 may have blanked it) so replay can't
                         # reintroduce a collision.
@@ -1041,16 +1469,30 @@ def apply(
                 skipped += 1
                 continue
             task_spec = pending_tasks.get(tid) or {}
+            # A row must name the source node its OWN task was dispatched for.
+            # Without this, a row carrying task T1's id but T2's source lands
+            # T1's edges on T2's node — both are in ``dispatched_sources``, so
+            # the scope guard above waves it through — and stamps T1 done
+            # though its file was never analysed (V9 G-0949-13 residual A).
+            expected_source = task_spec.get("source_node_id")
+            if expected_source and source != expected_source:
+                warnings.warn(
+                    f"semantic-apply: {chunk_name} result row task_id {tid!r} "
+                    f"names source_node_id {source!r} but was dispatched for "
+                    f"{expected_source!r} — skipping.",
+                    stacklevel=2,
+                )
+                skipped += 1
+                continue
             kept_edges: list[dict] = []
-            for edge in obj.get("edges") or []:
+            for raw_edge in _entry_list(obj, "edges"):
                 stats.edges_total += 1
-                if not isinstance(edge, dict):
+                edge = _validate_llm_edge(raw_edge)
+                if edge is None:
+                    stats.edges_rejected_invalid += 1
                     skipped += 1
                     continue
-                target = edge.get("target_name")
-                if not target or not isinstance(target, str):
-                    skipped += 1
-                    continue
+                target = edge["target_name"]
 
                 raw_score = edge.get("confidence_score")
                 score = _coerce_score(raw_score, default=0.7)
@@ -1078,17 +1520,38 @@ def apply(
                     skipped += 1
                     continue
 
+                # Evidence check (G-0918-5). A target that does not resolve to
+                # an existing node mints an `external` stub, which is otherwise
+                # indistinguishable from an AST-extracted unresolved import.
+                # Stamp whether the name literally occurs in the analysed
+                # source, so consumers can weigh an inferred stub accordingly.
+                verification = None
+                if label_idx.get(target, target) not in G:
+                    verification = (
+                        "literal"
+                        if _target_occurs_in_source(target, task_spec, source_text_cache)
+                        else "unverified"
+                    )
+
                 if _merge_edge(
                     G, label_idx, source, target,
                     relation=rel_label,
                     score=score,
                     confidence=edge.get("confidence") or "INFERRED",
+                    verification=verification,
                 ):
+                    if verification == "literal":
+                        stats.edge_targets_literal += 1
+                    elif verification == "unverified":
+                        stats.edge_targets_unverified += 1
                     kept_edges.append({
                         "target_name": target,
                         "relation": rel_label,
                         "confidence": _normalize_confidence(edge.get("confidence")),
                         "confidence_score": score,
+                        # Archived so a replay onto a fresh graph re-mints the
+                        # stub with the same provenance instead of losing it.
+                        **({"verification": verification} if verification else {}),
                     })
                     applied += 1
                     stats.edges_accepted += 1
@@ -1125,12 +1588,24 @@ def apply(
                     fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
             chunks_archived += 1
 
-        # Drop the result + pending files now that the chunk is archived.
+        # Drop the result file now that the chunk is archived.
         try:
             result_path.unlink()
         except OSError:
             pass
-        if pending_path.exists():
+        # The pending file is the record of what was DISPATCHED. Deleting it
+        # when the result yielded nothing at all destroys the agent's work
+        # order along with its output, leaving the user nothing to retry
+        # (G-0948-5). Keep it so the chunk can simply be re-run.
+        recovered_nothing = not archive_lines and not results_by_tid
+        if recovered_nothing:
+            stats.chunks_unrecoverable += 1
+            warnings.warn(
+                f"semantic-apply: {chunk_name} yielded no usable result rows — "
+                f"keeping {pending_path} so the chunk can be re-run.",
+                stacklevel=2,
+            )
+        elif pending_path.exists():
             try:
                 pending_path.unlink()
             except OSError:
@@ -1143,17 +1618,24 @@ def apply(
     # needs to flag, and that information lives only in the stats file.
     write_semantic_stats(stats, beacon_dir)
 
-    if applied == 0:
+    # Persistence gate. ``applied`` counts EDGES; a row contributing a concept
+    # node and no edges is still a real contribution, and gating on edges alone
+    # archived it, stamped its task_id done, and never wrote it to beacon.json
+    # — so it was neither persisted nor ever re-requested (G-0949-12).
+    if applied == 0 and nodes_applied == 0:
         return ApplyResult(
             applied=0, skipped=skipped,
             chunks_archived=chunks_archived,
             archive_size=archive_size,
             stats=stats,
+            nodes_applied=0,
         )
 
     communities = cluster(G)
     apply_communities(G, communities)
-    write_beacon(G, beacon_dir, force=True)
+    # Overlay pass: the merged graph is the loaded one plus this run's inferred
+    # nodes and edges. See write_beacon's ``overlay_write`` contract.
+    write_beacon(G, beacon_dir, overlay_write=True)
 
     from codebeacon.wiki.generator import generate_wiki
     from codebeacon.export.obsidian import generate_obsidian_vault
@@ -1161,15 +1643,17 @@ def apply(
     from codebeacon.export.callflow_html import write_callflow_html
     from codebeacon.export.tree_html import write_tree_html
 
-    generate_wiki(G, communities, str(beacon_dir))
-    try:
-        generate_obsidian_vault(G, communities, str(beacon_dir))
-    except Exception:
-        pass
-    try:
-        generate_context_map(G=G, output_dir=str(beacon_dir), projects=[], obsidian_dir=None)
-    except Exception:
-        pass
+    # Every export below runs AFTER beacon.json is durably committed, so none of
+    # them may take the merge down with them — an agent's analysis is expensive
+    # to reproduce and a wiki bug is not a reason to lose it. Equally, none may
+    # fail invisibly: a swallowed export crash is how a half-written obsidian
+    # vault (2 notes instead of 5) stayed undetected through a whole release
+    # (G-0918-4). So each one warns by name and the command carries on.
+    _best_effort("wiki", generate_wiki, G, communities, str(beacon_dir))
+    _best_effort("obsidian vault", generate_obsidian_vault, G, communities,
+                 str(beacon_dir))
+    _best_effort("context map", generate_context_map, G=G,
+                 output_dir=str(beacon_dir), projects=[], obsidian_dir=None)
     # Regenerate the visual exports so callflow.html's cross-community table
     # and beacon.html's tree pick up the freshly-inferred edges. Without this,
     # the HTML on disk still reflects the AST-only graph and misses the new
@@ -1177,14 +1661,8 @@ def apply(
     # just produced — analogous to graphify 0.8.12 #925 (Relationships
     # section stayed empty when downstream readers used stale community
     # state).
-    try:
-        write_callflow_html(G, beacon_dir)
-    except (OSError, ValueError):
-        pass
-    try:
-        write_tree_html(G, beacon_dir)
-    except (OSError, ValueError):
-        pass
+    _best_effort("callflow HTML", write_callflow_html, G, beacon_dir)
+    _best_effort("tree HTML", write_tree_html, G, beacon_dir)
 
     return ApplyResult(
         applied=applied,
@@ -1192,4 +1670,5 @@ def apply(
         chunks_archived=chunks_archived,
         archive_size=archive_size,
         stats=stats,
+        nodes_applied=nodes_applied,
     )

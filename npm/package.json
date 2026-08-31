@@ -1,6 +1,6 @@
 {
   "name": "@codebeacon/mcp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "npx launcher for the codebeacon MCP server (stdio) — exposes a repo's knowledge graph + wiki to AI clients like Claude Desktop, Claude Code, and Cursor.",
   "keywords": [
     "mcp",

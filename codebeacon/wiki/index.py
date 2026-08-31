@@ -9,7 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from codebeacon.common.io import write_text_if_changed
 from codebeacon.wiki import templates
+
+
+# Per-relation cap on the cross-project connections page.
+_EDGES_PER_RELATION = 50
 
 
 def generate_index(
@@ -18,8 +23,8 @@ def generate_index(
     routes_by_project: dict[str, list[dict[str, Any]]],
     cross_edges: list[dict[str, Any]],
     total_stats: dict[str, int],
-) -> None:
-    """Write all global index files into wiki_dir.
+) -> int:
+    """Write all global index files into wiki_dir; return how many changed.
 
     Args:
         wiki_dir:          root wiki output directory (.codebeacon/wiki/)
@@ -29,13 +34,14 @@ def generate_index(
         total_stats:       aggregate {nodes, edges, communities, routes, services, entities, components}
     """
     wiki_dir.mkdir(parents=True, exist_ok=True)
+    changed = 0
 
     # index.md (short ~200 tokens global index)
     content = templates.global_index(
         projects=project_summary,
         total_stats=total_stats,
     )
-    _write(wiki_dir / "index.md", content)
+    changed += _write(wiki_dir / "index.md", content)
 
     # overview.md
     cross_connections = [
@@ -47,17 +53,20 @@ def generate_index(
         cross_connections=cross_connections,
         total_stats=total_stats,
     )
-    _write(wiki_dir / "overview.md", content)
+    changed += _write(wiki_dir / "overview.md", content)
 
     # routes.md (all projects)
     content = templates.routes_summary(routes_by_project)
-    _write(wiki_dir / "routes.md", content)
+    changed += _write(wiki_dir / "routes.md", content)
 
     # cross-project/connections.md
-    _write_cross_project(wiki_dir / "cross-project" / "connections.md", cross_edges)
+    changed += _write_cross_project(
+        wiki_dir / "cross-project" / "connections.md", cross_edges
+    )
+    return changed
 
 
-def _write_cross_project(path: Path, cross_edges: list[dict[str, Any]]) -> None:
+def _write_cross_project(path: Path, cross_edges: list[dict[str, Any]]) -> int:
     """Write cross-project/connections.md."""
     lines = [
         "# Cross-Project Connections",
@@ -78,18 +87,23 @@ def _write_cross_project(path: Path, cross_edges: list[dict[str, Any]]) -> None:
         for relation in sorted(by_relation.keys()):
             edges = by_relation[relation]
             lines += [f"## `{relation}`", ""]
-            for e in edges[:50]:  # cap per relation
+            for e in edges[:_EDGES_PER_RELATION]:  # cap per relation
                 src_proj = e.get("source_project", "")
                 tgt_proj = e.get("target_project", "")
                 src = e.get("source", "")
                 tgt = e.get("target", "")
                 lines.append(f"- `{src_proj}/{src}` → `{tgt_proj}/{tgt}`")
+            # State the cap: a reader seeing 50 rows must not conclude there are
+            # only 50 connections (graphify #953-14).
+            note = templates.truncation_note(len(edges), _EDGES_PER_RELATION)
+            if note:
+                lines.append(note)
             lines.append("")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return _write(path, "\n".join(lines) + "\n")
 
 
-def _write(path: Path, content: str) -> None:
+def _write(path: Path, content: str) -> int:
+    """Write a global index page; 1 if it changed on disk, 0 if identical."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    return 1 if write_text_if_changed(path, content) else 0

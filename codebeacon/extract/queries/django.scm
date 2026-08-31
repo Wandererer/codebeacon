@@ -129,6 +129,19 @@
   name: (aliased_import name: (dotted_name) @import.item)
 ) @import.from_item
 
+; A plain `import x` and an aliased `import x as y` are different node
+; shapes. The wildcard captured the WHOLE aliased_import, so the emitted
+; target was the literal string "widget as w" — matching no node label, which
+; dropped the import edge entirely rather than merely mislabelling it.
+; Capturing the dotted_name in both shapes mirrors how the from-import case
+; above already handles its alias.
+
 (import_statement
-  name: _ @import.path
+  name: (dotted_name) @import.path
+) @import.plain
+
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.path
+  )
 ) @import.plain

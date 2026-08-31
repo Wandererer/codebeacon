@@ -18,6 +18,7 @@ from codebeacon.knowledge.generator import build_knowledge_map, KnowledgeResult
 from codebeacon.knowledge.link import (
     LinkResult,
     link_knowledge_to_graph,
+    reapply_knowledge,
     resolve_beacon_dir,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "KnowledgeResult",
     "LinkResult",
     "link_knowledge_to_graph",
+    "reapply_knowledge",
     "resolve_beacon_dir",
 ]

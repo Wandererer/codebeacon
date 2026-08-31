@@ -310,12 +310,17 @@ class TestBHG1BindingProjectAffinity:
             project=_project("billing", "aspnet", path="/repo/billing", language="csharp"),
             services=[_svc("Logger", "/repo/billing/Logger.cs", framework="aspnet")],
         )
+        # 0.7.1 (G-0921-4): the registration source is a distinct Startup node.
+        # The old fixture registered from "Startup.cs::Logger", which remapped
+        # onto the impl itself and pinned a self-loop — now dropped by design.
         shipping = WaveResult(
             project=_project("shipping", "aspnet", path="/repo/shipping", language="csharp"),
             services=[_svc("Logger", "/repo/shipping/Services/Logger.cs",
-                           framework="aspnet", implements=["ILogger"])],
+                           framework="aspnet", implements=["ILogger"]),
+                      _svc("Startup", "/repo/shipping/Startup.cs",
+                           framework="aspnet")],
             unresolved=[UnresolvedRef(
-                source_node_id="/repo/shipping/Startup.cs::Logger",
+                source_node_id="/repo/shipping/Startup.cs::Startup",
                 ref_type="bind", ref_name="ILogger", framework="aspnet",
             )],
         )
@@ -345,7 +350,7 @@ class TestBHG1BindingProjectAffinity:
             return sorted((s, t) for s, t, d in g.edges(data=True)
                           if d.get("relation") == "injects")
 
-        assert injects(g1) == injects(g2) == [("shipping::Logger", "shipping::Logger")]
+        assert injects(g1) == injects(g2) == [("shipping::Startup", "shipping::Logger")]
 
     def test_equidistant_registration_tie_broken_by_sorted_id(self):
         """BH-G1 ruling: when the DI registration file is EQUIDISTANT from two

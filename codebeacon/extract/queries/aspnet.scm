@@ -109,14 +109,60 @@
   )
 ) @route.minimal_api
 
-; ── Service class implementing interface ──────────────────────────────────────
+; ── Service classes ───────────────────────────────────────────────────────────
+;
+; EVERY class is a node. The only service pattern used to require a base_list,
+; so a class that implements nothing — BaseService, Startup, a C# 12
+; primary-constructor service, either half of a partial class — never entered
+; the graph at all. That was the precondition blocking everything below: DI
+; cannot resolve onto a node that does not exist. Matches the treatment
+; laravel.scm and rails.scm already give their languages.
 
 (class_declaration
   name: (identifier) @service.class_name
-  (base_list
-    (identifier) @service.interface
-  )
 ) @service.class
+
+; Base-list entries, one match each — `class A : BaseA, IFoo, IBar` yields
+; three. Capturing only the first entry (and calling it an interface) both lost
+; the rest and mislabelled a base CLASS as an implemented interface;
+; services.py classifies each entry instead.
+(class_declaration
+  name: (identifier) @service.base_class_name
+  (base_list
+    [
+      (identifier) @service.base
+      (qualified_name name: (identifier) @service.base)
+      (generic_name (identifier) @service.base)
+    ]
+  )
+) @service.class_with_base
+
+; ── DI — constructor injection ────────────────────────────────────────────────
+; Mirrors spring_boot.scm's di.constructor. ASP.NET Core's primary DI mechanism
+; had NO pattern at all: a textbook `public UserService(IRepo repo)` yielded an
+; empty dependency list.
+
+(constructor_declaration
+  parameters: (parameter_list
+    (parameter
+      type: _ @di.ctor_param_type
+      name: (identifier) @di.ctor_param_name
+    )
+  )
+) @di.constructor
+
+; C# 12 primary constructor: `public class OrderService(IRepo repo)`. The
+; parameter_list is a direct child of the class_declaration, so this cannot
+; reach a nested method's parameters.
+(class_declaration
+  name: (identifier) @service.class_name
+  (parameter_list
+    (parameter
+      type: _ @di.ctor_param_type
+      name: (identifier) @di.ctor_param_name
+    )
+  )
+) @di.primary_constructor
 
 ; ── DI registration: builder.Services.AddScoped<IFoo, FooImpl>() ─────────────
 
@@ -130,14 +176,27 @@
 
 ; Generic DI: builder.Services.AddScoped<IFoo, FooImpl>() — the AddScoped<...>
 ; is a generic_name in the `name:` field of the callee member_access_expression.
+; Both type arguments accept a namespace-qualified name (Abc.IMailer) and a
+; generic one (IRepo<User>); an identifier-only list captured neither, so those
+; registrations were silently unregistered. Single-argument self-registrations
+; (AddSingleton<IRepo>()) are deliberately not matched: they name no
+; implementation, so there is no interface→impl edge to record.
 (invocation_expression
   function: (member_access_expression
     name: (generic_name
       (identifier) @_scope
       (#match? @_scope "^(AddScoped|AddSingleton|AddTransient)$")
       (type_argument_list
-        (identifier) @di.service_type
-        (identifier) @di.impl_type
+        [
+          (identifier)
+          (qualified_name)
+          (generic_name)
+        ] @di.service_type
+        [
+          (identifier)
+          (qualified_name)
+          (generic_name)
+        ] @di.impl_type
       )
     )
   )
