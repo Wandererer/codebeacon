@@ -50,7 +50,7 @@ java    = ["tree-sitter-java>=0.23,<0.24"]
 kotlin  = ["tree-sitter-kotlin>=0.23,<1.2"]
 go      = ["tree-sitter-go>=0.23,<0.26"]
 ruby    = ["tree-sitter-ruby>=0.23,<0.24"]
-php     = ["tree-sitter-php>=0.23,<0.25"]
+php     = ["tree-sitter-php>=0.23,<0.26"]
 csharp  = ["tree-sitter-c-sharp>=0.23,<0.24"]
 rust    = ["tree-sitter-rust>=0.23,<0.25"]
 swift   = ["tree-sitter-swift>=0.0.1,<0.8"]
@@ -84,7 +84,7 @@ backend = [
     "tree-sitter-kotlin>=0.23,<1.2",
     "tree-sitter-go>=0.23,<0.26",
     "tree-sitter-ruby>=0.23,<0.24",
-    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-php>=0.23,<0.26",
     "tree-sitter-c-sharp>=0.23,<0.24",
     "tree-sitter-rust>=0.23,<0.25",
 ]
@@ -93,7 +93,7 @@ full    = [
     "tree-sitter-kotlin>=0.23,<1.2",
     "tree-sitter-go>=0.23,<0.26",
     "tree-sitter-ruby>=0.23,<0.24",
-    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-php>=0.23,<0.26",
     "tree-sitter-c-sharp>=0.23,<0.24",
     "tree-sitter-rust>=0.23,<0.25",
     "tree-sitter-swift>=0.0.1,<0.8",
@@ -113,7 +113,7 @@ dev     = [
     "tree-sitter-kotlin>=0.23,<1.2",
     "tree-sitter-go>=0.23,<0.26",
     "tree-sitter-ruby>=0.23,<0.24",
-    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-php>=0.23,<0.26",
     "tree-sitter-c-sharp>=0.23,<0.24",
     "tree-sitter-rust>=0.23,<0.25",
     "tree-sitter-swift>=0.0.1,<0.8",
